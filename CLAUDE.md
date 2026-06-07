@@ -21,6 +21,10 @@ bathymetry-regrid --config example_northsea.yaml --dryrun
 bathymetry-regrid --config example_northsea.yaml --accept-fixes
 bathymetry-regrid --config example_northsea.yaml --fixes-file report/my/fixes_suggested.yaml
 
+# Equidistant cells: provide dlat, let dlon be computed from cos(lat_center)
+# e.g. dlat=0.05° at 55°N → dlon≈0.0872°, grid 172×200 instead of 300×200
+bathymetry-regrid --config example_northsea.yaml --dlat 0.05 --equidistant
+
 # Run directly (no install needed if lib/ is on sys.path)
 python cli/regrid.py --config example_northsea.yaml
 ```
@@ -73,6 +77,20 @@ or `--fixes-file <path>` (explicit). No manual copy-paste needed.
 - Non-zero `rotation_deg` → corner arrays become 2-D; handled by ESMF and plotly.
 - All Cartopy inset plots use `_inset_gridlines(ax, extent)` — auto-picks tick
   spacing (0.5° / 1° / 2° / 5° / 10°) from the extent span.
+
+### Equidistant spherical grids (`--equidistant` / `grid.equidistant: true`)
+
+Provide one of `dlat` or `dlon`; the other is computed as:
+
+```
+dlon = dlat / cos(lat_center)    # given dlat → wider lon spacing at high latitudes
+dlat = dlon * cos(lat_center)    # given dlon → narrower lat spacing
+```
+
+where `lat_center = (lat_min + lat_max) / 2`.  This makes E-W and N-S physical
+cell sizes approximately equal.  `nx = round((lon_max - lon_min) / dlon)` is
+smaller than for a naive equal-degree grid — the startup message shows the
+resulting dimensions so the user can confirm before the run proceeds.
 
 ### Report / plot helpers (lib/report.py)
 
