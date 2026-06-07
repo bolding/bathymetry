@@ -123,13 +123,15 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
             if val is None:
                 raise ValueError(f"Missing required grid parameter: {name}")
         if equidist:
-            if dlon is None and dlat is None:
-                raise ValueError("--equidistant requires at least one of --dlon / --dlat")
+            if dlat is None and dlon is None:
+                raise ValueError("--equidistant requires dlat (or dlon) to be set")
             lat_center = (float(lat_min) + float(lat_max)) / 2.0
             cos_lat = math.cos(math.radians(lat_center))
-            if dlon is None:
+            if dlat is not None:
+                # dlat is the authoritative spacing; always derive dlon
                 dlon = round(float(dlat) / cos_lat, 6)
-            elif dlat is None:
+            else:
+                # only dlon given — derive dlat
                 dlat = round(float(dlon) * cos_lat, 6)
             nx_eq = round((float(lon_max) - float(lon_min)) / float(dlon))
             ny_eq = round((float(lat_max) - float(lat_min)) / float(dlat))
