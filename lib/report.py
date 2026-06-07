@@ -213,6 +213,35 @@ def _apply_gridlines(ax) -> None:
     gl.right_labels = False
 
 
+def _inset_gridlines(ax, extent: tuple) -> None:
+    """Add labelled gridlines to a small inset Cartopy axes.
+
+    Tick spacing is chosen automatically from the extent span so that the
+    inset is neither over-ticked nor under-ticked regardless of domain size.
+    """
+    import matplotlib.ticker as mticker
+
+    lon_min, lon_max, lat_min, lat_max = extent
+
+    def _step(span: float) -> float:
+        if span > 20: return 10.0
+        if span > 10: return 5.0
+        if span >  5: return 2.0
+        if span >  2: return 1.0
+        return 0.5
+
+    dlon = _step(lon_max - lon_min)
+    dlat = _step(lat_max - lat_min)
+
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="grey", alpha=0.6)
+    gl.top_labels   = False
+    gl.right_labels = False
+    gl.xlocator     = mticker.MultipleLocator(dlon)
+    gl.ylocator     = mticker.MultipleLocator(dlat)
+    gl.xlabel_style = {"size": 6}
+    gl.ylabel_style = {"size": 6}
+
+
 def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
     """Add a colorbar that stays aligned with the cartopy axes."""
     fig.colorbar(pcm, ax=ax, label=label, fraction=0.03, pad=0.04, aspect=30)
@@ -387,18 +416,17 @@ def plot_section_profile(
 
             ax_ins = fig.add_axes([0.63, 0.50, 0.33, 0.42],
                                   projection=ccrs.PlateCarree())
-            ax_ins.set_extent(
+            extent = (
                 list(inset_bounds) if inset_bounds else
-                [inset_lon - 8, inset_lon + 8, inset_lat - 5, inset_lat + 5],
-                crs=ccrs.PlateCarree(),
+                [inset_lon - 8, inset_lon + 8, inset_lat - 5, inset_lat + 5]
             )
+            ax_ins.set_extent(extent, crs=ccrs.PlateCarree())
             ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)
             ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
             ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=2)
             ax_ins.plot(inset_lon, inset_lat, "r+", markersize=10, markeredgewidth=2,
                         transform=ccrs.PlateCarree(), zorder=3)
-            gl = ax_ins.gridlines(linewidth=0.3, color="grey")
-            gl.top_labels = gl.right_labels = gl.left_labels = gl.bottom_labels = False
+            _inset_gridlines(ax_ins, extent)
             ax_ins.set_title("section location", fontsize=7, pad=2)
         except ImportError:
             pass
@@ -486,6 +514,10 @@ def plot_straits(
                  lat_min - pad_lat, lat_max + pad_lat],
                 crs=ccrs.PlateCarree(),
             )
+            ins_extent = (
+                lon_min - pad_lon, lon_max + pad_lon,
+                lat_min - pad_lat, lat_max + pad_lat,
+            )
             ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)
             ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
             ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)
@@ -496,8 +528,7 @@ def plot_straits(
                 transform=ccrs.PlateCarree(),
             )
             ax_ins.add_patch(rect)
-            gl = ax_ins.gridlines(linewidth=0.2, color="grey")
-            gl.top_labels = gl.right_labels = gl.left_labels = gl.bottom_labels = False
+            _inset_gridlines(ax_ins, ins_extent)
             ax_ins.set_title("domain", fontsize=7, pad=2)
         except ImportError:
             fig.tight_layout()
