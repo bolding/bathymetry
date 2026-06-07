@@ -99,6 +99,44 @@ bathymetry-regrid \
     --report-dir ./report/northsea/
 ```
 
+### Equidistant spherical grid
+
+By default `dlon` and `dlat` are both in degrees, so cells become narrower
+towards the poles.  Use `--equidistant` to compute `dlon` automatically from
+`dlat` and the central latitude, giving approximately square cells in physical
+distance:
+
+```bash
+bathymetry-regrid \
+    --source /server/data/GEBCO/GEBCO_2023.nc \
+    --name northsea_equidist \
+    --grid spherical \
+    --lon-min 0 --lon-max 15 --lat-min 50 --lat-max 60 \
+    --dlat 0.05 --equidistant \
+    --min-depth 2 --output northsea.nc
+```
+
+At a central latitude of 55 °N, `cos(55°) ≈ 0.574`, so `dlon ≈ 0.05 / 0.574 ≈ 0.0872°`.
+The grid will have fewer longitude points than latitude points (≈ 172 × 200 instead of
+300 × 200 for `dlon = dlat = 0.05°`).  The computed values are printed at startup:
+
+```
+[equidistant] lat_center=55.00°  dlon=0.087126°  dlat=0.05°  → grid 172 × 200 (lon × lat)
+```
+
+In YAML:
+
+```yaml
+grid:
+  type: spherical
+  lon_min: 0.0
+  lon_max: 15.0
+  lat_min: 50.0
+  lat_max: 60.0
+  dlat: 0.05          # dlon is computed automatically
+  equidistant: true
+```
+
 ### Rotated spherical grid
 
 ```bash
