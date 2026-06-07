@@ -14,8 +14,9 @@ Example YAML (``north_sea.yaml``)::
       lon_max: 10.0
       lat_min: 50.0
       lat_max: 60.0
-      dlon: 0.05
-      dlat: 0.05
+      dlon: 0.05        # omit dlon (or dlat) and set equidistant: true
+      dlat: 0.05        # to compute the missing spacing from the central latitude
+      equidistant: false  # true → dlon = dlat / cos(lat_center) for square cells
       rotation: 0.0
 
     regridding:
@@ -54,6 +55,7 @@ Or override individual options::
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -115,11 +117,29 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
         dlon    = _merge(args.dlon,    cfg, "grid", "dlon")
         dlat    = _merge(args.dlat,    cfg, "grid", "dlat")
         rot     = _merge(args.rotation, cfg, "grid", "rotation", default=0.0)
+        equidist = _merge(args.equidistant, cfg, "grid", "equidistant", default=False)
         for name, val in [("lon-min", lon_min), ("lon-max", lon_max),
-                          ("lat-min", lat_min), ("lat-max", lat_max),
-                          ("dlon", dlon), ("dlat", dlat)]:
+                          ("lat-min", lat_min), ("lat-max", lat_max)]:
             if val is None:
                 raise ValueError(f"Missing required grid parameter: {name}")
+        if equidist:
+            if dlon is None and dlat is None:
+                raise ValueError("--equidistant requires at least one of --dlon / --dlat")
+            lat_center = (float(lat_min) + float(lat_max)) / 2.0
+            cos_lat = math.cos(math.radians(lat_center))
+            if dlon is None:
+                dlon = round(float(dlat) / cos_lat, 6)
+            elif dlat is None:
+                dlat = round(float(dlon) * cos_lat, 6)
+            nx_eq = round((float(lon_max) - float(lon_min)) / float(dlon))
+            ny_eq = round((float(lat_max) - float(lat_min)) / float(dlat))
+            print(f"      [equidistant] lat_center={lat_center:.2f}°  "
+                  f"dlon={float(dlon):.6g}°  dlat={float(dlat):.6g}°  "
+                  f"→ grid {nx_eq} × {ny_eq} (lon × lat)")
+        else:
+            for name, val in [("dlon", dlon), ("dlat", dlat)]:
+                if val is None:
+                    raise ValueError(f"Missing required grid parameter: {name}")
         return gridmod.SphericalGrid(lon_min, lon_max, lat_min, lat_max,
                                      float(dlon), float(dlat), float(rot))
 
@@ -162,7 +182,6 @@ def _plot_subtitle(dst_grid, dst) -> str:
     Line 2: resolution in degrees and approximate km (km varies with latitude
              for spherical grids, so Δx is given as a min–max range).
     """
-    import math
     import xarray as xr
 
     mask = dst["mask"].values.astype(bool)
@@ -244,6 +263,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     sph.add_argument("--lat-max", type=float, default=None)
     sph.add_argument("--dlon", type=float, default=None)
     sph.add_argument("--dlat", type=float, default=None)
+    sph.add_argument("--equidistant", action="store_true", default=None,
+                     help="Compute the missing dlon (or dlat) from the other using the "
+                          "central latitude so that grid cells are approximately square "
+                          "in physical distance.  Specify exactly one of --dlon / --dlat.")
 
     crt = parser.add_argument_group("Cartesian grid")
     crt.add_argument("--x-min", type=float, default=None, dest="x_min")

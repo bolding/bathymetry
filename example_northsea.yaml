@@ -20,6 +20,9 @@ grid:
   lat_max: 60.0
   dlon: 0.05
   dlat: 0.05
+  # equidistant: true   # omit dlon (keep dlat) to compute dlon = dlat / cos(lat_center)
+  #                     # so cells are approximately square in physical distance;
+  #                     # this reduces the number of longitude grid points
   rotation: 0.0     # degrees CCW; non-zero produces a rotated curvilinear grid
 
 regridding:
@@ -40,8 +43,8 @@ output:
   file: bathymetry_northsea.nc
   report_dir: ./report/northsea
 
-# Fixes: paste entries from report/northsea/fixes_suggested.yaml after reviewing.
-# Available actions: set_depth, open_cell, close_cell
+# Fixes: re-run with --accept-fixes to apply all suggestions automatically,
+# or paste selected entries here.  Available actions: set_depth, open_cell, close_cell
 # fixes:
 #   - lon: 5.3
 #     lat: 55.7
