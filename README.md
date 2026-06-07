@@ -49,7 +49,6 @@ bathymetry-regrid --help
 | xesmf ≥ 0.9 | Conservative regridding (wraps ESMF) | conda |
 | esmpy ≥ 8.9 | ESMF backend (pulled in by xesmf) | conda |
 | plotly | Interactive / zoomable HTML figures | pip |
-| tqdm | Progress bars | pip |
 | pyyaml | YAML configuration files | pip |
 | rioxarray | EMODnet GeoTIFF reading (optional) | conda / pip |
 
@@ -160,7 +159,9 @@ output:
   file: northsea_0p05deg.nc
   report_dir: ./report/northsea_0p05deg
 
-# Paste entries from report/…/fixes_suggested.yaml after reviewing.
+# After the first run, re-run with --accept-fixes to apply all suggested fixes,
+# or --fixes-file <path> for an explicit fixes file.
+# To hand-pick fixes, paste selected entries here.
 # Actions: set_depth, open_cell, close_cell
 # fixes:
 #   - lon: 5.3
@@ -232,7 +233,7 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `{name}_04a_straits.png/.html` | Strait analysis map (interactive) |
 | `{name}_04a_straits.csv` | Flagged interface table |
 | `{name}_04a_section_*.png` | Cross-section profiles with map inset |
-| `{name}_fixes_suggested.yaml` | Paste-ready YAML for adopting strait fixes |
+| `{name}_fixes_suggested.yaml` | Suggested strait fixes, grouped by cause (BLOCKED / SILL_DEFICIT / AREA_DEFICIT) |
 | `{name}_04c_mask_regions.png` | Depth after explicit masking (if used) |
 | `{name}_04d_basins.png` | Connected basin map (kept=blue, removed=red) |
 | `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
@@ -247,8 +248,10 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `AREA_DEFICIT` | Cross-sectional area under-represented — transport too weak | Widen or deepen at the interface |
 | `BLOCKED` | No wet fine-resolution path between two wet coarse cells | `open_cell` on the blocking point |
 
-Suggested fixes are written to `fixes_suggested.yaml`.  Copy relevant entries
-into the `fixes:` section of your YAML config and rerun.
+Suggested fixes are written to `fixes_suggested.yaml`, grouped by cause.
+On the next run, load them automatically with `--accept-fixes` (reads from the
+report directory) or `--fixes-file <path>` for an explicit path.  You can also
+paste selected entries into the `fixes:` section of your YAML config.
 
 ## Grid types
 

@@ -161,39 +161,55 @@ def save_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
 
 
 def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
-    """Write suggested fixes as a YAML snippet ready to paste into config."""
-    import yaml
-
+    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fixes = []
+
+    # Build per-category lists in priority order
+    groups: dict[str, list[dict]] = {"BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": []}
     for r in records:
-        if r["category"] == "BLOCKED":
-            fixes.append({"lon": r["lon"], "lat": r["lat"],
-                          "action": "open_cell", "depth": r["sill_depth_fine"],
-                          "_note": "BLOCKED — no fine wet path"})
-        elif r["category"] == "SILL_DEFICIT":
-            fixes.append({"lon": r["lon"], "lat": r["lat"],
-                          "action": "set_depth", "value": r["sill_depth_fine"],
-                          "_note": f"SILL_DEFICIT — sill_ratio={r['sill_ratio']}"})
-        elif r["category"] == "AREA_DEFICIT":
-            fixes.append({"lon": r["lon"], "lat": r["lat"],
-                          "action": "set_depth",
-                          "value": round(r["sill_depth_fine"] * 0.9, 1),
-                          "_note": f"AREA_DEFICIT — area_ratio={r['area_ratio']}"})
+        cat = r["category"]
+        if cat == "BLOCKED":
+            groups["BLOCKED"].append({"lon": r["lon"], "lat": r["lat"],
+                                      "action": "open_cell", "depth": r["sill_depth_fine"],
+                                      "_note": "BLOCKED — no fine wet path"})
+        elif cat == "SILL_DEFICIT":
+            groups["SILL_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
+                                           "action": "set_depth", "value": r["sill_depth_fine"],
+                                           "_note": f"SILL_DEFICIT — sill_ratio={r['sill_ratio']}"})
+        elif cat == "AREA_DEFICIT":
+            groups["AREA_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
+                                           "action": "set_depth",
+                                           "value": round(r["sill_depth_fine"] * 0.9, 1),
+                                           "_note": f"AREA_DEFICIT — area_ratio={r['area_ratio']}"})
+
+    def _write_fix(fh, fix: dict) -> None:
+        fh.write(f"  - lon: {fix['lon']}\n")
+        fh.write(f"    lat: {fix['lat']}\n")
+        fh.write(f"    action: {fix['action']}\n")
+        if "value" in fix:
+            fh.write(f"    value: {fix['value']}\n")
+        if "depth" in fix:
+            fh.write(f"    depth: {fix['depth']}\n")
+        fh.write(f"    # {fix['_note']}\n")
+
+    category_desc = {
+        "BLOCKED":      "No fine wet path — open_cell to reconnect",
+        "SILL_DEFICIT": "Coarse sill too shallow — set_depth to fine-grid sill",
+        "AREA_DEFICIT": "Cross-section under-represented — deepen to improve transport",
+    }
+
     with open(path, "w") as fh:
-        fh.write("# Suggested fixes — review, edit, and paste into your YAML config\n")
-        fh.write("# under the 'fixes:' key.  Remove '_note' lines before running.\n\n")
+        fh.write("# Suggested fixes — re-run with --accept-fixes to apply all,\n")
+        fh.write("# or paste selected entries into the 'fixes:' section of your config.\n")
+        fh.write("# '_note' lines are ignored by the loader; no need to remove them.\n\n")
         fh.write("fixes:\n")
-        for fix in fixes:
-            fh.write(f"  - lon: {fix['lon']}\n")
-            fh.write(f"    lat: {fix['lat']}\n")
-            fh.write(f"    action: {fix['action']}\n")
-            if "value" in fix:
-                fh.write(f"    value: {fix['value']}\n")
-            if "depth" in fix:
-                fh.write(f"    depth: {fix['depth']}\n")
-            fh.write(f"    # {fix['_note']}\n")
+        for cat, fixes in groups.items():
+            if not fixes:
+                continue
+            fh.write(f"\n  # --- {cat}: {category_desc[cat]} ({len(fixes)} interface(s)) ---\n")
+            for fix in fixes:
+                _write_fix(fh, fix)
 
 
 # ---------------------------------------------------------------------------
