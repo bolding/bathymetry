@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.egg-info/
+regrid_weights/
+report/
+*.nc
