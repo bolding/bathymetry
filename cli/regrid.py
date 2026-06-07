@@ -36,7 +36,7 @@ Example YAML (``north_sea.yaml``)::
       file: bathy_northsea.nc
       report_dir: ./report/northsea
 
-    fixes:             # paste from fixes_suggested.yaml after reviewing
+    fixes:             # optional: embed fixes here, or use --accept-fixes / --fixes-file
       - lon: 5.3
         lat: 55.7
         action: set_depth
@@ -72,28 +72,6 @@ import interpolate
 import reader
 import report
 import smooth as smoothmod
-
-# ---------------------------------------------------------------------------
-# Progress bar helper (tqdm with graceful fallback)
-# ---------------------------------------------------------------------------
-
-try:
-    from tqdm import tqdm as _tqdm
-
-    def pbar(iterable=None, *, desc="", total=None, unit="it", leave=True):
-        return _tqdm(iterable, desc=desc, total=total, unit=unit, leave=leave,
-                     dynamic_ncols=True)
-
-except ImportError:
-    import contextlib
-
-    @contextlib.contextmanager  # type: ignore[misc]
-    def pbar(iterable=None, *, desc="", total=None, unit="it", leave=True):  # type: ignore[misc]
-        if iterable is not None:
-            yield iterable
-        else:
-            yield None
-
 
 # ---------------------------------------------------------------------------
 # YAML config loading and merge
@@ -298,6 +276,17 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     sm.add_argument("--smooth-rx0", type=float, default=None,
                     help="Target rx0 (omit to skip smoothing).")
 
+    # Fixes
+    fx = parser.add_argument_group("Fixes")
+    fx.add_argument("--fixes-file", default=None, metavar="FILE",
+                    help="YAML file containing a 'fixes:' list to apply "
+                         "(e.g. the generated fixes_suggested.yaml). "
+                         "Merged with any 'fixes:' already in the config.")
+    fx.add_argument("--accept-fixes", action="store_true",
+                    help="Automatically load fixes_suggested.yaml from the "
+                         "report directory (equivalent to "
+                         "--fixes-file <report_dir>/fixes_suggested.yaml).")
+
     # Output
     out = parser.add_argument_group("Output")
     out.add_argument("--name", default=None,
@@ -329,7 +318,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     area_thr      = _merge(args.area_ratio_threshold, cfg, "analysis", "area_ratio_threshold",
                            default=0.5)
     rx0           = _merge(args.smooth_rx0,   cfg, "smooth", "rx0")   # None = skip
-    fixes_list    = _nested_get(cfg, "fixes") or []
+    fixes_list    = list(_nested_get(cfg, "fixes") or [])
 
     if source is None:
         parser.error("--source (or 'source:' in YAML) is required")
@@ -350,6 +339,17 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                          default=f"./report/{name}")
 
     os.makedirs(report_dir, exist_ok=True)
+
+    # Load extra fixes from --fixes-file or --accept-fixes
+    fixes_file = args.fixes_file
+    if not fixes_file and args.accept_fixes:
+        fixes_file = os.path.join(report_dir, "fixes_suggested.yaml")
+    if fixes_file:
+        if not os.path.exists(fixes_file):
+            parser.error(f"fixes file not found: {fixes_file}")
+        extra = _load_yaml(fixes_file).get("fixes") or []
+        fixes_list = fixes_list + extra
+        print(f"Loaded {len(extra)} fix(es) from {fixes_file}")
 
     # Title for the Markdown report
     rpt_title = (
@@ -406,7 +406,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     # Step 3 – ESMF conservative interpolation
     # ------------------------------------------------------------------
-    print("\n[3/6] Conservative regridding (xESMF) …")
+    print("\n[3/6] Conservative regridding (xESMF) …  (may take a minute for large grids)")
     t0 = time.time()
     dst = interpolate.regrid(
         src, dst_grid,
@@ -452,10 +452,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     print("\n[4a/6] Detecting narrow straits …")
     t0 = time.time()
 
-    # Wrap the inner loops in tqdm
-    strait_records = _find_straits_with_progress(
+    strait_records = analysis.find_straits(
         src, dst, dst_grid,
-        wf_thr=float(wf_thr), sill_thr=float(sill_thr), area_thr=float(area_thr),
+        wet_frac_threshold=float(wf_thr),
+        sill_ratio_threshold=float(sill_thr),
+        area_ratio_threshold=float(area_thr),
     )
 
     strait_sum = analysis.strait_summary(strait_records)
@@ -512,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     if strait_sum.get("BLOCKED", 0):
         warn_msgs.append(
             f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
-            "Review `fixes_suggested.yaml` and add entries to the `fixes:` section of your config."
+            "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
         )
     if strait_sum.get("SILL_DEFICIT", 0):
         warn_msgs.append(
@@ -745,78 +746,5 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
 
 # ---------------------------------------------------------------------------
-# Strait detection with tqdm progress bar
-# ---------------------------------------------------------------------------
-
-def _find_straits_with_progress(
-    src, dst, dst_grid,
-    wf_thr: float, sill_thr: float, area_thr: float,
-) -> list[dict]:
-    """Run find_straits with a progress bar over coarse cell interfaces."""
-    from grid import SphericalGrid
-
-    if not isinstance(dst_grid, SphericalGrid) or dst_grid.rotation_deg != 0.0:
-        return analysis.find_straits(src, dst, dst_grid,
-                                     wet_frac_threshold=wf_thr,
-                                     sill_ratio_threshold=sill_thr,
-                                     area_ratio_threshold=area_thr)
-
-    import warnings
-    mask = dst["mask"].values.astype(bool)
-    depth_dst = np.where(mask, dst["depth"].values, 0.0)
-    wf = dst["wet_fraction"].values
-    src_lon = src.lon.values
-    src_lat = src.lat.values
-    src_depth = np.where(src["land"].values, 0.0, src["depth"].values)
-    dlon_src = float(np.diff(src_lon).mean())
-    dlat_src = float(np.diff(src_lat).mean())
-    ny_dst, nx_dst = mask.shape
-
-    # Total interfaces to scan
-    n_u = int((mask[:, :-1] & mask[:, 1:]).sum())
-    n_v = int((mask[:-1, :] & mask[1:, :]).sum())
-    total = n_u + n_v
-
-    records: list[dict] = []
-    with pbar(total=total, desc="  Strait scan", unit="iface") as bar:
-        for i in range(ny_dst):
-            for j in range(nx_dst - 1):
-                if not (mask[i, j] and mask[i, j + 1]):
-                    continue
-                if wf[i, j] >= wf_thr and wf[i, j + 1] >= wf_thr:
-                    bar.update(1)
-                    continue
-                from analysis import _analyse_u_interface
-                rec = _analyse_u_interface(
-                    i, j, src_lon, src_lat, src_depth, dlon_src, dlat_src,
-                    dst_grid, depth_dst,
-                    dlon_src / dst_grid.dlon, dlat_src / dst_grid.dlat,
-                    2.0, sill_thr, area_thr,
-                )
-                if rec:
-                    records.append(rec)
-                bar.update(1)
-
-        for i in range(ny_dst - 1):
-            for j in range(nx_dst):
-                if not (mask[i, j] and mask[i + 1, j]):
-                    continue
-                if wf[i, j] >= wf_thr and wf[i + 1, j] >= wf_thr:
-                    bar.update(1)
-                    continue
-                from analysis import _analyse_v_interface
-                rec = _analyse_v_interface(
-                    i, j, src_lon, src_lat, src_depth, dlon_src, dlat_src,
-                    dst_grid, depth_dst,
-                    dlon_src / dst_grid.dlon, dlat_src / dst_grid.dlat,
-                    2.0, sill_thr, area_thr,
-                )
-                if rec:
-                    records.append(rec)
-                bar.update(1)
-
-    return records
-
-
 if __name__ == "__main__":
     main()
