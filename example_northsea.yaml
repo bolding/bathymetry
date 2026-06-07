@@ -1,0 +1,71 @@
+# Example configuration for a North Sea bathymetry run.
+# Run with: bathymetry-regrid --config example_northsea.yaml
+# Override individual settings on the command line, e.g.:
+#   bathymetry-regrid --config example_northsea.yaml --smooth-rx0 0.15
+
+# Short identifier used in all output file names:
+#   output NetCDF  → northsea_0p05deg.nc
+#   report dir     → ./report/northsea_0p05deg/
+#   figures        → northsea_0p05deg_02_source_depth.png, etc.
+name: northsea_0p05deg
+
+source: /server/data/GEBCO/GEBCO_2023.nc
+pad_deg: 1.0
+
+grid:
+  type: spherical
+  lon_min: 0.0
+  lon_max: 15.0
+  lat_min: 50.0
+  lat_max: 60.0
+  dlon: 0.05
+  dlat: 0.05
+  rotation: 0.0     # degrees CCW; non-zero produces a rotated curvilinear grid
+
+regridding:
+  cache_dir: ./regrid_weights
+  min_depth: 2.0    # minimum depth for wet cells (m)
+  min_wet_fraction: 0.05
+
+analysis:
+  nkeep_basins: 1           # keep only the largest connected ocean basin
+  wet_frac_threshold: 0.3   # inspect interfaces where wet_frac < this
+  sill_ratio_threshold: 0.7 # flag if sill_depth_fine / sill_depth_coarse < this
+  area_ratio_threshold: 0.5 # flag if section_area_fine / section_area_coarse < this
+
+smooth:
+  rx0: 0.2    # target Haney slope factor; set to null or remove to skip smoothing
+
+output:
+  file: bathymetry_northsea.nc
+  report_dir: ./report/northsea
+
+# Fixes: paste entries from report/northsea/fixes_suggested.yaml after reviewing.
+# Available actions: set_depth, open_cell, close_cell
+# fixes:
+#   - lon: 5.3
+#     lat: 55.7
+#     action: set_depth
+#     value: 22.0   # depth in metres
+
+# Explicit mask regions: force wet cells to land after regridding.
+# Applied at step 4d — after isolation masking, before rx0 smoothing.
+# Supported types: rectangle, polygon, point.
+# mask_regions:
+#   - type: rectangle
+#     lon_min: 9.0
+#     lon_max: 10.5
+#     lat_min: 54.5
+#     lat_max: 55.5
+#     name: Kiel Bight
+#   - type: polygon
+#     name: Custom enclosed bay
+#     vertices:        # list of [lon, lat] corner pairs
+#       - [10.0, 55.0]
+#       - [11.0, 55.5]
+#       - [11.5, 54.5]
+#       - [10.0, 54.0]
+#   - type: point
+#     lon: 8.5
+#     lat: 54.8
+#     name: Isolated tidal pool

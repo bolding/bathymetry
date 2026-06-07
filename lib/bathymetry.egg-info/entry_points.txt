@@ -1,0 +1,2 @@
+[console_scripts]
+bathymetry-regrid = cli.regrid:main

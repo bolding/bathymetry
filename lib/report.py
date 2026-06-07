@@ -1,0 +1,738 @@
+"""Reporting helpers: Markdown reports, ASCII/CSV tables, static and interactive plots.
+
+Static figures (PNG) use cartopy.  Interactive/zoomable figures (HTML) use
+plotly and are written alongside the PNG with the same stem.
+
+Cartopy gridlines are always drawn with labels on the left and bottom axes
+only.  Colorbars are placed with a fixed fraction/pad so they stay aligned
+with the axes regardless of the map aspect ratio.
+"""
+
+from __future__ import annotations
+
+import csv
+import datetime
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+import numpy as np
+import numpy.typing as npt
+
+# ---------------------------------------------------------------------------
+# Colourmap helpers (cmocean preferred, matplotlib fallback)
+# ---------------------------------------------------------------------------
+
+try:
+    import cmocean.cm as _cmo
+    _CM_DEPTH     = _cmo.deep_r   # shallow → light, deep → dark
+    _CM_FRACTION  = _cmo.amp      # 0 → white, 1 → dark orange
+    _CM_BALANCE   = _cmo.balance  # diverging around zero
+    _CM_AMP       = _cmo.amp      # absolute magnitude
+except ImportError:
+    _CM_DEPTH    = "Blues_r"
+    _CM_FRACTION = "YlOrRd"
+    _CM_BALANCE  = "RdBu_r"
+    _CM_AMP      = "OrRd"
+
+def _cm_depth():
+    """deep_r: shallow → light, deep → dark (standard oceanographic display)."""
+    return _CM_DEPTH
+
+def _cm_fraction():
+    """amp: 0 → white, 1 → dark orange (good for wet-fraction 0–1)."""
+    return _CM_FRACTION
+
+def _cm_correction():
+    """balance: diverging around zero for signed depth corrections."""
+    return _CM_BALANCE
+
+def _cm_amp():
+    """amp: absolute magnitudes (always positive)."""
+    return _CM_AMP
+
+def _plotly_colorscale(cmap) -> str | list:
+    """Convert a matplotlib/cmocean colormap to a plotly-compatible colorscale."""
+    try:
+        import matplotlib as mpl
+        import matplotlib.colors as mcolors
+        n = 64
+        c = mpl.colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        return [[i / (n - 1), mcolors.to_hex(c(i / (n - 1)))] for i in range(n)]
+    except Exception:
+        return "Blues_r"
+
+
+# ---------------------------------------------------------------------------
+# Markdown report accumulator
+# ---------------------------------------------------------------------------
+
+class MarkdownReport:
+    """Accumulate pipeline sections and write a single Markdown file."""
+
+    def __init__(self, title: str) -> None:
+        self.title = title
+        self._sections: list[dict] = []
+        self._created = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def add_section(
+        self,
+        heading: str,
+        text: str = "",
+        table: dict[str, Any] | None = None,
+        table_rows: list[dict[str, Any]] | None = None,
+        images: list[str] | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        self._sections.append(dict(
+            heading=heading, text=text, table=table, table_rows=table_rows,
+            images=images or [], warnings=warnings or [],
+        ))
+
+    def write(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = [
+            f"# {self.title}", "",
+            f"*Generated: {self._created}*", "",
+        ]
+        for sec in self._sections:
+            lines += [f"## {sec['heading']}", ""]
+            if sec["text"]:
+                lines += [sec["text"], ""]
+            for w in sec["warnings"]:
+                lines += [f"> ⚠ {w}", ""]
+            if sec["table"]:
+                lines += _md_kv_table(sec["table"]) + [""]
+            if sec["table_rows"]:
+                lines += _md_row_table(sec["table_rows"]) + [""]
+            for img in sec["images"]:
+                lines += [f"![{Path(img).name}]({img})", ""]
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _md_kv_table(d: dict[str, Any]) -> list[str]:
+    out = ["| Parameter | Value |", "|-----------|-------|"]
+    for k, v in d.items():
+        out.append(f"| {k} | {v} |")
+    return out
+
+
+def _md_row_table(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return []
+    hdrs = list(rows[0].keys())
+    out = [
+        "| " + " | ".join(str(h) for h in hdrs) + " |",
+        "| " + " | ".join("---" for _ in hdrs) + " |",
+    ]
+    for row in rows:
+        out.append("| " + " | ".join(str(row.get(h, "")) for h in hdrs) + " |")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ASCII / CSV tables
+# ---------------------------------------------------------------------------
+
+def summary_table(data: dict[str, Any], title: str = "") -> str:
+    lines: list[str] = []
+    if title:
+        lines += [title, "-" * max(len(title), 40)]
+    w = max((len(k) for k in data), default=20) + 2
+    for k, v in data.items():
+        lines.append(f"  {k:<{w}}: {v}")
+    return "\n".join(lines)
+
+
+def print_table(data: dict[str, Any], title: str = "") -> None:
+    print(summary_table(data, title))
+    print()
+
+
+def save_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        return
+    with open(path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
+    """Write suggested fixes as a YAML snippet ready to paste into config."""
+    import yaml
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fixes = []
+    for r in records:
+        if r["category"] == "BLOCKED":
+            fixes.append({"lon": r["lon"], "lat": r["lat"],
+                          "action": "open_cell", "depth": r["sill_depth_fine"],
+                          "_note": "BLOCKED — no fine wet path"})
+        elif r["category"] == "SILL_DEFICIT":
+            fixes.append({"lon": r["lon"], "lat": r["lat"],
+                          "action": "set_depth", "value": r["sill_depth_fine"],
+                          "_note": f"SILL_DEFICIT — sill_ratio={r['sill_ratio']}"})
+        elif r["category"] == "AREA_DEFICIT":
+            fixes.append({"lon": r["lon"], "lat": r["lat"],
+                          "action": "set_depth",
+                          "value": round(r["sill_depth_fine"] * 0.9, 1),
+                          "_note": f"AREA_DEFICIT — area_ratio={r['area_ratio']}"})
+    with open(path, "w") as fh:
+        fh.write("# Suggested fixes — review, edit, and paste into your YAML config\n")
+        fh.write("# under the 'fixes:' key.  Remove '_note' lines before running.\n\n")
+        fh.write("fixes:\n")
+        for fix in fixes:
+            fh.write(f"  - lon: {fix['lon']}\n")
+            fh.write(f"    lat: {fix['lat']}\n")
+            fh.write(f"    action: {fix['action']}\n")
+            if "value" in fix:
+                fh.write(f"    value: {fix['value']}\n")
+            if "depth" in fix:
+                fh.write(f"    depth: {fix['depth']}\n")
+            fh.write(f"    # {fix['_note']}\n")
+
+
+# ---------------------------------------------------------------------------
+# Cartopy helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_dir(path: str | Path) -> Path:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _apply_gridlines(ax) -> None:
+    """Add gridlines with labels on left and bottom only."""
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="grey", alpha=0.6)
+    gl.top_labels = False
+    gl.right_labels = False
+
+
+def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
+    """Add a colorbar that stays aligned with the cartopy axes."""
+    fig.colorbar(pcm, ax=ax, label=label, fraction=0.03, pad=0.04, aspect=30)
+
+
+# ---------------------------------------------------------------------------
+# Static (cartopy) plots
+# ---------------------------------------------------------------------------
+
+def plot_depth(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    depth: npt.NDArray,
+    mask: npt.NDArray,
+    title: str,
+    path: str | Path,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    cmap=None,
+    interactive: bool = False,
+    subtitle: str = "",
+    colorbar_label: str = "Depth (m)",
+) -> None:
+    """Plot a scalar field.  Saves PNG; optionally also saves a plotly HTML.
+
+    Parameters
+    ----------
+    subtitle : str
+        Optional second line rendered below the main title in a smaller,
+        italic font — intended for grid metadata (nx×ny, wet cells, resolution).
+    colorbar_label : str
+        Label for the colorbar (default ``"Depth (m)"``).
+    """
+    import matplotlib.pyplot as plt
+
+    if cmap is None:
+        cmap = _cm_depth()
+    path = _ensure_dir(path)
+    masked = np.where(mask, depth, np.nan)
+    vmin = vmin if vmin is not None else float(np.nanmin(masked))
+    vmax = vmax if vmax is not None else float(np.nanmax(masked))
+    kw = dict(cmap=cmap, vmin=vmin, vmax=vmax)
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(), **kw)  # type: ignore[union-attr]
+        ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _apply_gridlines(ax)  # type: ignore[arg-type]
+        _add_colorbar(fig, ax, pcm, colorbar_label)
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        pcm = ax.pcolormesh(lon, lat, masked, **kw)  # type: ignore[union-attr]
+        ax.set_xlabel("Longitude")  # type: ignore[union-attr]
+        ax.set_ylabel("Latitude")  # type: ignore[union-attr]
+        fig.colorbar(pcm, ax=ax, label=colorbar_label, fraction=0.03, pad=0.04)
+
+    if subtitle:
+        ax.set_title(  # type: ignore[union-attr]
+            f"{title}\n{subtitle}", fontsize=11, pad=4,
+            linespacing=1.5,
+        )
+    else:
+        ax.set_title(title, fontsize=11, pad=4)  # type: ignore[union-attr]
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    if interactive:
+        _save_depth_html(lon, lat, masked, title, path)
+
+
+def plot_comparison(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    fields: Sequence[npt.NDArray],
+    masks: Sequence[npt.NDArray],
+    titles: Sequence[str],
+    path: str | Path,
+    cmap=None,
+    label: str = "Depth (m)",
+) -> None:
+    """Side-by-side comparison — one shared colorbar on the right."""
+    import matplotlib.pyplot as plt
+
+    path = _ensure_dir(path)
+    n = len(fields)
+    wet_vals = [f[m.astype(bool)] for f, m in zip(fields, masks) if m.any()]
+    all_vals = np.concatenate(wet_vals) if wet_vals else np.array([0.0, 1.0])
+    vmin, vmax = float(np.nanmin(all_vals)), float(np.nanmax(all_vals))
+    if cmap is None:
+        cmap = _cm_depth()
+    kw = dict(cmap=cmap, vmin=vmin, vmax=vmax)
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig, axes = plt.subplots(
+            1, n, figsize=(6 * n, 5),
+            subplot_kw={"projection": ccrs.PlateCarree()},
+        )
+        axes_list = [axes] if n == 1 else list(axes)
+        pcm = None
+        for ax, field, mask, title in zip(axes_list, fields, masks, titles):
+            masked = np.where(mask, field, np.nan)
+            pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(), **kw)  # type: ignore[union-attr]
+            ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+            _apply_gridlines(ax)  # type: ignore[arg-type]
+            ax.set_title(title)
+    except ImportError:
+        fig, axes = plt.subplots(1, n, figsize=(6 * n, 5))
+        axes_list = [axes] if n == 1 else list(axes)
+        pcm = None
+        for ax, field, mask, title in zip(axes_list, fields, masks, titles):
+            masked = np.where(mask, field, np.nan)
+            pcm = ax.pcolormesh(lon, lat, masked, **kw)  # type: ignore[union-attr]
+            ax.set_title(title)
+
+    if pcm is not None:
+        fig.colorbar(pcm, ax=axes_list, label=label, fraction=0.02, pad=0.04, aspect=40)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_section_profile(
+    distance_km: npt.NDArray,
+    depth_fine: npt.NDArray,
+    depth_coarse: float,
+    title: str,
+    path: str | Path,
+    inset_lon: Optional[float] = None,
+    inset_lat: Optional[float] = None,
+    inset_bounds: Optional[tuple[float, float, float, float]] = None,
+) -> None:
+    """Cross-section depth profile with optional map inset showing location."""
+    import matplotlib.pyplot as plt
+
+    path = _ensure_dir(path)
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    ax.fill_between(distance_km, 0, depth_fine, where=depth_fine > 0,
+                    color="steelblue", alpha=0.45, label="Fine resolution")
+    ax.plot(distance_km, depth_fine, color="steelblue", linewidth=1.2)
+    ax.axhline(depth_coarse, color="firebrick", linewidth=1.5, linestyle="--",
+               label=f"Coarse cell mean: {depth_coarse:.1f} m")
+    ax.set_xlabel("Distance along section (km)")
+    ax.set_ylabel("Depth (m)")
+    ax.invert_yaxis()
+    ax.set_title(title)
+    ax.legend(fontsize=9)
+
+    # Inset map showing where the section is.
+    # Call tight_layout BEFORE adding the inset so layout is settled first;
+    # add_axes with a fixed position is incompatible with tight_layout if
+    # called afterwards (produces a UserWarning and may shift the inset).
+    has_inset = inset_lon is not None and inset_lat is not None
+    if not has_inset:
+        fig.tight_layout()
+
+    if has_inset:
+        fig.subplots_adjust(right=0.60)   # reserve right 40 % for inset
+        try:
+            import cartopy.crs as ccrs
+            import cartopy.feature as cfeature
+
+            ax_ins = fig.add_axes([0.63, 0.50, 0.33, 0.42],
+                                  projection=ccrs.PlateCarree())
+            ax_ins.set_extent(
+                list(inset_bounds) if inset_bounds else
+                [inset_lon - 8, inset_lon + 8, inset_lat - 5, inset_lat + 5],
+                crs=ccrs.PlateCarree(),
+            )
+            ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)
+            ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
+            ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=2)
+            ax_ins.plot(inset_lon, inset_lat, "r+", markersize=10, markeredgewidth=2,
+                        transform=ccrs.PlateCarree(), zorder=3)
+            gl = ax_ins.gridlines(linewidth=0.3, color="grey")
+            gl.top_labels = gl.right_labels = gl.left_labels = gl.bottom_labels = False
+            ax_ins.set_title("section location", fontsize=7, pad=2)
+        except ImportError:
+            pass
+
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_straits(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    depth: npt.NDArray,
+    mask: npt.NDArray,
+    strait_records: list[dict],
+    path: str | Path,
+    domain_bounds: Optional[tuple[float, float, float, float]] = None,
+) -> None:
+    """Depth map with all flagged interfaces + regional context inset + HTML.
+
+    Parameters
+    ----------
+    domain_bounds : (lon_min, lon_max, lat_min, lat_max)
+        When supplied, a small inset is drawn in the lower-left corner showing
+        the model domain in its regional geographic context (coastlines only,
+        domain outlined with a red rectangle).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    path = _ensure_dir(path)
+    colours = {"AREA_DEFICIT": "orange", "SILL_DEFICIT": "red", "BLOCKED": "black"}
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig = plt.figure(figsize=(12, 7))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        masked = np.where(mask, depth, np.nan)
+        pcm = ax.pcolormesh(lon, lat, masked, cmap=_cm_depth(),
+                            transform=ccrs.PlateCarree())
+        ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _apply_gridlines(ax)  # type: ignore[arg-type]
+        transform = ccrs.PlateCarree()
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(12, 7))
+        masked = np.where(mask, depth, np.nan)
+        pcm = ax.pcolormesh(lon, lat, masked, cmap=_cm_depth())  # type: ignore[union-attr]
+        transform = None
+
+    for rec in strait_records:
+        c = colours.get(rec["category"], "purple")
+        kw: dict = dict(color=c, marker="x", markersize=8, linewidth=2, zorder=5)
+        if transform is not None:
+            ax.plot(rec["lon"], rec["lat"], transform=transform, **kw)  # type: ignore[union-attr]
+        else:
+            ax.plot(rec["lon"], rec["lat"], **kw)  # type: ignore[union-attr]
+
+    patches = [mpatches.Patch(color=c, label=k) for k, c in colours.items()]
+    ax.legend(handles=patches, loc="upper right")  # type: ignore[union-attr]
+    _add_colorbar(fig, ax, pcm, "Depth (m)")
+    ax.set_title(
+        f"Strait / connectivity concerns — {len(strait_records)} flagged interface(s)"
+    )
+
+    # Regional context inset: shows the domain as a red box on a wider map
+    if domain_bounds is not None:
+        try:
+            import cartopy.crs as ccrs
+            import cartopy.feature as cfeature
+            import matplotlib.patches as mpatch
+
+            lon_min, lon_max, lat_min, lat_max = domain_bounds
+            pad_lon = max((lon_max - lon_min) * 1.5, 5.0)
+            pad_lat = max((lat_max - lat_min) * 1.5, 4.0)
+
+            # Place inset in lower-left; tight_layout is called first so the
+            # main axes position is settled before we pin the inset.
+            fig.tight_layout()
+            ax_ins = fig.add_axes([0.01, 0.01, 0.22, 0.28],
+                                  projection=ccrs.PlateCarree())
+            ax_ins.set_extent(
+                [lon_min - pad_lon, lon_max + pad_lon,
+                 lat_min - pad_lat, lat_max + pad_lat],
+                crs=ccrs.PlateCarree(),
+            )
+            ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)
+            ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
+            ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)
+            # Draw domain rectangle
+            rect = mpatch.Rectangle(
+                (lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
+                linewidth=1.5, edgecolor="red", facecolor="none", zorder=3,
+                transform=ccrs.PlateCarree(),
+            )
+            ax_ins.add_patch(rect)
+            gl = ax_ins.gridlines(linewidth=0.2, color="grey")
+            gl.top_labels = gl.right_labels = gl.left_labels = gl.bottom_labels = False
+            ax_ins.set_title("domain", fontsize=7, pad=2)
+        except ImportError:
+            fig.tight_layout()
+    else:
+        fig.tight_layout()
+
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Interactive version
+    _save_straits_html(lon, lat, masked, strait_records, colours, path)
+
+
+def plot_basins(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    labels: npt.NDArray,
+    title: str,
+    path: str | Path,
+    nkeep: int = 1,
+) -> None:
+    """Plot connected ocean basins.
+
+    Kept basins (the *nkeep* largest) are shown in blue tones.
+    Removed (isolated) basins are shown in red/orange tones.
+    Land / unmasked cells are shown as light grey.
+
+    This answers the question "what does the basin plot show?": it reveals
+    any isolated ocean pockets disconnected from the main basin that were
+    masked out.  If only one colour appears, there were no isolated regions.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+
+    path = _ensure_dir(path)
+
+    # Rank basins by size; the largest nkeep are "kept"
+    unique_ids, counts = np.unique(labels[labels > 0], return_counts=True)
+    order = np.argsort(counts)[::-1]
+    kept_ids = set(unique_ids[order[:nkeep]].tolist())
+
+    # Build an RGBA image: kept=blues, removed=reds, land=light grey
+    ny, nx = labels.shape
+    rgba = np.full((ny, nx, 4), [0.88, 0.88, 0.88, 1.0])  # default: grey (land)
+
+    blue_cm  = plt.cm.Blues                          # type: ignore[attr-defined]
+    red_cm   = plt.cm.Reds                           # type: ignore[attr-defined]
+    kept_list    = [i for i in order if unique_ids[i] in kept_ids]
+    removed_list = [i for i in order if unique_ids[i] not in kept_ids]
+
+    for rank, idx in enumerate(kept_list):
+        bid = unique_ids[idx]
+        frac = 0.5 + 0.4 * rank / max(len(kept_list), 1)
+        rgba[labels == bid] = blue_cm(frac)
+
+    for rank, idx in enumerate(removed_list):
+        bid = unique_ids[idx]
+        frac = 0.4 + 0.5 * rank / max(len(removed_list), 1)
+        rgba[labels == bid] = red_cm(frac)
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        lon_1d = lon[0, :] if lon.ndim == 2 else lon
+        lat_1d = lat[:, 0] if lat.ndim == 2 else lat
+        ax.imshow(rgba, origin="lower",  # type: ignore[union-attr]
+                  extent=[lon_1d.min(), lon_1d.max(), lat_1d.min(), lat_1d.max()],
+                  transform=ccrs.PlateCarree(), aspect="auto")
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.6, zorder=3)  # type: ignore[union-attr]
+        _apply_gridlines(ax)  # type: ignore[arg-type]
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.imshow(rgba, origin="lower", aspect="auto")  # type: ignore[union-attr]
+
+    legend_patches = [mpatches.Patch(color=blue_cm(0.6), label=f"Kept ({len(kept_list)} basin(s))")]
+    if removed_list:
+        legend_patches.append(
+            mpatches.Patch(color=red_cm(0.5), label=f"Removed ({len(removed_list)} isolated basin(s))")
+        )
+    legend_patches.append(mpatches.Patch(color=(0.88, 0.88, 0.88), label="Land"))
+    ax.legend(handles=legend_patches, loc="upper right", fontsize=9)  # type: ignore[union-attr]
+
+    n_removed = len(removed_list)
+    subtitle = (
+        f"Isolated basins removed: {n_removed}" if n_removed
+        else "No isolated basins — full domain is connected"
+    )
+    ax.set_title(f"{title}\n{subtitle}", fontsize=10)  # type: ignore[union-attr]
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_rx0_diagnostics(
+    rx0_before: npt.NDArray,
+    rx0_after: npt.NDArray,
+    corrections: npt.NDArray,
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    mask: npt.NDArray,
+    path_prefix: str | Path,
+) -> None:
+    """Histogram of rx0 before/after + static and interactive correction maps."""
+    import matplotlib.pyplot as plt
+
+    pp = Path(path_prefix)
+    pp.parent.mkdir(parents=True, exist_ok=True)
+
+    upper = max(float(rx0_before.max()), float(rx0_after.max()), 0.01) * 1.05
+    bins = np.linspace(0, upper, 60)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(rx0_before[rx0_before > 0], bins=bins, alpha=0.6, label="Before", color="firebrick")
+    ax.hist(rx0_after[rx0_after > 0], bins=bins, alpha=0.6, label="After", color="steelblue")
+    ax.set_xlabel("rx0")
+    ax.set_ylabel("Count")
+    ax.set_title("rx0 distribution before / after smoothing")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(str(pp) + "_rx0_histogram.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    corr_map = np.full(mask.shape, np.nan)
+    corr_map[mask.astype(bool)] = np.abs(corrections)[mask.astype(bool)]
+    plot_depth(
+        lon, lat, corr_map, mask,
+        title="Absolute depth correction from rx0 smoothing (m)",
+        path=str(pp) + "_corrections.png",
+        cmap=_cm_amp(),
+        interactive=True,   # also write HTML
+    )
+
+
+# ---------------------------------------------------------------------------
+# Interactive (plotly) helpers
+# ---------------------------------------------------------------------------
+
+def _save_depth_html(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    depth_masked: npt.NDArray,
+    title: str,
+    png_path: Path,
+) -> None:
+    """Write a zoomable plotly Heatmap alongside the PNG."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return
+
+    # For 2D lon/lat grids extract 1D axes (or use the 2D arrays directly)
+    if lon.ndim == 2:
+        lon_axis = lon[0, :]
+        lat_axis = lat[:, 0]
+    else:
+        lon_axis = lon
+        lat_axis = lat
+
+    fig = go.Figure(go.Heatmap(
+        z=depth_masked,
+        x=lon_axis,
+        y=lat_axis,
+        colorscale=_plotly_colorscale(_cm_depth()),
+        colorbar=dict(title="Depth (m)", thickness=15),
+        hoverongaps=False,
+        hovertemplate="lon: %{x:.3f}<br>lat: %{y:.3f}<br>depth: %{z:.1f} m<extra></extra>",
+    ))
+    fig.update_layout(
+        title=title,
+        xaxis_title="Longitude",
+        yaxis_title="Latitude",
+        yaxis_scaleanchor="x",
+        margin=dict(l=60, r=20, t=50, b=50),
+    )
+    html_path = png_path.with_suffix(".html")
+    fig.write_html(str(html_path))
+
+
+def _save_straits_html(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    depth_masked: npt.NDArray,
+    records: list[dict],
+    colours: dict[str, str],
+    png_path: Path,
+) -> None:
+    """Write a zoomable plotly map of the strait analysis."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return
+
+    lon_axis = lon[0, :] if lon.ndim == 2 else lon
+    lat_axis = lat[:, 0] if lat.ndim == 2 else lat
+
+    traces = [go.Heatmap(
+        z=depth_masked, x=lon_axis, y=lat_axis,
+        colorscale=_plotly_colorscale(_cm_depth()),
+        colorbar=dict(title="Depth (m)", thickness=15),
+        hoverongaps=False,
+        hovertemplate="lon: %{x:.3f}<br>lat: %{y:.3f}<br>depth: %{z:.1f} m<extra></extra>",
+        name="Depth",
+    )]
+
+    for cat, colour in colours.items():
+        pts = [r for r in records if r.get("category") == cat]
+        if not pts:
+            continue
+        hover = [
+            f"lon={p['lon']:.3f}, lat={p['lat']:.3f}<br>"
+            f"sill ratio={p.get('sill_ratio','?')}, "
+            f"area ratio={p.get('area_ratio','?')}<br>"
+            f"fix: {p.get('suggested_fix','')}"
+            for p in pts
+        ]
+        traces.append(go.Scatter(
+            x=[p["lon"] for p in pts],
+            y=[p["lat"] for p in pts],
+            mode="markers",
+            marker=dict(symbol="x", size=10, color=colour,
+                        line=dict(width=2, color=colour)),
+            name=cat,
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    fig = go.Figure(traces)
+    fig.update_layout(
+        title="Strait / connectivity analysis (interactive)",
+        xaxis_title="Longitude", yaxis_title="Latitude",
+        yaxis_scaleanchor="x",
+        legend=dict(orientation="h", y=-0.12),
+        margin=dict(l=60, r=20, t=50, b=80),
+    )
+    fig.write_html(str(png_path.with_suffix(".html")))

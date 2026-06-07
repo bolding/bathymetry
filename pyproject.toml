@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bathymetry"
+version = "0.1.0"
+description = "Conservative interpolation of fine-resolution bathymetry to coarser model grids"
+requires-python = ">=3.10"
+dependencies = [
+    "xarray",
+    "netCDF4",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pyproj",
+    # esmpy and rioxarray must be installed separately (conda recommended)
+    # conda install -c conda-forge esmpy rioxarray cartopy
+]
+
+[tool.setuptools]
+# lib/ contains flat Python modules (grid, reader, interpolate, analysis, smooth, report).
+# cli/ is installed as a regular package so the console_script entry point can reference it.
+package-dir = {"" = "lib", "cli" = "cli"}
+py-modules = ["grid", "reader", "interpolate", "analysis", "smooth", "report"]
+packages = ["cli"]
+
+[project.scripts]
+bathymetry-regrid = "cli.regrid:main"
