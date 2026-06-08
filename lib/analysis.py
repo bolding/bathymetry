@@ -522,17 +522,29 @@ _CAT_RANK = {"BLOCKED": 0, "SILL_DEFICIT": 1, "AREA_DEFICIT": 2, "OK": 3}
 
 
 def sort_straits(records: list[dict]) -> list[dict]:
-    """Return records sorted by severity: BLOCKED → SILL_DEFICIT → AREA_DEFICIT.
+    """Return records sorted by physical importance, worst first.
 
-    Within each category, interfaces are ordered by sill_ratio ascending
-    (lower ratio = coarse grid more deficient vs fine grid) then by
-    area_ratio ascending as a tiebreaker.
+    Primary key: category severity (BLOCKED → SILL_DEFICIT → AREA_DEFICIT).
+
+    Secondary key within each category: absolute sill deficit in metres
+    (descending).  For BLOCKED (sill_ratio = 0) this equals the coarse cell
+    depth, so deep blockages rank above shallow tidal-flat cases.  For
+    SILL_DEFICIT it is the actual depth underestimate::
+
+        sill_deficit_m = sill_depth_coarse × (1 − sill_ratio)
+
+    This ensures a 2 m BLOCKED coastal cell sorts far below a 100 m BLOCKED
+    deep-water strait.
     """
-    return sorted(records, key=lambda r: (
-        _CAT_RANK.get(r.get("category", "OK"), 9),
-        r.get("sill_ratio", 0.0),
-        r.get("area_ratio", 0.0),
-    ))
+    def _key(r: dict):
+        coarse = r.get("sill_depth_coarse", 0.0)
+        deficit = coarse * (1.0 - r.get("sill_ratio", 0.0))
+        return (
+            _CAT_RANK.get(r.get("category", "OK"), 9),
+            -deficit,                       # descending: larger deficit first
+            r.get("area_ratio", 1.0),       # lower area ratio = worse tiebreaker
+        )
+    return sorted(records, key=_key)
 
 
 def strait_summary(records: list[dict]) -> dict:

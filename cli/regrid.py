@@ -835,6 +835,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             f"{rec['category']} | {direction_label} | "
             f"lon={rec['lon']:.3f}°, lat={rec['lat']:.3f}°",
             table={
+                "sill deficit (m)":    f"{rec['sill_depth_coarse'] * (1 - rec['sill_ratio']):.1f}",
                 "sill depth (fine)":   f"{rec['sill_depth_fine']:.1f} m",
                 "sill depth (coarse)": f"{rec['sill_depth_coarse']:.1f} m",
                 "sill ratio":          f"{rec['sill_ratio']:.3f}",
