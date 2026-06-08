@@ -705,6 +705,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             fine_lats=rec.get("_fine_lats"),
             cs_col=rec.get("_cs_col"),
             cs_row=rec.get("_cs_row"),
+            coarse_corner_lons=rec.get("_coarse_corner_lons"),
+            coarse_corner_lats=rec.get("_coarse_corner_lats"),
         )
         section_images.append(img)
 

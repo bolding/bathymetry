@@ -704,14 +704,16 @@ def plot_section_profile(
     fine_lats: Optional[npt.NDArray] = None,
     cs_col: Optional[int] = None,
     cs_row: Optional[int] = None,
+    coarse_corner_lons: Optional[npt.NDArray] = None,
+    coarse_corner_lats: Optional[npt.NDArray] = None,
 ) -> None:
     """Cross-section depth profile with optional map inset and plan view.
 
     When *fine_sub* is provided (the 2-D fine-resolution sub-grid around the
-    flagged interface), the figure gains a second panel below showing a plan
-    view of the fine bathymetry.  The main section profile also gains two
-    dashed neighbour curves — one coarse-cell step to either side of the
-    central section — to show the spatial variability across the strait.
+    flagged interface), the figure uses a three-panel layout:
+    - top-left: section depth profile with two dashed neighbour curves
+    - top-right: Cartopy location inset map
+    - bottom: plan view of fine bathymetry with coarse grid overlay
 
     Parameters
     ----------
@@ -725,8 +727,13 @@ def plot_section_profile(
         Column index of the cross-section in *fine_sub* (U-interface).
     cs_row : int
         Row index of the cross-section in *fine_sub* (V-interface).
+    coarse_corner_lons : [nr+1, nc+1] array
+        Coarse cell corner longitudes (from dst_grid.corner_lon subset).
+    coarse_corner_lats : [nr+1, nc+1] array
+        Coarse cell corner latitudes (from dst_grid.corner_lat subset).
     """
     import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
 
     path = _ensure_dir(path)
     has_plan = (
@@ -735,10 +742,20 @@ def plot_section_profile(
         and fine_lats is not None
         and (cs_col is not None or cs_row is not None)
     )
+    has_inset = inset_lon is not None and inset_lat is not None
 
     if has_plan:
-        fig = plt.figure(figsize=(8, 8))
-        ax = fig.add_subplot(2, 1, 1)
+        # Three-panel layout: [profile | inset] on top, [plan view] on bottom
+        fig = plt.figure(figsize=(12, 8))
+        gs = gridspec.GridSpec(
+            2, 2, figure=fig,
+            height_ratios=[1, 1.2],
+            width_ratios=[1.6, 1],
+            hspace=0.35, wspace=0.3,
+        )
+        ax      = fig.add_subplot(gs[0, 0])   # top-left: section profile
+        ax_plan = fig.add_subplot(gs[1, :])   # bottom: plan view full width
+        ax_ins_gs = gs[0, 1]                  # top-right: reserved for inset
     else:
         fig, ax = plt.subplots(figsize=(8, 4))
 
@@ -747,11 +764,10 @@ def plot_section_profile(
                     color="steelblue", alpha=0.35, label="Fine (central section)")
     ax.plot(distance_km, depth_fine, color="steelblue", linewidth=1.4)
 
-    # Neighbouring sections: ±1 coarse-cell step in the perpendicular direction
+    # Neighbouring sections: ±step in the perpendicular direction
     if has_plan:
         assert fine_sub is not None  # for type-checker
         if cs_col is not None:
-            # U-interface — section along lat; neighbours are lon-shifted columns
             step = max(1, fine_sub.shape[1] // 4)
             for sign, lbl in [(-1, "−"), (+1, "+")]:
                 nb = cs_col + sign * step
@@ -763,7 +779,6 @@ def plot_section_profile(
                             linestyle="--", alpha=0.6,
                             label=f"Fine ({lbl}½ cell E/W)")
         else:
-            # V-interface — section along lon; neighbours are lat-shifted rows
             assert cs_row is not None
             step = max(1, fine_sub.shape[0] // 4)
             for sign, lbl in [(-1, "−"), (+1, "+")]:
@@ -781,13 +796,12 @@ def plot_section_profile(
     ax.set_xlabel("Distance along section (km)")
     ax.set_ylabel("Depth (m)")
     ax.invert_yaxis()
-    ax.set_title(title)
-    ax.legend(fontsize=9)
+    ax.set_title(title, fontsize=9 if has_plan else 10)
+    ax.legend(fontsize=8)
 
-    # ---- Plan view panel (when fine_sub available) ----
+    # ---- Plan view panel ----
     if has_plan:
         assert fine_sub is not None and fine_lons is not None and fine_lats is not None
-        ax_plan = fig.add_subplot(2, 1, 2)
 
         R = 6371.0
         clat = float(fine_lats.mean())
@@ -801,43 +815,81 @@ def plot_section_profile(
             lon_km_2d, lat_km_2d, depth_masked,
             cmap=_cm_depth(), vmin=0.0, vmax=vmax, shading="auto",
         )
-        fig.colorbar(pcm, ax=ax_plan, label="Fine depth (m)", fraction=0.03, pad=0.04)
+        fig.colorbar(pcm, ax=ax_plan, label="Fine depth (m)", fraction=0.025, pad=0.03)
 
-        # Cross-section line and neighbours
+        # Coarse grid overlay — exact cell edges from corner coordinates
+        if coarse_corner_lons is not None and coarse_corner_lats is not None:
+            # Convert coarse corners to km (same reference as fine grid)
+            ref_lon = float(fine_lons.mean())
+            ref_lat = clat  # already computed above
+            cc_lon_km = (
+                (coarse_corner_lons - ref_lon)
+                * np.pi / 180.0 * R * np.cos(np.radians(ref_lat))
+            )
+            cc_lat_km = (coarse_corner_lats - ref_lat) * np.pi / 180.0 * R
+            _gkw = dict(color="white", linewidth=0.9, alpha=0.9, zorder=3)
+            # Draw each row of corners as a polyline (constant-lat cell edges)
+            for k in range(cc_lon_km.shape[0]):
+                ax_plan.plot(cc_lon_km[k, :], cc_lat_km[k, :], **_gkw)
+            # Draw each column of corners as a polyline (constant-lon cell edges)
+            for k in range(cc_lon_km.shape[1]):
+                ax_plan.plot(cc_lon_km[:, k], cc_lat_km[:, k], **_gkw)
+
+        # Cross-section line and neighbours (drawn after grid so they are on top)
         if cs_col is not None:
             step = max(1, fine_sub.shape[1] // 4)
             ax_plan.axvline(lon_km[cs_col], color="firebrick", linewidth=1.5,
-                            linestyle="-", label="Section")
+                            linestyle="-", label="Section", zorder=4)
             for sign in (-1, +1):
                 nb = cs_col + sign * step
                 if 0 <= nb < len(lon_km):
                     ax_plan.axvline(lon_km[nb], color="firebrick", linewidth=0.8,
-                                    linestyle="--", alpha=0.7)
-            ax_plan.set_xlabel("E–W distance from interface (km)")
-            ax_plan.set_ylabel("N–S distance from interface (km)")
+                                    linestyle="--", alpha=0.7, zorder=4)
         else:
             assert cs_row is not None
             step = max(1, fine_sub.shape[0] // 4)
             ax_plan.axhline(lat_km[cs_row], color="firebrick", linewidth=1.5,
-                            linestyle="-", label="Section")
+                            linestyle="-", label="Section", zorder=4)
             for sign in (-1, +1):
                 nb = cs_row + sign * step
                 if 0 <= nb < len(lat_km):
                     ax_plan.axhline(lat_km[nb], color="firebrick", linewidth=0.8,
-                                    linestyle="--", alpha=0.7)
-            ax_plan.set_xlabel("E–W distance from interface (km)")
-            ax_plan.set_ylabel("N–S distance from interface (km)")
+                                    linestyle="--", alpha=0.7, zorder=4)
 
+        ax_plan.set_xlabel("E–W distance from interface (km)")
+        ax_plan.set_ylabel("N–S distance from interface (km)")
         ax_plan.set_title("Fine-resolution bathymetry (plan view)", fontsize=9)
         ax_plan.legend(fontsize=8, loc="upper right")
 
-        fig.tight_layout()
+        # ---- Cartopy inset in top-right GridSpec cell ----
+        if has_inset:
+            try:
+                import cartopy.crs as ccrs
+                import cartopy.feature as cfeature
+
+                ax_ins = fig.add_subplot(ax_ins_gs, projection=ccrs.PlateCarree())
+                extent = (
+                    list(inset_bounds) if inset_bounds else
+                    [inset_lon - 8, inset_lon + 8, inset_lat - 5, inset_lat + 5]
+                )
+                ax_ins.set_extent(extent, crs=ccrs.PlateCarree())  # type: ignore[union-attr]
+                ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)  # type: ignore[union-attr]
+                ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)  # type: ignore[union-attr]
+                ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=2)  # type: ignore[union-attr]
+                ax_ins.plot(  # type: ignore[union-attr]
+                    inset_lon, inset_lat, "r+", markersize=10, markeredgewidth=2,
+                    transform=ccrs.PlateCarree(), zorder=3,
+                )
+                _inset_gridlines(ax_ins, extent)
+                ax_ins.set_title("section location", fontsize=8, pad=2)  # type: ignore[union-attr]
+            except ImportError:
+                pass
+
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return
 
-    # ---- Original layout: single panel + optional Cartopy inset ----
-    has_inset = inset_lon is not None and inset_lat is not None
+    # ---- Original single-panel layout + optional Cartopy inset ----
     if not has_inset:
         fig.tight_layout()
 
