@@ -58,7 +58,11 @@ bathymetry-regrid --help
 bathymetry/
 ├── pyproject.toml
 ├── README.md
-├── example_northsea.yaml          ← template configuration file
+├── config/
+│   ├── northsea_1d15deg.yaml      ← North Sea 1/15° operational config
+│   ├── northsea_1d20deg.yaml      ← North Sea 1/20° operational config
+│   ├── example_northsea_rotated_pole.yaml
+│   └── example_supergrid.yaml
 ├── lib/                           ← flat library modules (on sys.path after install)
 │   ├── grid.py        SphericalGrid, CartesianGrid, CurvilinearGrid (stub)
 │   ├── reader.py      GEBCO and EMODnet readers
@@ -75,13 +79,13 @@ bathymetry/
 ### From a YAML config (recommended)
 
 ```bash
-bathymetry-regrid --config example_northsea.yaml
+bathymetry-regrid --config config/northsea_1d20deg.yaml
 ```
 
 Override any setting on the command line:
 
 ```bash
-bathymetry-regrid --config example_northsea.yaml --smooth-rx0 0.15 --name northsea_v2
+bathymetry-regrid --config config/northsea_1d20deg.yaml --smooth-rx0 0.15 --name northsea_v2
 ```
 
 ### Spherical grid — North Sea, command-line only
@@ -158,7 +162,7 @@ bathymetry-regrid \
 ## YAML configuration
 
 All parameters can be set in a YAML file and selectively overridden on the CLI.
-A fully annotated template is provided in `example_northsea.yaml`.
+Fully annotated configs are provided in the `config/` directory.
 
 ```yaml
 # Short identifier — used in all output file and directory names.
