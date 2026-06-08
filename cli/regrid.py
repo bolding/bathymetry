@@ -1116,9 +1116,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     if args.write_boundaries:
         print("\nWriting boundary coordinate files …")
-        bdy_files = boundarymod.write_boundary_coords(dst, report_dir, name)
+        bdy_dir = os.path.dirname(os.path.abspath(output_file))
+        bdy_files = boundarymod.write_boundary_coords(dst, bdy_dir, name)
         for f in bdy_files:
-            print(f"  {f}")
+            print(f"  {os.path.join(bdy_dir, f)}")
 
     print(f"\nDone.")
     print(f"  Output NetCDF : {output_file}")
