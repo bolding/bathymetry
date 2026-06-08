@@ -242,6 +242,23 @@ disconnected from the main ocean.  Running isolation masking afterwards (4d)
 then removes those interior cells automatically without requiring them to be
 listed individually.
 
+## Wet-fraction thresholds
+
+There are two separate wet-fraction parameters with different roles:
+
+| Parameter | Applied at | Effect |
+|-----------|-----------|--------|
+| `regridding.min_wet_fraction` | post-regrid (step 3) | Cells below threshold are forced to land: `depth=NaN`, `mask=0`. They are eliminated entirely and never reach the analysis steps. |
+| `analysis.wet_frac_threshold` | strait detection (step 4a) | Cells below threshold are flagged for inspection but kept wet. Default 0.3. |
+
+**Which one to use for the Wadden Sea / tidal flat problem:**  
+Tidal flat cells at the margins of a domain typically have very small wet
+fractions (the fine-grid source is mostly land).  These should simply be land
+on the coarse grid.  Raise `regridding.min_wet_fraction` (e.g. 0.05–0.4
+depending on resolution) to eliminate them before any analysis is done.
+Because weight files are cached, re-running from step 3 is fast — only the
+regridded arrays need to be recomputed, not the ESMF weights.
+
 ## Output files
 
 All files are prefixed with `name` and written to `report_dir`.
