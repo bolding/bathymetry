@@ -16,6 +16,20 @@ Both return an ``xr.Dataset`` with:
 * ``lon``    – 1-D longitude coordinate (degrees East)
 * ``lat``    – 1-D latitude coordinate (degrees North)
 * ``land``   – boolean mask (True = land / no data)
+
+Coastline masking
+-----------------
+``apply_coastline_mask(ds, resolution)`` overlays a high-resolution land
+polygon dataset on top of the raw bathymetry, forcing any source cell whose
+centre falls inside a land polygon to land regardless of its GEBCO depth value.
+Supported *resolution* values (Natural Earth datasets, auto-downloaded by
+cartopy):
+
+    ``"10m"``  – 1:10 000 000  (~1 km features; default)
+    ``"50m"``  – 1:50 000 000  (~5 km features)
+    ``"110m"`` – 1:110 000 000 (~10 km features)
+
+Requires *rasterio* (``pip install rasterio``).
 """
 
 from __future__ import annotations
@@ -336,6 +350,107 @@ def _read_emodnet(
         print(f"  Cached to: {cache_path}")
 
     return ds
+
+
+# ---------------------------------------------------------------------------
+# Coastline masking
+# ---------------------------------------------------------------------------
+
+_NE_RESOLUTIONS = ("10m", "50m", "110m")
+
+
+def apply_coastline_mask(
+    ds: xr.Dataset,
+    resolution: str = "10m",
+) -> xr.Dataset:
+    """Force source cells inside land polygons to land.
+
+    Uses Natural Earth land polygons (via cartopy + rasterio) to override the
+    raw GEBCO/EMODnet land mask.  Any source cell whose centre falls inside a
+    land polygon is set to land (``depth=NaN``, ``land=True``), regardless of
+    its elevation value.
+
+    Cells that GEBCO already marks as land are unaffected (no ocean cells are
+    opened by this step).
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Source dataset as returned by :func:`read_source`.
+    resolution : str
+        Natural Earth resolution: ``"10m"`` (default), ``"50m"``, or
+        ``"110m"``.  The shapefile is downloaded automatically by cartopy on
+        first use and cached in ``~/.local/share/cartopy/``.
+
+    Returns
+    -------
+    xr.Dataset
+        A copy of *ds* with the ``depth`` and ``land`` arrays updated.
+    """
+    if resolution not in _NE_RESOLUTIONS:
+        raise ValueError(
+            f"resolution must be one of {_NE_RESOLUTIONS}, got {resolution!r}"
+        )
+
+    try:
+        import cartopy.io.shapereader as shpreader
+    except ImportError as exc:
+        raise ImportError(
+            "cartopy is required for coastline masking. "
+            "Install it with: conda install cartopy"
+        ) from exc
+
+    try:
+        from rasterio.features import rasterize
+        from rasterio.transform import from_bounds
+    except ImportError as exc:
+        raise ImportError(
+            "rasterio is required for coastline masking. "
+            "Install it with: pip install rasterio"
+        ) from exc
+
+    lon = ds.lon.values
+    lat = ds.lat.values
+    ny, nx = len(lat), len(lon)
+
+    print(f"  Loading Natural Earth land polygons ({resolution}) …", end=" ", flush=True)
+    shp_path = shpreader.natural_earth(
+        resolution=resolution, category="physical", name="land"
+    )
+    reader_ne = shpreader.Reader(shp_path)
+    geoms = [rec.geometry for rec in reader_ne.records()]
+    print(f"{len(geoms)} polygon(s) loaded")
+
+    print(f"  Rasterizing onto {nx}×{ny} source grid …", end=" ", flush=True)
+    # rasterio rasterize expects row-0 = north (descending lat).
+    # from_bounds(west, south, east, north, width, height) produces that.
+    transform = from_bounds(lon[0], lat[0], lon[-1], lat[-1], nx, ny)
+    land_raster = rasterize(
+        [(g, 1) for g in geoms],
+        out_shape=(ny, nx),
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+        all_touched=False,
+    )
+    # rasterio row-0 = north; flip to ascending-lat order
+    land_raster = land_raster[::-1, :]
+    coast_land = land_raster.astype(bool)
+
+    old_ocean = ~ds["land"].values
+    new_land = ds["land"].values | coast_land
+    n_added = int((new_land & old_ocean).sum())
+    print(f"{n_added} additional land cells from coastline mask")
+
+    depth = ds["depth"].values.copy()
+    depth[new_land] = np.nan
+
+    return ds.assign(
+        {
+            "depth": (["lat", "lon"], depth),
+            "land":  (["lat", "lon"], new_land),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

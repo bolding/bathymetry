@@ -416,6 +416,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     min_depth     = _merge(args.min_depth,    cfg, "regridding", "min_depth",     default=0.0)
     min_wf        = _merge(args.min_wet_fraction, cfg, "regridding", "min_wet_fraction",
                            default=0.0)
+    coastline_res = _merge(None, cfg, "regridding", "coastline_mask", default=None)
     tile_cells    = int(_merge(None, cfg, "regridding", "tile_cells", default=0))
     tile_buf_deg  = float(_merge(None, cfg, "regridding", "tile_buf_deg", default=0.5))
     nkeep         = _merge(args.nkeep_basins, cfg, "analysis",   "nkeep_basins",  default=1)
@@ -517,16 +518,23 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         emodnet_cache_dir=str(emodnet_cache),
         emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
     )
+    if coastline_res:
+        src = reader.apply_coastline_mask(src, resolution=str(coastline_res))
     src_sum = reader.source_summary(src)
     report.print_table(src_sum, title="Source bathymetry")
     print(f"      done in {time.time()-t0:.1f} s")
 
+    src_label = Path(source).name if source != "emodnet" else "EMODnet"
+    coast_note = (
+        f"  Coastline mask applied (Natural Earth {coastline_res})."
+        if coastline_res else ""
+    )
     src_plot = pfx + "02_source_depth.png"
     src_html  = pfx + "02_source_depth.html"
     report.plot_depth(
         src.lon.values, src.lat.values,
         src["depth"].values, (~src["land"].values).astype(float),
-        title=f"Source: {Path(source).name if source != 'emodnet' else 'EMODnet'}",
+        title=f"Source: {src_label}",
         path=os.path.join(report_dir, src_plot),
         log_scale=log_depth_scale,
         interactive=True,
@@ -535,7 +543,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         "Source bathymetry",
         text=(
             f"Source data read and clipped to the target domain "
-            f"(±{pad_deg}° buffer applied).  "
+            f"(±{pad_deg}° buffer applied).{coast_note}  "
             f"[Interactive plot]({src_html})"
         ),
         table=src_sum,

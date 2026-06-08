@@ -183,6 +183,7 @@ regridding:
   cache_dir: ./regrid_weights   # xESMF weight files cached here
   min_depth: 2.0                # shallow-clamp after regridding (m)
   min_wet_fraction: 0.05
+  coastline_mask: "10m"         # overlay NE land polygons on source; omit to skip
 
 analysis:
   nkeep_basins: 1
@@ -241,6 +242,33 @@ Masking the mouth of a fjord or lagoon (4c) makes the interior cells
 disconnected from the main ocean.  Running isolation masking afterwards (4d)
 then removes those interior cells automatically without requiring them to be
 listed individually.
+
+## Coastline masking
+
+GEBCO's own land mask is derived from its depth values: any cell with
+non-negative elevation is considered land.  For very shallow near-coastal
+cells this can be ambiguous.  Setting `regridding.coastline_mask` overlays a
+**Natural Earth** land-polygon dataset on the raw bathymetry source *before*
+regridding, forcing any source cell whose centre falls inside a land polygon
+to land (`depth=NaN`, `land=True`).
+
+```yaml
+regridding:
+  coastline_mask: "10m"   # "10m" | "50m" | "110m"
+```
+
+| Resolution | Scale | Typical feature size | Notes |
+|------------|-------|---------------------|-------|
+| `"10m"` | 1:10 000 000 | ~1 km | Recommended default |
+| `"50m"` | 1:50 000 000 | ~5 km | Faster, less detail |
+| `"110m"` | 1:110 000 000 | ~10 km | Coarse overview only |
+
+The shapefiles are downloaded automatically by cartopy on first use and cached
+in `~/.local/share/cartopy/`.  The step requires **rasterio** (`pip install
+rasterio`).
+
+Omit the key (or set it to `null`) to skip coastline masking and rely solely
+on GEBCO's own land flag.
 
 ## Wet-fraction thresholds
 
