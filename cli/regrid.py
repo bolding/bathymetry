@@ -518,36 +518,56 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         emodnet_cache_dir=str(emodnet_cache),
         emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
     )
+
+    src_label = Path(source).name if source != "emodnet" else "EMODnet"
+
+    def _save_src_plot(tag: str, title: str) -> tuple[str, str]:
+        """Save PNG + HTML for current state of *src*; return (png_name, html_name)."""
+        png = pfx + tag + ".png"
+        htm = pfx + tag + ".html"
+        report.plot_depth(
+            src.lon.values, src.lat.values,
+            src["depth"].values, (~src["land"].values).astype(float),
+            title=title,
+            path=os.path.join(report_dir, png),
+            log_scale=log_depth_scale,
+            interactive=True,
+        )
+        return png, htm
+
+    src_images: list[str] = []
+    src_links:  list[str] = []
+
+    # 2a — raw source
+    raw_png, raw_html = _save_src_plot("02a_source_raw", f"Source (raw): {src_label}")
+    src_images.append(raw_png)
+    src_links.append(f"[Interactive — raw]({raw_html})")
+
+    # 2b — after coastline mask (only when enabled)
+    coast_note = ""
     if coastline_res:
         src = reader.apply_coastline_mask(src, resolution=str(coastline_res))
+        cm_png, cm_html = _save_src_plot(
+            "02b_source_coastline_masked",
+            f"Source after coastline mask (NE {coastline_res}): {src_label}",
+        )
+        src_images.append(cm_png)
+        src_links.append(f"[Interactive — coastline masked]({cm_html})")
+        coast_note = f"  Coastline mask applied (Natural Earth {coastline_res})."
+
     src_sum = reader.source_summary(src)
     report.print_table(src_sum, title="Source bathymetry")
     print(f"      done in {time.time()-t0:.1f} s")
 
-    src_label = Path(source).name if source != "emodnet" else "EMODnet"
-    coast_note = (
-        f"  Coastline mask applied (Natural Earth {coastline_res})."
-        if coastline_res else ""
-    )
-    src_plot = pfx + "02_source_depth.png"
-    src_html  = pfx + "02_source_depth.html"
-    report.plot_depth(
-        src.lon.values, src.lat.values,
-        src["depth"].values, (~src["land"].values).astype(float),
-        title=f"Source: {src_label}",
-        path=os.path.join(report_dir, src_plot),
-        log_scale=log_depth_scale,
-        interactive=True,
-    )
     rpt.add_section(
         "Source bathymetry",
         text=(
             f"Source data read and clipped to the target domain "
             f"(±{pad_deg}° buffer applied).{coast_note}  "
-            f"[Interactive plot]({src_html})"
+            + "  ".join(src_links)
         ),
         table=src_sum,
-        images=[src_plot],
+        images=src_images,
     )
 
     # ------------------------------------------------------------------
