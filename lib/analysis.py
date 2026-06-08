@@ -549,11 +549,16 @@ def sort_straits(records: list[dict]) -> list[dict]:
 
 def strait_summary(records: list[dict]) -> dict:
     categories = [r["category"] for r in records]
+    n_blocked  = categories.count("BLOCKED")
+    n_sill     = categories.count("SILL_DEFICIT")
+    n_area     = categories.count("AREA_DEFICIT")
+    n_ok       = categories.count("OK")
     return {
         "flagged interfaces total": len(records),
-        "BLOCKED": categories.count("BLOCKED"),
-        "SILL_DEFICIT": categories.count("SILL_DEFICIT"),
-        "AREA_DEFICIT": categories.count("AREA_DEFICIT"),
+        "BLOCKED":      n_blocked,
+        "SILL_DEFICIT": n_sill,
+        "AREA_DEFICIT": n_area,
+        "OK (narrow)":  n_ok,
     }
 
 
