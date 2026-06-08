@@ -522,18 +522,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     print(f"      done in {time.time()-t0:.1f} s")
 
     src_plot = pfx + "02_source_depth.png"
+    src_html  = pfx + "02_source_depth.html"
     report.plot_depth(
         src.lon.values, src.lat.values,
         src["depth"].values, (~src["land"].values).astype(float),
         title=f"Source: {Path(source).name if source != 'emodnet' else 'EMODnet'}",
         path=os.path.join(report_dir, src_plot),
         log_scale=log_depth_scale,
+        interactive=True,
     )
     rpt.add_section(
         "Source bathymetry",
         text=(
             f"Source data read and clipped to the target domain "
-            f"(±{pad_deg}° buffer applied)."
+            f"(±{pad_deg}° buffer applied).  "
+            f"[Interactive plot]({src_html})"
         ),
         table=src_sum,
         images=[src_plot],
