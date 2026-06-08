@@ -20,9 +20,8 @@ Output format per file::
     lon1,lat1
     …
 
-One file per contiguous wet segment.  If only one segment exists the file
-is named ``<prefix>_bdy_west.csv``; multiple segments get a numeric suffix
-``_bdy_west_01.csv``, ``_bdy_west_02.csv``, etc.
+All four sides are written to a single file ``<prefix>_bdy.csv`` in the
+order west (S→N), north (W→E), east (S→N), south (W→E).
 """
 
 from __future__ import annotations
@@ -137,7 +136,7 @@ def write_boundary_coords(dst, report_dir: str, name_prefix: str) -> list[str]:
     Returns
     -------
     list[str]
-        Paths of all files written (relative file names within *report_dir*).
+        Single-element list with the relative file name written.
     """
     mask = dst["mask"].values.astype(bool)   # shape (ny, nx)
 
@@ -162,20 +161,15 @@ def write_boundary_coords(dst, report_dir: str, name_prefix: str) -> list[str]:
         "south": lambda c: c[0],
     }
 
-    written: list[str] = []
-    for side in ("west", "north", "east", "south"):
-        cells = _find_boundary_cells(mask, side)
-        segments = _split_contiguous(cells, key_fns[side])
+    fname = f"{name_prefix}_bdy.csv"
+    fpath = os.path.join(report_dir, fname)
+    with open(fpath, "w") as f:
+        f.write("T-grid\nlon,lat\n")
+        for side in ("west", "north", "east", "south"):
+            cells = _find_boundary_cells(mask, side)
+            for (i, j) in cells:
+                f.write(f"{_lon(i, j):.5f},{_lat(i, j):.5f}\n")
 
-        multi = len(segments) > 1
-        for k, seg in enumerate(segments):
-            suffix = f"_{k + 1:02d}" if multi else ""
-            fname = f"{name_prefix}_bdy_{side}{suffix}.csv"
-            fpath = os.path.join(report_dir, fname)
-            with open(fpath, "w") as f:
-                f.write("T-grid\nlon,lat\n")
-                for (i, j) in seg:
-                    f.write(f"{_lon(i, j):.5f},{_lat(i, j):.5f}\n")
-            written.append(fname)
+    written = [fname]
 
     return written
