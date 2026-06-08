@@ -362,7 +362,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     rg.add_argument("--min-depth", type=float, default=None,
                     help="Minimum ocean depth after regridding (m).")
     rg.add_argument("--min-wet-fraction", type=float, default=None,
-                    help="Flag cells with wet_fraction below this.")
+                    help="Force cells with wet_fraction below this threshold to land.")
 
     # Analysis
     an = parser.add_argument_group("Analysis")
