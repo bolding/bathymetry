@@ -29,7 +29,7 @@ regridding:
   cache_dir: ./regrid_weights
   min_depth: 2.0    # minimum depth for wet cells (m)
     #KBmin_wet_fraction: 0.05
-  min_wet_fraction: 0.15
+  min_wet_fraction: 0.4
 
 analysis:
   nkeep_basins: 1           # keep only the largest connected ocean basin
