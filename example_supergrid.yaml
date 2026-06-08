@@ -1,0 +1,50 @@
+# SuperGrid example — use an existing MOM6 ocean_hgrid.nc or pyGETM supergrid
+# as the target grid definition.
+#
+# A supergrid file has shape (2·ny+1) × (2·nx+1) and interleaves all four
+# Arakawa C-grid staggered positions:
+#
+#   Row\Col  even         odd
+#   even     Q (corner)   V (N/S face)
+#   odd      U (E/W face) T (centre)
+#
+# The pipeline reads the file, extracts T-point centres [1::2, 1::2] and
+# Q-point corners [0::2, 0::2] for ESMF conservative regridding.
+#
+# Output depth_u / depth_v (C-grid face depths) are ALWAYS written alongside
+# depth (T-point depths) regardless of grid type.
+#
+# Run with:
+#   bathymetry-regrid --config example_supergrid.yaml
+
+name: my_model_supergrid
+
+source: /server/data/GEBCO/GEBCO_2023.nc
+pad_deg: 1.0
+
+grid:
+  type: supergrid
+  file: /path/to/ocean_hgrid.nc   # MOM6 style: variables x, y (shape 2ny+1 × 2nx+1)
+  # file: /path/to/pygetm_grid.nc # pyGETM: variables lon, lat
+  # x_var: x     # default — auto-detected from (x, lon, longitude)
+  # y_var: y     # default — auto-detected from (y, lat, latitude)
+
+regridding:
+  cache_dir: ./regrid_weights
+  min_depth: 2.0
+  min_wet_fraction: 0.05
+
+analysis:
+  nkeep_basins: 1
+  wet_frac_threshold: 0.3
+  sill_ratio_threshold: 0.7
+  area_ratio_threshold: 0.5
+
+smooth:
+  rx0: 0.2
+
+output:
+  # file and report_dir are derived from 'name' above when not set:
+  #   file       → my_model_supergrid.nc
+  #   report_dir → ./report/my_model_supergrid/
+  # log_depth_scale: true

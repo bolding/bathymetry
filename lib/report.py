@@ -267,6 +267,77 @@ def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
 # Static (cartopy) plots
 # ---------------------------------------------------------------------------
 
+def plot_source_comparison(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    mask1: npt.NDArray,
+    mask2: npt.NDArray,
+    name1: str,
+    name2: str,
+    path: str | Path,
+) -> None:
+    """Four-class comparison map between two regridded source masks.
+
+    Each cell is classified as one of:
+
+    * **Common land**  — both sources say land
+    * **Common water** — both sources say ocean
+    * **name1 only**   — source 1 is ocean, source 2 is land
+    * **name2 only**   — source 1 is land, source 2 is ocean
+
+    The third and fourth classes reveal coastline disagreements between the
+    two sources at the model resolution.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+
+    path = _ensure_dir(path)
+
+    # 0=common land, 1=common water, 2=name1-only, 3=name2-only
+    comp = np.zeros(mask1.shape, dtype=np.float32)
+    comp[(mask1 == 1) & (mask2 == 1)] = 1.0
+    comp[(mask1 == 1) & (mask2 == 0)] = 2.0
+    comp[(mask1 == 0) & (mask2 == 1)] = 3.0
+
+    colours = ["#c8c8c8", "#4a90d9", "#e07b39", "#5cb85c"]
+    labels  = [
+        "Common land",
+        "Common water",
+        f"{name1} only",
+        f"{name2} only",
+    ]
+    counts = [
+        int((comp == v).sum()) for v in range(4)
+    ]
+    cmap = mcolors.ListedColormap(colours)
+    norm = mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], 4)
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        ax.pcolormesh(lon, lat, comp,  # type: ignore[union-attr]
+                      cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _apply_gridlines(ax)  # type: ignore[arg-type]
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.pcolormesh(lon, lat, comp, cmap=cmap, norm=norm)  # type: ignore[union-attr]
+
+    patches = [
+        mpatches.Patch(color=colours[i], label=f"{labels[i]}  ({counts[i]:,} cells)")
+        for i in range(4)
+    ]
+    ax.legend(handles=patches, loc="upper right", fontsize=9)  # type: ignore[union-attr]
+    ax.set_title(f"Source mask comparison: {name1} vs {name2}", fontsize=11)  # type: ignore[union-attr]
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_depth(
     lon: npt.NDArray,
     lat: npt.NDArray,
@@ -280,6 +351,7 @@ def plot_depth(
     interactive: bool = False,
     subtitle: str = "",
     colorbar_label: str = "Depth (m)",
+    log_scale: bool = False,
 ) -> None:
     """Plot a scalar field.  Saves PNG; optionally also saves a plotly HTML.
 
@@ -290,16 +362,31 @@ def plot_depth(
         italic font — intended for grid metadata (nx×ny, wet cells, resolution).
     colorbar_label : str
         Label for the colorbar (default ``"Depth (m)"``).
+    log_scale : bool
+        Use a logarithmic colour scale.  Useful when depth spans several orders
+        of magnitude (shallow shelf to deep ocean).  Values ≤ 0 are masked.
     """
     import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
 
     if cmap is None:
         cmap = _cm_depth()
     path = _ensure_dir(path)
     masked = np.where(mask, depth, np.nan)
-    vmin = vmin if vmin is not None else float(np.nanmin(masked))
-    vmax = vmax if vmax is not None else float(np.nanmax(masked))
-    kw = dict(cmap=cmap, vmin=vmin, vmax=vmax)
+
+    if log_scale:
+        # Mask non-positive values so LogNorm doesn't fail
+        masked = np.where(masked > 0, masked, np.nan)
+        _vmin = vmin if vmin is not None else float(np.nanmin(masked))
+        _vmax = vmax if vmax is not None else float(np.nanmax(masked))
+        _vmin = max(_vmin, 1e-3)
+        norm: Optional[mcolors.Normalize] = mcolors.LogNorm(vmin=_vmin, vmax=_vmax)
+        kw: dict = dict(cmap=cmap, norm=norm)
+    else:
+        vmin = vmin if vmin is not None else float(np.nanmin(masked))
+        vmax = vmax if vmax is not None else float(np.nanmax(masked))
+        norm = None
+        kw = dict(cmap=cmap, vmin=vmin, vmax=vmax)
 
     try:
         import cartopy.crs as ccrs
@@ -331,7 +418,7 @@ def plot_depth(
     plt.close(fig)
 
     if interactive:
-        _save_depth_html(lon, lat, masked, title, path)
+        _save_depth_html(lon, lat, masked, title, path, log_scale=log_scale)
 
 
 def plot_comparison(
@@ -587,24 +674,26 @@ def plot_basins(
     order = np.argsort(counts)[::-1]
     kept_ids = set(unique_ids[order[:nkeep]].tolist())
 
-    # Build an RGBA image: kept=blues, removed=reds, land=light grey
-    ny, nx = labels.shape
-    rgba = np.full((ny, nx, 4), [0.88, 0.88, 0.88, 1.0])  # default: grey (land)
-
-    blue_cm  = plt.cm.Blues                          # type: ignore[attr-defined]
-    red_cm   = plt.cm.Reds                           # type: ignore[attr-defined]
+    blue_cm = plt.cm.Blues   # type: ignore[attr-defined]
+    red_cm  = plt.cm.Reds    # type: ignore[attr-defined]
     kept_list    = [i for i in order if unique_ids[i] in kept_ids]
     removed_list = [i for i in order if unique_ids[i] not in kept_ids]
 
+    # Build a scalar field: 0=land, 1..nkeep=kept, nkeep+1..=removed.
+    # pcolormesh places each cell correctly at its geographic position;
+    # imshow(extent=...) shifts by half a cell and fails for 2-D lon/lat.
+    scalar = np.zeros(labels.shape, dtype=float)
+    colours = [(0.88, 0.88, 0.88)]  # index 0 → land (grey)
     for rank, idx in enumerate(kept_list):
-        bid = unique_ids[idx]
-        frac = 0.5 + 0.4 * rank / max(len(kept_list), 1)
-        rgba[labels == bid] = blue_cm(frac)
-
+        scalar[labels == unique_ids[idx]] = rank + 1
+        colours.append(blue_cm(0.5 + 0.4 * rank / max(len(kept_list), 1)))
     for rank, idx in enumerate(removed_list):
-        bid = unique_ids[idx]
-        frac = 0.4 + 0.5 * rank / max(len(removed_list), 1)
-        rgba[labels == bid] = red_cm(frac)
+        scalar[labels == unique_ids[idx]] = len(kept_list) + rank + 1
+        colours.append(red_cm(0.4 + 0.5 * rank / max(len(removed_list), 1)))
+
+    n = len(colours)
+    cmap = mcolors.ListedColormap(colours)
+    norm = mcolors.BoundaryNorm(np.arange(-0.5, n), n)
 
     try:
         import cartopy.crs as ccrs
@@ -612,16 +701,13 @@ def plot_basins(
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-        lon_1d = lon[0, :] if lon.ndim == 2 else lon
-        lat_1d = lat[:, 0] if lat.ndim == 2 else lat
-        ax.imshow(rgba, origin="lower",  # type: ignore[union-attr]
-                  extent=[lon_1d.min(), lon_1d.max(), lat_1d.min(), lat_1d.max()],
-                  transform=ccrs.PlateCarree(), aspect="auto")
+        ax.pcolormesh(lon, lat, scalar,  # type: ignore[union-attr]
+                      cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
         ax.add_feature(cfeature.COASTLINE, linewidth=0.6, zorder=3)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
     except ImportError:
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.imshow(rgba, origin="lower", aspect="auto")  # type: ignore[union-attr]
+        ax.pcolormesh(lon, lat, scalar, cmap=cmap, norm=norm)  # type: ignore[union-attr]
 
     legend_patches = [mpatches.Patch(color=blue_cm(0.6), label=f"Kept ({len(kept_list)} basin(s))")]
     if removed_list:
@@ -691,6 +777,7 @@ def _save_depth_html(
     depth_masked: npt.NDArray,
     title: str,
     png_path: Path,
+    log_scale: bool = False,
 ) -> None:
     """Write a zoomable plotly Heatmap alongside the PNG."""
     try:
@@ -706,15 +793,48 @@ def _save_depth_html(
         lon_axis = lon
         lat_axis = lat
 
-    fig = go.Figure(go.Heatmap(
-        z=depth_masked,
-        x=lon_axis,
-        y=lat_axis,
-        colorscale=_plotly_colorscale(_cm_depth()),
-        colorbar=dict(title="Depth (m)", thickness=15),
-        hoverongaps=False,
-        hovertemplate="lon: %{x:.3f}<br>lat: %{y:.3f}<br>depth: %{z:.1f} m<extra></extra>",
-    ))
+    if log_scale:
+        # Plotly Heatmap doesn't support LogNorm natively; store log10 values
+        # and customise the colorbar ticks to show original depths.
+        pos = np.where(depth_masked > 0, depth_masked, np.nan)
+        z_plot = np.log10(pos)
+        valid = z_plot[np.isfinite(z_plot)]
+        if valid.size:
+            lo, hi = float(np.nanmin(valid)), float(np.nanmax(valid))
+            import math
+            tick_vals = [10 ** e for e in range(math.floor(lo), math.ceil(hi) + 1)]
+            tick_text = [f"{v:.0f} m" for v in tick_vals]
+            log_tick_vals = [math.log10(v) for v in tick_vals]
+        else:
+            log_tick_vals, tick_text = [], []
+        colorbar = dict(
+            title="Depth (m)", thickness=15,
+            tickvals=log_tick_vals, ticktext=tick_text,
+        )
+        hover = "lon: %{x:.3f}<br>lat: %{y:.3f}<br>depth: %{customdata:.1f} m<extra></extra>"
+        heatmap = go.Heatmap(
+            z=z_plot,
+            x=lon_axis,
+            y=lat_axis,
+            customdata=pos,
+            colorscale=_plotly_colorscale(_cm_depth()),
+            colorbar=colorbar,
+            hoverongaps=False,
+            hovertemplate=hover,
+        )
+    else:
+        z_plot = depth_masked
+        heatmap = go.Heatmap(
+            z=z_plot,
+            x=lon_axis,
+            y=lat_axis,
+            colorscale=_plotly_colorscale(_cm_depth()),
+            colorbar=dict(title="Depth (m)", thickness=15),
+            hoverongaps=False,
+            hovertemplate="lon: %{x:.3f}<br>lat: %{y:.3f}<br>depth: %{z:.1f} m<extra></extra>",
+        )
+
+    fig = go.Figure(heatmap)
     fig.update_layout(
         title=title,
         xaxis_title="Longitude",

@@ -162,6 +162,57 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
         return gridmod.CartesianGrid(x_min, x_max, y_min, y_max,
                                      float(dx), float(dy), crs, float(rot))
 
+    elif grid_type == "rotated_pole":
+        pole_lon  = _merge(args.pole_lon,  cfg, "grid", "pole_lon")
+        pole_lat  = _merge(args.pole_lat,  cfg, "grid", "pole_lat")
+        rlon_min  = _merge(args.rlon_min,  cfg, "grid", "rlon_min")
+        rlon_max  = _merge(args.rlon_max,  cfg, "grid", "rlon_max")
+        rlat_min  = _merge(args.rlat_min,  cfg, "grid", "rlat_min")
+        rlat_max  = _merge(args.rlat_max,  cfg, "grid", "rlat_max")
+        drot      = _merge(args.drot,      cfg, "grid", "drot")
+        axis_rot  = _merge(args.axis_rotation, cfg, "grid", "axis_rotation", default=0.0)
+
+        # Convenience: auto-compute pole from domain centre lon/lat
+        lon_center = _merge(args.lon_center, cfg, "grid", "lon_center")
+        lat_center = _merge(args.lat_center, cfg, "grid", "lat_center")
+        if pole_lon is None or pole_lat is None:
+            if lon_center is None or lat_center is None:
+                raise ValueError(
+                    "rotated_pole grid requires either (pole_lon + pole_lat) "
+                    "or (lon_center + lat_center) to locate the rotated pole."
+                )
+            pole_lon, pole_lat = gridmod.pole_from_center(
+                float(lon_center), float(lat_center))
+            print(f"      [rotated_pole] auto pole: "
+                  f"pole_lat={pole_lat:.4f}°  pole_lon={pole_lon:.4f}°  "
+                  f"(from centre {float(lat_center):.2f}°N, {float(lon_center):.2f}°E)")
+
+        for name, val in [("rlon_min", rlon_min), ("rlon_max", rlon_max),
+                          ("rlat_min", rlat_min), ("rlat_max", rlat_max),
+                          ("drot", drot)]:
+            if val is None:
+                raise ValueError(f"Missing required rotated_pole grid parameter: {name}")
+
+        nx_rp = round((float(rlon_max) - float(rlon_min)) / float(drot))
+        ny_rp = round((float(rlat_max) - float(rlat_min)) / float(drot))
+        print(f"      [rotated_pole] drot={float(drot):.4g}°  "
+              f"→ grid {nx_rp} × {ny_rp} (rlon × rlat)")
+        return gridmod.RotatedPoleGrid(
+            float(pole_lon), float(pole_lat),
+            float(rlon_min), float(rlon_max),
+            float(rlat_min), float(rlat_max),
+            float(drot), float(axis_rot),
+        )
+
+    elif grid_type in ("supergrid", "curvilinear"):
+        sg_file = _merge(None, cfg, "grid", "file")
+        if sg_file is None:
+            raise ValueError("supergrid grid type requires 'grid.file' pointing to the supergrid NetCDF")
+        x_var = _merge(None, cfg, "grid", "x_var", default="")
+        y_var = _merge(None, cfg, "grid", "y_var", default="")
+        print(f"      [supergrid] reading {sg_file}")
+        return gridmod.SuperGrid(sg_file, x_var=str(x_var), y_var=str(y_var))
+
     raise ValueError(f"Unknown grid type: {grid_type!r}")
 
 
@@ -248,13 +299,15 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Source
     src_grp = parser.add_argument_group("Source")
     src_grp.add_argument("--source", default=None,
-                         help='GEBCO NetCDF path or "emodnet".')
+                         help='Primary source: GEBCO NetCDF path or "emodnet".')
+    src_grp.add_argument("--source2", default=None,
+                         help='Secondary source for comparison plot (NetCDF path or "emodnet").')
     src_grp.add_argument("--pad-deg", type=float, default=None,
                          help="Padding (degrees) around target grid when reading source.")
 
     # Grid
     grd = parser.add_argument_group("Grid type")
-    grd.add_argument("--grid", choices=["spherical", "cartesian"], default=None)
+    grd.add_argument("--grid", choices=["spherical", "cartesian", "rotated_pole"], default=None)
     grd.add_argument("--rotation", type=float, default=None,
                      help="Grid rotation in degrees CCW.")
 
@@ -269,6 +322,26 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                      help="Compute the missing dlon (or dlat) from the other using the "
                           "central latitude so that grid cells are approximately square "
                           "in physical distance.  Specify exactly one of --dlon / --dlat.")
+
+    rtp = parser.add_argument_group("Rotated-pole grid")
+    rtp.add_argument("--pole-lon", type=float, default=None, dest="pole_lon",
+                     help="Geographic longitude of the rotated North Pole (degrees).")
+    rtp.add_argument("--pole-lat", type=float, default=None, dest="pole_lat",
+                     help="Geographic latitude of the rotated North Pole (degrees).")
+    rtp.add_argument("--lon-center", type=float, default=None, dest="lon_center",
+                     help="Geographic longitude of domain centre; pole is computed "
+                          "automatically (alternative to --pole-lon/--pole-lat).")
+    rtp.add_argument("--lat-center", type=float, default=None, dest="lat_center",
+                     help="Geographic latitude of domain centre; pole is computed "
+                          "automatically (alternative to --pole-lon/--pole-lat).")
+    rtp.add_argument("--rlon-min", type=float, default=None, dest="rlon_min")
+    rtp.add_argument("--rlon-max", type=float, default=None, dest="rlon_max")
+    rtp.add_argument("--rlat-min", type=float, default=None, dest="rlat_min")
+    rtp.add_argument("--rlat-max", type=float, default=None, dest="rlat_max")
+    rtp.add_argument("--drot", type=float, default=None,
+                     help="Cell spacing in rotated degrees (same for both axes).")
+    rtp.add_argument("--axis-rotation", type=float, default=None, dest="axis_rotation",
+                     help="Extra CCW rotation of grid axes within the rotated system (degrees).")
 
     crt = parser.add_argument_group("Cartesian grid")
     crt.add_argument("--x-min", type=float, default=None, dest="x_min")
@@ -328,8 +401,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     cfg: dict = _load_yaml(args.config) if args.config else {}
 
-    source        = _merge(args.source,       cfg, "source")
-    pad_deg       = _merge(args.pad_deg,      cfg, "pad_deg",            default=1.0)
+    source        = _merge(args.source,        cfg, "source")
+    source2       = _merge(args.source2,       cfg, "source2",            default=None)
+    pad_deg       = _merge(args.pad_deg,       cfg, "pad_deg",            default=1.0)
     cache_dir     = _merge(args.cache_dir,    cfg, "regridding", "cache_dir",
                            default="./regrid_weights")
     min_depth     = _merge(args.min_depth,    cfg, "regridding", "min_depth",     default=0.0)
@@ -362,6 +436,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                          default=f"{name}.nc")
     report_dir  = _merge(args.report_dir, cfg, "output", "report_dir",
                          default=f"./report/{name}")
+    log_depth_scale = bool((cfg.get("output") or {}).get("log_depth_scale", False))
 
     os.makedirs(report_dir, exist_ok=True)
 
@@ -417,6 +492,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         src["depth"].values, (~src["land"].values).astype(float),
         title=f"Source: {Path(source).name if source != 'emodnet' else 'EMODnet'}",
         path=os.path.join(report_dir, src_plot),
+        log_scale=log_depth_scale,
     )
     rpt.add_section(
         "Source bathymetry",
@@ -451,6 +527,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         title=f"{name} — regridded depth (m)",
         path=os.path.join(report_dir, regrid_plot),
         interactive=True,
+        log_scale=log_depth_scale,
     )
     report.plot_depth(
         dst.lon.values, dst.lat.values,
@@ -470,6 +547,56 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         table=dst_sum,
         images=[regrid_plot, wf_plot],
     )
+
+    # ------------------------------------------------------------------
+    # Step 3b – Second source comparison (optional)
+    # ------------------------------------------------------------------
+    dst2_mask = None   # set below if source2 is provided
+    if source2 is not None:
+        src2_label = Path(source2).name if source2 != "emodnet" else "EMODnet"
+        src1_label = Path(source).name  if source  != "emodnet" else "EMODnet"
+        print(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
+        t0 = time.time()
+        src2 = reader.read_source(
+            source2, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg)
+        )
+        dst2 = interpolate.regrid(
+            src2, dst_grid,
+            min_depth=float(min_depth),
+            min_wet_fraction=float(min_wf),
+            cache_dir=str(cache_dir),
+        )
+        print(f"      done in {time.time()-t0:.1f} s")
+
+        dst2_mask = dst2["mask"].values
+        cmp_plot = pfx + "03b_source_comparison.png"
+        report.plot_source_comparison(
+            dst.lon.values, dst.lat.values,
+            dst["mask"].values, dst2_mask,
+            name1=src1_label, name2=src2_label,
+            path=os.path.join(report_dir, cmp_plot),
+        )
+        n_both   = int(((dst["mask"].values == 1) & (dst2_mask == 1)).sum())
+        n_src1   = int(((dst["mask"].values == 1) & (dst2_mask == 0)).sum())
+        n_src2   = int(((dst["mask"].values == 0) & (dst2_mask == 1)).sum())
+        n_land   = int(((dst["mask"].values == 0) & (dst2_mask == 0)).sum())
+        rpt.add_section(
+            "Source mask comparison",
+            text=(
+                f"Both sources regridded to the target grid "
+                f"({dst_grid.nx} × {dst_grid.ny} cells).  "
+                f"Discrepancies reveal coastline differences at model resolution."
+            ),
+            table={
+                "Source 1": src1_label,
+                "Source 2": src2_label,
+                "Common water cells": n_both,
+                "Common land cells":  n_land,
+                f"{src1_label} only (water)": n_src1,
+                f"{src2_label} only (water)": n_src2,
+            },
+            images=[cmp_plot],
+        )
 
     # ------------------------------------------------------------------
     # Step 4a – Strait detection
@@ -593,6 +720,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             dst["depth"].values, dst["mask"].values,
             title=f"{name} — after explicit masking",
             path=os.path.join(report_dir, mr_plot),
+            log_scale=log_depth_scale,
         )
         rpt.add_section(
             "Explicit mask regions",
@@ -699,13 +827,44 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     import xarray as xr
 
+    # C-grid staggered depths: U = east face, V = north face of each T-cell.
+    # Both have the same shape [ny, nx] as the T-point depth.
+    # NaN propagates: a face is land if either bordering T-cell is land.
+    depth_t = np.where(dst["mask"].values, dst["depth"].values, np.nan)
+    depth_u_vals, depth_v_vals = interpolate.compute_cgrid_depth(depth_t)
+
     out_vars: dict = {
         "depth": dst["depth"],
+        "depth_u": xr.DataArray(
+            depth_u_vals, dims=["lat", "lon"], coords=dst.coords,
+            attrs={"long_name": "Sea floor depth at eastern U-face", "units": "m",
+                   "comment": "min(depth_t[i,j], depth_t[i,j+1]); boundary = depth_t"},
+        ),
+        "depth_v": xr.DataArray(
+            depth_v_vals, dims=["lat", "lon"], coords=dst.coords,
+            attrs={"long_name": "Sea floor depth at northern V-face", "units": "m",
+                   "comment": "min(depth_t[i,j], depth_t[i+1,j]); boundary = depth_t"},
+        ),
         "wet_fraction": dst["wet_fraction"],
         "mask": dst["mask"],
     }
     if "basin_labels" in dst.data_vars:
         out_vars["basin_labels"] = dst["basin_labels"]
+    if dst2_mask is not None:
+        comp_arr = np.zeros(dst["mask"].shape, dtype=np.int8)
+        comp_arr[(dst["mask"].values == 1) & (dst2_mask == 1)] = 1
+        comp_arr[(dst["mask"].values == 1) & (dst2_mask == 0)] = 2
+        comp_arr[(dst["mask"].values == 0) & (dst2_mask == 1)] = 3
+        out_vars["source_comparison"] = xr.DataArray(
+            comp_arr, dims=["lat", "lon"], coords=dst.coords,
+            attrs={
+                "long_name": "Source mask comparison",
+                "flag_values": "0 1 2 3",
+                "flag_meanings": "common_land common_water source1_only source2_only",
+                "source1": str(source),
+                "source2": str(source2),
+            },
+        )
     if depth_smooth is not None and rx0 is not None:
         smooth_var = _smooth_var_name(float(rx0))
         out_vars[smooth_var] = xr.DataArray(
@@ -746,6 +905,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             subtitle=subtitle,
             path=os.path.join(report_dir, fname),
             interactive=True,
+            log_scale=log_depth_scale,
         )
         final_plots.append(fname)
         print(f"  {fname}")

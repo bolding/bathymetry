@@ -1,0 +1,62 @@
+# Rotated-pole North Sea example.
+# The rotated pole is computed automatically from the domain centre so that
+# the centre sits on the rotated equator — cells are equidistant by construction.
+#
+# Run with:
+#   bathymetry-regrid --config example_northsea_rotated_pole.yaml
+#
+# Compare with example_northsea.yaml (regular lat/lon) and
+# example_northsea.yaml + --equidistant (equidistant at centre only).
+
+name: northsea_rotpole
+
+source: /server/data/GEBCO/GEBCO_2023.nc
+pad_deg: 1.0
+
+grid:
+  type: rotated_pole
+
+  # --- Pole location ---
+  # Option A: specify the geographic location of the rotated North Pole directly.
+  # These values mimic the AMM15-style placement for the North Sea:
+  #   pole_lat: 37.5
+  #   pole_lon: -25.0
+
+  # Option B: give the domain centre and let the tool compute the pole.
+  # The centre will land exactly at rlon=0, rlat=0 (rotated equator/meridian).
+  lon_center: 2.0    # °E — geographic centre of the North Sea domain
+  lat_center: 55.0   # °N
+
+  # --- Domain in rotated coordinates (degrees from the rotated origin) ---
+  rlon_min: -9.0
+  rlon_max:  9.0
+  rlat_min: -6.0
+  rlat_max:  6.0
+
+  # --- Cell size (single value — equidistant in both axes by construction) ---
+  drot: 0.1    # rotated degrees ≈ 11 km everywhere in the domain
+
+  # --- Optional axis rotation within the rotated system ---
+  # A non-zero value tilts the grid axes relative to the rotated E/W direction.
+  # Useful for aligning the grid with a coastline or matching an existing model.
+  # axis_rotation: 0.0
+
+regridding:
+  cache_dir: ./regrid_weights
+  min_depth: 2.0
+  min_wet_fraction: 0.05
+
+analysis:
+  nkeep_basins: 1
+  wet_frac_threshold: 0.3
+  sill_ratio_threshold: 0.7
+  area_ratio_threshold: 0.5
+
+smooth:
+  rx0: 0.2
+
+output:
+  # file and report_dir are derived from 'name' above when not set:
+  #   file       → northsea_rotpole.nc
+  #   report_dir → ./report/northsea_rotpole/
+  # log_depth_scale: true   # log colour scale — good when shelf and deep water coexist

@@ -21,8 +21,8 @@ SILL_DEFICIT
 BLOCKED
     No continuous fine-resolution wet path exists between the two sub-tiles.
 
-Note: strait detection is implemented for spherical (lon/lat) grids only.
-Rotated or Cartesian grids emit a warning and return no flagged straits.
+Works for any grid type (SphericalGrid, RotatedPoleGrid, CartesianGrid).
+Cell extents are estimated from geographic centre-coordinate neighbour distances.
 
 Isolated-cell masking
 ---------------------
@@ -32,14 +32,13 @@ The *nkeep* largest are retained; all others are set to land.
 
 from __future__ import annotations
 
-import warnings
 from typing import Optional
 
 import numpy as np
 import numpy.typing as npt
 import xarray as xr
 
-from grid import BaseGrid, SphericalGrid
+from grid import BaseGrid, SphericalGrid  # SphericalGrid kept for fast-path check
 
 # Earth radius used for width estimates
 _R_EARTH_KM = 6371.0
@@ -145,7 +144,8 @@ def find_straits(
     dst : xr.Dataset
         Coarse regridded bathymetry (from interpolate.regrid).
     dst_grid : BaseGrid
-        Destination grid object; must be a SphericalGrid for analysis to run.
+        Destination grid object.  Works for any grid type — SphericalGrid,
+        RotatedPoleGrid, CartesianGrid.
     wet_frac_threshold : float
         Only inspect interfaces where at least one adjacent cell has
         wet_fraction < this value.
@@ -166,22 +166,6 @@ def find_straits(
         ``section_area_coarse``, ``area_ratio``, ``connected``,
         ``suggested_fix``.
     """
-    if not isinstance(dst_grid, SphericalGrid):
-        warnings.warn(
-            "Strait detection is only implemented for SphericalGrid. "
-            "Skipping analysis for this grid type.",
-            stacklevel=2,
-        )
-        return []
-
-    if dst_grid.rotation_deg != 0.0:
-        warnings.warn(
-            "Strait detection is not supported for rotated grids. "
-            "Skipping.",
-            stacklevel=2,
-        )
-        return []
-
     mask = dst["mask"].values.astype(bool)        # [ny_dst, nx_dst]
     depth_dst = np.where(mask, dst["depth"].values, 0.0)
     wf = dst["wet_fraction"].values               # [ny_dst, nx_dst]
@@ -192,12 +176,10 @@ def find_straits(
 
     dlon_src = float(np.diff(src_lon).mean())
     dlat_src = float(np.diff(src_lat).mean())
-    dlon_dst = dst_grid.dlon
-    dlat_dst = dst_grid.dlat
 
-    # Fine cells per coarse cell (approximate)
-    ratio_lon = dlon_dst / dlon_src
-    ratio_lat = dlat_dst / dlat_src
+    # Per-cell geographic extent in degrees — works for axis-aligned and rotated grids.
+    # For a SphericalGrid with no rotation the fast-path returns constant arrays.
+    dlon_cell, dlat_cell = _cell_size_arrays(dst_grid)
 
     ny_dst, nx_dst = mask.shape
     records: list[dict] = []
@@ -211,7 +193,7 @@ def find_straits(
                 continue
             rec = _analyse_u_interface(
                 i, j, src_lon, src_lat, src_depth, dlon_src, dlat_src,
-                dst_grid, depth_dst, ratio_lon, ratio_lat,
+                dst_grid, depth_dst, dlon_cell, dlat_cell,
                 width_threshold_cells, sill_ratio_threshold, area_ratio_threshold,
             )
             if rec is not None:
@@ -226,7 +208,7 @@ def find_straits(
                 continue
             rec = _analyse_v_interface(
                 i, j, src_lon, src_lat, src_depth, dlon_src, dlat_src,
-                dst_grid, depth_dst, ratio_lon, ratio_lat,
+                dst_grid, depth_dst, dlon_cell, dlat_cell,
                 width_threshold_cells, sill_ratio_threshold, area_ratio_threshold,
             )
             if rec is not None:
@@ -238,6 +220,42 @@ def find_straits(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _cell_size_arrays(
+    dst_grid: BaseGrid,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Return per-cell geographic extents (degrees) for any grid type.
+
+    For a non-rotated SphericalGrid the result is constant (fast path).
+    For rotated or Cartesian grids, cell extents are estimated from the
+    geographic distances between adjacent cell centres — the only information
+    available from ``BaseGrid`` without knowing the concrete subclass.
+
+    ``dlon_cell[i, j]`` ≈ geographic longitude span of cell (i, j).
+    ``dlat_cell[i, j]`` ≈ geographic latitude span of cell (i, j).
+    """
+    if isinstance(dst_grid, SphericalGrid) and dst_grid.rotation_deg == 0.0:
+        dlon_cell = np.full(dst_grid.center_lon.shape, dst_grid.dlon)
+        dlat_cell = np.full(dst_grid.center_lat.shape, dst_grid.dlat)
+        return dlon_cell, dlat_cell
+
+    clon = dst_grid.center_lon   # [ny, nx]
+    clat = dst_grid.center_lat   # [ny, nx]
+
+    # Longitude span: central differences; forward/backward at boundaries.
+    dlon = np.empty_like(clon)
+    dlon[:, 1:-1] = np.abs(clon[:, 2:] - clon[:, :-2]) / 2.0
+    dlon[:, 0]    = np.abs(clon[:, 1]  - clon[:, 0])
+    dlon[:, -1]   = np.abs(clon[:, -1] - clon[:, -2])
+
+    # Latitude span: central differences; forward/backward at boundaries.
+    dlat = np.empty_like(clat)
+    dlat[1:-1, :] = np.abs(clat[2:, :] - clat[:-2, :]) / 2.0
+    dlat[0, :]    = np.abs(clat[1, :]  - clat[0, :])
+    dlat[-1, :]   = np.abs(clat[-1, :] - clat[-2, :])
+
+    return dlon, dlat
+
 
 def _fine_indices(
     center_val: float, half_width: float, coords_1d: npt.NDArray
@@ -306,23 +324,28 @@ def _analyse_u_interface(
     i: int, j: int,
     src_lon, src_lat, src_depth,
     dlon_src, dlat_src,
-    dst_grid: SphericalGrid,
+    dst_grid: BaseGrid,
     depth_dst,
-    ratio_lon, ratio_lat,
+    dlon_cell: npt.NDArray,
+    dlat_cell: npt.NDArray,
     width_thr, sill_thr, area_thr,
 ) -> Optional[dict]:
     """Analyse the interface between coarse cells (i,j) and (i,j+1)."""
-    # Coarse cell centres and half-extents
-    clon_j = dst_grid.center_lon[i, j]
+    clon_j  = dst_grid.center_lon[i, j]
     clon_j1 = dst_grid.center_lon[i, j + 1]
-    clat_i = dst_grid.center_lat[i, j]
+    clat_j  = dst_grid.center_lat[i, j]
+    clat_j1 = dst_grid.center_lat[i, j + 1]
 
+    # Geographic midpoint of the interface (works for rotated grids too)
     lon_interface = (clon_j + clon_j1) / 2.0
-    lon_half = dst_grid.dlon                      # one coarse cell wide each side
-    lat_half = dst_grid.dlat / 2.0
+    lat_interface = (clat_j + clat_j1) / 2.0
+
+    # Window: one average cell wide in each axis so we capture both sides
+    lon_half = (dlon_cell[i, j] + dlon_cell[i, j + 1]) / 2.0
+    lat_half = (dlat_cell[i, j] + dlat_cell[i, j + 1]) / 4.0  # half cell tall
 
     il_start, il_end = _fine_indices(lon_interface, lon_half, src_lon)
-    ia_start, ia_end = _fine_indices(clat_i, lat_half, src_lat)
+    ia_start, ia_end = _fine_indices(lat_interface, lat_half, src_lat)
 
     if il_end <= il_start or ia_end <= ia_start:
         return None
@@ -330,15 +353,16 @@ def _analyse_u_interface(
     fine_sub = src_depth[ia_start:ia_end, il_start:il_end]  # [ny_f, nx_f]
     split_col = fine_sub.shape[1] // 2
 
-    # Cross-section: column nearest to the interface
+    # Cross-section: column nearest to the interface longitude
     cs_col = np.argmin(np.abs(src_lon[il_start:il_end] - lon_interface))
     depth_section = fine_sub[:, cs_col]
 
     dlat_km = dlat_src * _R_EARTH_KM * np.pi / 180.0
     width_km, sill_fine, area_fine = _section_metrics(depth_section, dlat_km)
 
-    # Coarse equivalent: depth × height of cell
-    clat_height_km = dst_grid.dlat * _R_EARTH_KM * np.pi / 180.0
+    # Coarse equivalent: depth × geographic height of cell
+    cell_dlat = (dlat_cell[i, j] + dlat_cell[i, j + 1]) / 2.0
+    clat_height_km = cell_dlat * _R_EARTH_KM * np.pi / 180.0
     depth_coarse_avg = (depth_dst[i, j] + depth_dst[i, j + 1]) / 2.0
     area_coarse = depth_coarse_avg * clat_height_km * 1000.0
     sill_coarse = depth_coarse_avg
@@ -346,9 +370,9 @@ def _analyse_u_interface(
     sill_ratio = sill_fine / sill_coarse if sill_coarse > 0 else 0.0
     area_ratio = area_fine / area_coarse if area_coarse > 0 else 0.0
 
-    # Width threshold: min-width in fine cells vs coarse cell width in fine cells
-    width_thr_km = width_thr * dst_grid.dlon * _R_EARTH_KM * np.pi / 180.0 * np.cos(
-        np.radians(clat_i)
+    cell_dlon = (dlon_cell[i, j] + dlon_cell[i, j + 1]) / 2.0
+    width_thr_km = width_thr * cell_dlon * _R_EARTH_KM * np.pi / 180.0 * np.cos(
+        np.radians(lat_interface)
     )
 
     connected = _connectivity_ok(fine_sub, split_col)
@@ -359,7 +383,7 @@ def _analyse_u_interface(
 
     return {
         "lon": lon_interface,
-        "lat": clat_i,
+        "lat": lat_interface,
         "direction": "U",
         "category": category,
         "width_km": round(width_km, 2),
@@ -371,7 +395,6 @@ def _analyse_u_interface(
         "area_ratio": round(area_ratio, 3),
         "connected": connected,
         "suggested_fix": fix,
-        # Store for profile plots
         "_depth_section": depth_section,
         "_dlat_km": dlat_km,
     }
@@ -381,21 +404,25 @@ def _analyse_v_interface(
     i: int, j: int,
     src_lon, src_lat, src_depth,
     dlon_src, dlat_src,
-    dst_grid: SphericalGrid,
+    dst_grid: BaseGrid,
     depth_dst,
-    ratio_lon, ratio_lat,
+    dlon_cell: npt.NDArray,
+    dlat_cell: npt.NDArray,
     width_thr, sill_thr, area_thr,
 ) -> Optional[dict]:
     """Analyse the interface between coarse cells (i,j) and (i+1,j)."""
-    clon_j = dst_grid.center_lon[i, j]
-    clat_i = dst_grid.center_lat[i, j]
+    clon_i  = dst_grid.center_lon[i, j]
+    clon_i1 = dst_grid.center_lon[i + 1, j]
+    clat_i  = dst_grid.center_lat[i, j]
     clat_i1 = dst_grid.center_lat[i + 1, j]
 
+    lon_interface = (clon_i + clon_i1) / 2.0
     lat_interface = (clat_i + clat_i1) / 2.0
-    lat_half = dst_grid.dlat
-    lon_half = dst_grid.dlon / 2.0
 
-    il_start, il_end = _fine_indices(clon_j, lon_half, src_lon)
+    lat_half = (dlat_cell[i, j] + dlat_cell[i + 1, j]) / 2.0   # one average cell tall
+    lon_half = (dlon_cell[i, j] + dlon_cell[i + 1, j]) / 4.0   # half cell wide
+
+    il_start, il_end = _fine_indices(lon_interface, lon_half, src_lon)
     ia_start, ia_end = _fine_indices(lat_interface, lat_half, src_lat)
 
     if il_end <= il_start or ia_end <= ia_start:
@@ -411,14 +438,17 @@ def _analyse_v_interface(
     dlon_km = dlon_src * _R_EARTH_KM * np.pi / 180.0 * cos_lat
     width_km, sill_fine, area_fine = _section_metrics(depth_section, dlon_km)
 
-    clon_width_km = dst_grid.dlon * _R_EARTH_KM * np.pi / 180.0 * cos_lat
+    cell_dlon = (dlon_cell[i, j] + dlon_cell[i + 1, j]) / 2.0
+    clon_width_km = cell_dlon * _R_EARTH_KM * np.pi / 180.0 * cos_lat
     depth_coarse_avg = (depth_dst[i, j] + depth_dst[i + 1, j]) / 2.0
     area_coarse = depth_coarse_avg * clon_width_km * 1000.0
     sill_coarse = depth_coarse_avg
 
     sill_ratio = sill_fine / sill_coarse if sill_coarse > 0 else 0.0
     area_ratio = area_fine / area_coarse if area_coarse > 0 else 0.0
-    width_thr_km = width_thr * dst_grid.dlat * _R_EARTH_KM * np.pi / 180.0
+
+    cell_dlat = (dlat_cell[i, j] + dlat_cell[i + 1, j]) / 2.0
+    width_thr_km = width_thr * cell_dlat * _R_EARTH_KM * np.pi / 180.0
 
     connected = _connectivity_ok(fine_sub, split_row)  # type: ignore[arg-type]
     category, fix = _classify(sill_ratio, area_ratio, connected, sill_thr, area_thr)
@@ -427,7 +457,7 @@ def _analyse_v_interface(
         return None
 
     return {
-        "lon": clon_j,
+        "lon": lon_interface,
         "lat": lat_interface,
         "direction": "V",
         "category": category,

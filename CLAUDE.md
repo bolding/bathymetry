@@ -74,9 +74,28 @@ or `--fixes-file <path>` (explicit). No manual copy-paste needed.
 
 - `SphericalGrid`: `lon_min/max`, `lat_min/max`, `dlon`, `dlat`, `rotation_deg`
 - `CartesianGrid`: `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation_deg`
+- `RotatedPoleGrid`: `pole_lon/lat` or `lon/lat_center`, `rlon/rlat_min/max`, `drot`, `axis_rotation`
+- `SuperGrid`: `file` (path to supergrid NetCDF), optional `x_var`/`y_var` (auto-detected).
+  Reads a `(2·ny+1) × (2·nx+1)` file (MOM6 `ocean_hgrid.nc` or pyGETM style).
+  Extracts T-centres at `[1::2, 1::2]` and Q-corners at `[0::2, 0::2]` for ESMF.
+  Also exposes `u_lon/u_lat` at `[1::2, 0::2]` and `v_lon/v_lat` at `[0::2, 1::2]`.
 - Non-zero `rotation_deg` → corner arrays become 2-D; handled by ESMF and plotly.
 - All Cartopy inset plots use `_inset_gridlines(ax, extent)` — auto-picks tick
   spacing (0.5° / 1° / 2° / 5° / 10°) from the extent span.
+
+### Arakawa C-grid staggered depths (always written)
+
+Every output NetCDF includes three depth variables:
+
+| Variable  | Description | Shape |
+|-----------|-------------|-------|
+| `depth`   | T-point depth (NaN = land) | [ny, nx] |
+| `depth_u` | Eastern-face depth = `min(depth[i,j], depth[i,j+1])` | [ny, nx] |
+| `depth_v` | Northern-face depth = `min(depth[i,j], depth[i+1,j])` | [ny, nx] |
+
+`depth_u[:, -1]` and `depth_v[-1, :]` use the boundary T-point depth.
+NaN propagates: a face is land if either bordering T-cell is land.
+`compute_cgrid_depth(depth_t)` in `lib/interpolate.py` performs the computation.
 
 ### Equidistant spherical grids (`--equidistant` / `grid.equidistant: true`)
 
@@ -94,8 +113,11 @@ resulting dimensions so the user can confirm before the run proceeds.
 
 ### Report / plot helpers (lib/report.py)
 
-- `plot_depth(ds, var, title, subtitle)` — two-line title via `set_title("\n".join)`;
-  do not use `ax.text` for subtitles (it overlaps the Cartopy title).
+- `plot_depth(ds, var, title, subtitle, log_scale=False)` — two-line title via
+  `set_title("\n".join)`; do not use `ax.text` for subtitles (it overlaps the
+  Cartopy title).  `log_scale=True` uses `matplotlib.colors.LogNorm`; the
+  interactive plotly HTML stores `log10(depth)` with original-depth tick labels.
+  Enabled via `output.log_depth_scale: true` in the YAML config.
 - `save_fixes_yaml(records, path)` — groups entries by category, writes one
   comment-block header per group so the user sees BLOCKED / SILL_DEFICIT /
   AREA_DEFICIT in priority order.

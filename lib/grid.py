@@ -9,6 +9,7 @@ have shape [ny, nx] following the numpy/xarray [row, col] convention.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -268,36 +269,269 @@ class CartesianGrid(BaseGrid):
         return d
 
 
-class CurvilinearGrid(BaseGrid):
-    """Curvilinear grid from pre-computed corner coordinates.
+def _rot2geo(
+    rlon: npt.NDArray,
+    rlat: npt.NDArray,
+    pole_lon: float,
+    pole_lat: float,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Inverse rotated-pole transform: (rlon, rlat) → geographic (lon, lat).
 
-    Not yet implemented — placeholder so the rest of the pipeline can accept
-    the type without breaking.
+    CF convention: pole_lon/pole_lat is the geographic location of the
+    rotated North Pole.  The transform is exact (no small-angle approx).
+    """
+    rr = np.radians(rlon)
+    lr = np.radians(rlat)
+    pp = np.radians(pole_lat)
+
+    sin_lat = np.sin(pp) * np.sin(lr) + np.cos(pp) * np.cos(lr) * np.cos(rr)
+    lat = np.degrees(np.arcsin(np.clip(sin_lat, -1.0, 1.0)))
+
+    cos_lat = np.cos(np.radians(lat))
+    safe = cos_lat > 1e-10
+    sn = np.where(safe, np.cos(lr) * np.sin(rr) / cos_lat, 0.0)
+    cs = np.where(safe,
+                  (np.cos(pp) * np.sin(lr)
+                   - np.sin(pp) * np.cos(lr) * np.cos(rr)) / cos_lat,
+                  np.sign(np.cos(pp)))
+    lon = (pole_lon + np.degrees(np.arctan2(sn, cs)) + 180.0) % 360.0 - 180.0
+    return lon, lat
+
+
+def pole_from_center(lon0: float, lat0: float) -> tuple[float, float]:
+    """Return the rotated-pole location that places (lon0, lat0) at rlon=0, rlat=0.
+
+    This puts the domain centre exactly on the rotated equator, maximising
+    cell equidistance across the domain.
+
+    Returns
+    -------
+    pole_lon, pole_lat : float
+        Geographic longitude and latitude of the rotated North Pole.
+    """
+    pole_lat = 90.0 - lat0
+    pole_lon = (lon0 - 180.0 + 180.0) % 360.0 - 180.0
+    return pole_lon, pole_lat
+
+
+class RotatedPoleGrid(BaseGrid):
+    """Rotated-pole spherical grid (CF convention).
+
+    The grid is defined as a regular (rlon, rlat) mesh in rotated coordinates
+    and back-transformed to geographic (lon, lat) using the exact spherical
+    rotation.  Cells are equidistant by construction near the rotated equator.
+
+    Parameters
+    ----------
+    pole_lon, pole_lat : float
+        Geographic location of the rotated North Pole (degrees).
+        Use ``pole_from_center(lon0, lat0)`` to compute this automatically
+        for a domain centred at (lon0, lat0).
+    rlon_min, rlon_max : float
+        Domain extent in rotated longitude (degrees).
+    rlat_min, rlat_max : float
+        Domain extent in rotated latitude (degrees).
+    drot : float
+        Cell spacing in rotated degrees (same for both axes — equidistant).
+    axis_rotation_deg : float
+        Optional additional CCW rotation of the grid axes within the rotated
+        system.  Useful for aligning the grid with a coastline or matching
+        an existing model configuration.  Default 0.0.
     """
 
     def __init__(
         self,
-        corner_lon: npt.NDArray[np.float64],
-        corner_lat: npt.NDArray[np.float64],
+        pole_lon: float,
+        pole_lat: float,
+        rlon_min: float,
+        rlon_max: float,
+        rlat_min: float,
+        rlat_max: float,
+        drot: float,
+        axis_rotation_deg: float = 0.0,
     ) -> None:
-        raise NotImplementedError(
-            "CurvilinearGrid is not yet implemented. "
-            "Supply corner_lon and corner_lat arrays of shape [ny+1, nx+1] "
-            "once support is added."
-        )
+        self.pole_lon = pole_lon
+        self.pole_lat = pole_lat
+        self.rlon_min = rlon_min
+        self.rlon_max = rlon_max
+        self.rlat_min = rlat_min
+        self.rlat_max = rlat_max
+        self.drot = drot
+        self.axis_rotation_deg = axis_rotation_deg
+        self._build()
+
+    def _build(self) -> None:
+        nx = round((self.rlon_max - self.rlon_min) / self.drot)
+        ny = round((self.rlat_max - self.rlat_min) / self.drot)
+
+        rlon_1d = self.rlon_min + np.arange(nx + 1) * self.drot
+        rlat_1d = self.rlat_min + np.arange(ny + 1) * self.drot
+        rlon_c, rlat_c = np.meshgrid(rlon_1d, rlat_1d)   # [ny+1, nx+1]
+
+        if self.axis_rotation_deg != 0.0:
+            th = np.radians(self.axis_rotation_deg)
+            c, s = np.cos(th), np.sin(th)
+            rlon_r = c * rlon_c - s * rlat_c
+            rlat_r = s * rlon_c + c * rlat_c
+        else:
+            rlon_r, rlat_r = rlon_c, rlat_c
+
+        lon_c, lat_c = _rot2geo(rlon_r, rlat_r, self.pole_lon, self.pole_lat)
+
+        self._corner_lon = np.asarray(lon_c, dtype=np.float64)
+        self._corner_lat = np.asarray(lat_c, dtype=np.float64)
+        self._center_lon = np.asarray(0.25 * (
+            lon_c[:-1, :-1] + lon_c[:-1, 1:] + lon_c[1:, :-1] + lon_c[1:, 1:]
+        ), dtype=np.float64)
+        self._center_lat = np.asarray(0.25 * (
+            lat_c[:-1, :-1] + lat_c[:-1, 1:] + lat_c[1:, :-1] + lat_c[1:, 1:]
+        ), dtype=np.float64)
+
+        # Local rotation angle α: angle of model x-axis relative to geographic East.
+        # Derived from the direction of the right-hand cell edge in geographic space.
+        # Useful for vector rotation of atmospheric forcing (wind stress etc.).
+        dlon = lon_c[:-1, 1:] - lon_c[:-1, :-1]   # [ny, nx]  approximate
+        dlat = lat_c[:-1, 1:] - lat_c[:-1, :-1]
+        cos_lat_c = np.cos(np.radians(self._center_lat))
+        self._axis_angle = np.arctan2(dlat, dlon * cos_lat_c)   # radians
 
     @property
-    def corner_lon(self) -> npt.NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    def corner_lon(self) -> npt.NDArray[np.float64]:
+        return self._corner_lon
 
     @property
-    def corner_lat(self) -> npt.NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    def corner_lat(self) -> npt.NDArray[np.float64]:
+        return self._corner_lat
 
     @property
-    def center_lon(self) -> npt.NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    def center_lon(self) -> npt.NDArray[np.float64]:
+        return self._center_lon
 
     @property
-    def center_lat(self) -> npt.NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    def center_lat(self) -> npt.NDArray[np.float64]:
+        return self._center_lat
+
+    @property
+    def axis_angle(self) -> npt.NDArray[np.float64]:
+        """Local angle (radians) of model x-axis relative to geographic East.
+
+        Shape [ny, nx].  Used to rotate atmospheric vector forcing from
+        geographic (East, North) into model (u, v) grid coordinates:
+            u_model =  u_geo * cos(α) + v_geo * sin(α)
+            v_model = −u_geo * sin(α) + v_geo * cos(α)
+        """
+        return self._axis_angle
+
+    def summary(self) -> dict:
+        d = super().summary()
+        d.update({
+            "pole_lon": self.pole_lon,
+            "pole_lat": self.pole_lat,
+            "rlon_min": self.rlon_min,
+            "rlon_max": self.rlon_max,
+            "rlat_min": self.rlat_min,
+            "rlat_max": self.rlat_max,
+            "drot": self.drot,
+            "axis_rotation_deg": self.axis_rotation_deg,
+        })
+        return d
+
+
+class SuperGrid(BaseGrid):
+    """Grid read from a supergrid NetCDF file (MOM6 ocean_hgrid.nc / pyGETM).
+
+    A supergrid has shape ``(2·ny+1) × (2·nx+1)`` and interleaves all four
+    Arakawa C-grid staggered positions in a single array:
+
+        Row\\Col  even         odd
+        even     Q (corner)   V (N/S face)
+        odd      U (E/W face) T (centre)
+
+    The ESMF conservative regridder requires T-point centres and Q-point corners:
+
+    =========  ======================  ===========
+    Position   Supergrid slice         Shape
+    =========  ======================  ===========
+    T-centre   ``[1::2, 1::2]``        ny × nx
+    U (E/W)    ``[1::2, 0::2]``        ny × (nx+1)
+    V (N/S)    ``[0::2, 1::2]``        (ny+1) × nx
+    Q-corner   ``[0::2, 0::2]``        (ny+1) × (nx+1)
+    =========  ======================  ===========
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to the supergrid NetCDF file.
+    x_var, y_var : str
+        Variable names for longitude and latitude in the file.
+        MOM6 uses ``"x"`` / ``"y"``; pyGETM may use ``"lon"`` / ``"lat"``.
+        Auto-detected from the file if not supplied.
+    """
+
+    def __init__(
+        self,
+        path: "str | Path",
+        x_var: str = "",
+        y_var: str = "",
+    ) -> None:
+        from pathlib import Path
+        import xarray as xr
+
+        ds = xr.open_dataset(Path(path))
+        if not x_var:
+            x_var = next(v for v in ("x", "lon", "longitude") if v in ds)
+        if not y_var:
+            y_var = next(v for v in ("y", "lat", "latitude") if v in ds)
+        sg_x = ds[x_var].values.astype(np.float64)
+        sg_y = ds[y_var].values.astype(np.float64)
+        ds.close()
+
+        if sg_x.ndim != 2 or sg_x.shape[0] % 2 == 0 or sg_x.shape[1] % 2 == 0:
+            raise ValueError(
+                f"Expected a supergrid with odd dimensions (2·ny+1) × (2·nx+1), "
+                f"got {sg_x.shape}.  Check x_var/y_var."
+            )
+
+        self._center_lon: npt.NDArray[np.float64] = sg_x[1::2, 1::2]
+        self._center_lat: npt.NDArray[np.float64] = sg_y[1::2, 1::2]
+        self._corner_lon: npt.NDArray[np.float64] = sg_x[0::2, 0::2]
+        self._corner_lat: npt.NDArray[np.float64] = sg_y[0::2, 0::2]
+
+        # Keep U/V coordinate slices for downstream use
+        self.u_lon: npt.NDArray[np.float64] = sg_x[1::2, 0::2]
+        self.u_lat: npt.NDArray[np.float64] = sg_y[1::2, 0::2]
+        self.v_lon: npt.NDArray[np.float64] = sg_x[0::2, 1::2]
+        self.v_lat: npt.NDArray[np.float64] = sg_y[0::2, 1::2]
+
+    @property
+    def corner_lon(self) -> npt.NDArray[np.float64]:
+        return self._corner_lon
+
+    @property
+    def corner_lat(self) -> npt.NDArray[np.float64]:
+        return self._corner_lat
+
+    @property
+    def center_lon(self) -> npt.NDArray[np.float64]:
+        return self._center_lon
+
+    @property
+    def center_lat(self) -> npt.NDArray[np.float64]:
+        return self._center_lat
+
+    def summary(self) -> dict:
+        d = super().summary()
+        d["type"] = "SuperGrid"
+        return d
+
+
+class CurvilinearGrid(SuperGrid):
+    """Alias kept for backwards compatibility — use SuperGrid instead."""
+
+    def __init__(
+        self,
+        path: "str | Path",
+        x_var: str = "",
+        y_var: str = "",
+    ) -> None:
+        super().__init__(path, x_var, y_var)

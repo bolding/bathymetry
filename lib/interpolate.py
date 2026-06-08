@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import xarray as xr
 
 from grid import BaseGrid
@@ -142,6 +143,40 @@ def regrid(
             "min_wet_fraction_flag": min_wet_fraction,
         },
     )
+
+
+def compute_cgrid_depth(
+    depth_t: npt.NDArray,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Derive Arakawa C-grid face depths from T-point depths.
+
+    Both outputs have shape ``[ny, nx]`` — the same as ``depth_t``.
+
+    ``depth_u[i, j]`` — depth at the **eastern** face of T-cell (i, j):
+
+    .. code-block:: python
+
+        depth_u[:, :-1] = minimum(depth_t[:, :-1], depth_t[:, 1:])
+        depth_u[:, -1]  = depth_t[:, -1]   # eastern boundary
+
+    ``depth_v[i, j]`` — depth at the **northern** face of T-cell (i, j):
+
+    .. code-block:: python
+
+        depth_v[:-1, :] = minimum(depth_t[:-1, :], depth_t[1:, :])
+        depth_v[-1, :]  = depth_t[-1, :]   # northern boundary
+
+    The minimum convention ensures zero transport across a face that borders
+    land on either side.  NaN propagates: land (NaN) on either adjacent T-cell
+    makes the face NaN (land) too.
+    """
+    depth_u = depth_t.copy()
+    depth_u[:, :-1] = np.minimum(depth_t[:, :-1], depth_t[:, 1:])
+
+    depth_v = depth_t.copy()
+    depth_v[:-1, :] = np.minimum(depth_t[:-1, :], depth_t[1:, :])
+
+    return depth_u, depth_v
 
 
 def regrid_summary(dst: xr.Dataset, dst_grid: BaseGrid) -> dict:
