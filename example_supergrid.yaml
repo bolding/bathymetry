@@ -33,6 +33,7 @@ regridding:
   cache_dir: ./regrid_weights
   min_depth: 2.0
   min_wet_fraction: 0.05
+  # coastline_mask: "10m"   # overlay NE land polygons on source; "10m" | "50m" | "110m"
 
 analysis:
   nkeep_basins: 1

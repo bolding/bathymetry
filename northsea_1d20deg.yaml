@@ -7,7 +7,7 @@
 #   output NetCDF  → northsea_0p05deg.nc
 #   report dir     → ./report/northsea_0p05deg/
 #   figures        → northsea_0p05deg_02_source_depth.png, etc.
-name: northsea_0p05deg
+name: northsea_1d20deg
 
 source: /server/data/GEBCO/GEBCO_2023.nc
 pad_deg: 1.0
@@ -28,10 +28,8 @@ grid:
 regridding:
   cache_dir: ./regrid_weights
   min_depth: 2.0    # minimum depth for wet cells (m)
-  min_wet_fraction: 0.05
+  min_wet_fraction: 0.4
   # coastline_mask: "10m"   # overlay NE land polygons on source; "10m" | "50m" | "110m"
-  # emodnet_cache_dir: ./emodnet_cache   # where to cache downloaded EMODnet tiles
-  # emodnet_resolution: 0.002083         # override native ~230 m (1/480°) resolution
 
 analysis:
   nkeep_basins: 1           # keep only the largest connected ocean basin
@@ -43,11 +41,8 @@ smooth:
   rx0: 0.2    # target Haney slope factor; set to null or remove to skip smoothing
 
 output:
-  # file and report_dir are derived from 'name' above when not set:
-  #   file       → northsea_0p05deg.nc
-  #   report_dir → ./report/northsea_0p05deg/
-  # log_depth_scale: true   # use log colour scale in depth plots (useful when
-  #                         # depth spans shelf (<10 m) to deep ocean (>1000 m))
+  file: bathymetry_northsea.nc
+  report_dir: ./report/northsea
 
 # Fixes: re-run with --accept-fixes to apply all suggestions automatically,
 # or paste selected entries here.  Available actions: set_depth, open_cell, close_cell
