@@ -230,17 +230,50 @@ def _dst_resolution(dst_grid: BaseGrid) -> float:
     return min(d_lon, d_lat)
 
 
-def _tile_cache_key(src_ds: xr.Dataset, dst_ds: xr.Dataset) -> str:
-    """MD5 hash uniquely identifying a (source tile, destination tile) pair."""
+def _tile_cache_key(src_ds: xr.Dataset, dst_ds: xr.Dataset) -> tuple[str, str]:
+    """Return (hash, description) uniquely identifying a (source, destination) pair.
+
+    The description is a human-readable plain-text summary of the inputs that
+    produced the hash, written as a sidecar file alongside the weight NetCDF.
+    """
+    src_ny = src_ds.sizes['lat']
+    src_nx = src_ds.sizes['lon']
+    src_lat_min = float(src_ds.lat.min())
+    src_lat_max = float(src_ds.lat.max())
+    src_lon_min = float(src_ds.lon.min())
+    src_lon_max = float(src_ds.lon.max())
+    dst_ny = dst_ds.sizes['y']
+    dst_nx = dst_ds.sizes['x']
+    dst_lat_min = float(dst_ds.lat.min())
+    dst_lat_max = float(dst_ds.lat.max())
+    dst_lon_min = float(dst_ds.lon.min())
+    dst_lon_max = float(dst_ds.lon.max())
+
     info = (
-        f"src={src_ds.sizes['lat']}x{src_ds.sizes['lon']}"
-        f"_slat={float(src_ds.lat.min()):.5f}_{float(src_ds.lat.max()):.5f}"
-        f"_slon={float(src_ds.lon.min()):.5f}_{float(src_ds.lon.max()):.5f}"
-        f"_dst={dst_ds.sizes['y']}x{dst_ds.sizes['x']}"
-        f"_dlat={float(dst_ds.lat.min()):.5f}_{float(dst_ds.lat.max()):.5f}"
-        f"_dlon={float(dst_ds.lon.min()):.5f}_{float(dst_ds.lon.max()):.5f}"
+        f"src={src_ny}x{src_nx}"
+        f"_slat={src_lat_min:.5f}_{src_lat_max:.5f}"
+        f"_slon={src_lon_min:.5f}_{src_lon_max:.5f}"
+        f"_dst={dst_ny}x{dst_nx}"
+        f"_dlat={dst_lat_min:.5f}_{dst_lat_max:.5f}"
+        f"_dlon={dst_lon_min:.5f}_{dst_lon_max:.5f}"
     )
-    return hashlib.md5(info.encode()).hexdigest()[:12]
+    key = hashlib.md5(info.encode()).hexdigest()[:12]
+
+    desc = (
+        f"xESMF conservative weight file\n"
+        f"hash: {key}\n"
+        f"\n"
+        f"source grid\n"
+        f"  size : {src_ny} lat × {src_nx} lon\n"
+        f"  lat  : {src_lat_min:.5f} – {src_lat_max:.5f}\n"
+        f"  lon  : {src_lon_min:.5f} – {src_lon_max:.5f}\n"
+        f"\n"
+        f"destination grid\n"
+        f"  size : {dst_ny} y × {dst_nx} x\n"
+        f"  lat  : {dst_lat_min:.5f} – {dst_lat_max:.5f}\n"
+        f"  lon  : {dst_lon_min:.5f} – {dst_lon_max:.5f}\n"
+    )
+    return key, desc
 
 
 def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: str):
@@ -249,19 +282,25 @@ def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: s
     Always passes *filename* to the constructor so xESMF writes the weights on
     first use and reads them on subsequent calls.  ``reuse_weights`` is set from
     whether the file already exists — this is the canonical xESMF cache pattern.
+    A plain-text sidecar ``*.txt`` is written alongside each weight file listing
+    the grid parameters that produced the hash.
     """
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    key = _tile_cache_key(src_ds, dst_ds)
+    key, desc = _tile_cache_key(src_ds, dst_ds)
     weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
     cached = weight_file.exists()
     if cached:
         print(f"    (weights cached: {weight_file.name})", end=" ", flush=True)
-    return xe.Regridder(
+    regridder = xe.Regridder(
         src_ds, dst_ds, "conservative",
         filename=str(weight_file),
         reuse_weights=cached,
         unmapped_to_nan=True,
     )
+    if not cached:
+        txt_file = weight_file.with_suffix(".txt")
+        txt_file.write_text(desc)
+    return regridder
 
 
 def _regrid_single(
