@@ -331,6 +331,8 @@ def plot_depth_diff(
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    _save_diff_html(lon, lat, diff, full_title, Path(path), vmax)
+
 
 def plot_source_comparison(
     lon: npt.NDArray,
@@ -835,6 +837,51 @@ def plot_rx0_diagnostics(
 # ---------------------------------------------------------------------------
 # Interactive (plotly) helpers
 # ---------------------------------------------------------------------------
+
+def _save_diff_html(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    diff: npt.NDArray,
+    title: str,
+    png_path: Path,
+    vmax: Optional[float],
+) -> None:
+    """Write a zoomable plotly Heatmap for a signed depth-difference field."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return
+
+    lon_axis = lon[0, :] if lon.ndim == 2 else lon
+    lat_axis = lat[:, 0] if lat.ndim == 2 else lat
+
+    abs_max = float(np.nanmax(np.abs(diff[np.isfinite(diff)]))) if np.isfinite(diff).any() else 1.0
+    z_range = vmax if vmax is not None else abs_max
+
+    heatmap = go.Heatmap(
+        z=diff,
+        x=lon_axis,
+        y=lat_axis,
+        colorscale=_plotly_colorscale(_cm_correction()),
+        zmin=-z_range,
+        zmid=0.0,
+        zmax=z_range,
+        colorbar=dict(title="Δ depth (m)", thickness=15),
+        hoverongaps=False,
+        hovertemplate=(
+            "lon: %{x:.3f}<br>lat: %{y:.3f}<br>diff: %{z:+.1f} m<extra></extra>"
+        ),
+    )
+    fig = go.Figure(heatmap)
+    fig.update_layout(
+        title=title,
+        xaxis_title="Longitude",
+        yaxis_title="Latitude",
+        yaxis_scaleanchor="x",
+        margin=dict(l=60, r=20, t=50, b=50),
+    )
+    fig.write_html(str(png_path.with_suffix(".html")))
+
 
 def _save_depth_html(
     lon: npt.NDArray,
