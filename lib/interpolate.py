@@ -3,7 +3,7 @@
 Uses xESMF (the xarray wrapper for ESMF), available in the stats conda
 environment.  The caching strategy mirrors stats/lib/regridding.py
 (RegridManager): weight files are stored on disk, keyed by a hash of the
-source and destination grid geometry, so repeated runs on the same grids skip
+source and destination tile geometry, so repeated runs on the same grids skip
 the expensive weight-computation step.
 
 Two fields are produced from a single regridder:
@@ -17,6 +17,17 @@ NaN handling at field-application time, not at weight-computation time.
 
 Cell-corner bounds are always passed explicitly so that rotated and Cartesian
 destination grids are handled correctly.
+
+Memory strategy — tiled regridding
+-----------------------------------
+At native EMODnet resolution (1/480° ≈ 230 m) a padded North Sea domain
+contains ~47 M source cells.  Building a single weight matrix over all of
+them is unnecessarily expensive.  Instead the destination grid is split into
+tiles of *tile_cells* × *tile_cells* grid cells; for each tile the source is
+subsetted to the tile's bounding box plus a *tile_buf_deg* margin.  At 50-cell
+tiles and 0.5° buffer a tile at 0.05° covers a ~3.5°×3.5° source area
+(≈ 2.8 M cells) and needs only ~50 MB for the weight matrix and data arrays.
+Weight files are cached per tile so subsequent runs skip the computation.
 """
 
 from __future__ import annotations
@@ -42,6 +53,8 @@ def regrid(
     min_depth: float = 0.0,
     min_wet_fraction: float = 0.0,
     cache_dir: str = "./regrid_weights",
+    tile_cells: int = 50,
+    tile_buf_deg: float = 0.5,
 ) -> xr.Dataset:
     """Regrid fine-resolution bathymetry onto *dst_grid* conservatively.
 
@@ -59,6 +72,12 @@ def regrid(
         the summary but not forced to land here.
     cache_dir : str
         Directory for cached xESMF weight files.
+    tile_cells : int
+        Maximum destination grid cells per tile in each dimension (default 50).
+        Smaller values reduce peak memory at the cost of more tiles.
+    tile_buf_deg : float
+        Source-side buffer (degrees) added around each destination tile when
+        subsetting the source dataset.  Prevents edge artefacts.
 
     Returns
     -------
@@ -78,53 +97,18 @@ def regrid(
     import xesmf as xe  # noqa: PLC0415
 
     # ------------------------------------------------------------------
-    # Auto-coarsen source to keep it ~3× finer than the destination.
-    # Conservative regridding accuracy does not improve beyond ~4 source
-    # cells per target cell, but memory and weight-matrix size scale with
-    # n_source.  At 1/480° over a padded North Sea domain the source has
-    # ~47 M cells; coarsening to ~1/60° reduces this to ~750 K cells.
+    # Tiled conservative regridding — preserves native source resolution
+    # while keeping per-tile memory bounded.
     # ------------------------------------------------------------------
-    src = _maybe_coarsen(src, dst_grid)
-
-    # ------------------------------------------------------------------
-    # Build xESMF-compatible source and destination Datasets with bounds
-    # ------------------------------------------------------------------
-    src_ds = _source_ds(src)
-    dst_ds = _dst_ds(dst_grid)
-
-    # ------------------------------------------------------------------
-    # Retrieve or compute conservative regrid weights (cached on disk)
-    # ------------------------------------------------------------------
-    regridder = _get_regridder(xe, src_ds, dst_ds, dst_grid, cache_dir)
-
-    # ------------------------------------------------------------------
-    # Apply regridder to depth (NaN on land → FRACAREA normalisation)
-    # ------------------------------------------------------------------
-    depth_src = xr.DataArray(
-        np.where(src["land"].values, np.nan, src["depth"].values),
-        dims=["lat", "lon"],
-        coords={"lat": src.lat, "lon": src.lon},
+    depth_out, wetfrac_out = _regrid_tiled(
+        xe, src, dst_grid, cache_dir,
+        tile_cells=tile_cells,
+        buf_deg=tile_buf_deg,
     )
-    depth_out_da = regridder(depth_src)
 
     # ------------------------------------------------------------------
-    # Apply same regridder to binary ocean field (1=ocean, 0=land, no NaN)
-    # → DSTAREA normalisation = fraction of destination cell that is ocean
+    # Post-process assembled arrays
     # ------------------------------------------------------------------
-    ocean_src = xr.DataArray(
-        (~src["land"].values).astype(np.float64),
-        dims=["lat", "lon"],
-        coords={"lat": src.lat, "lon": src.lon},
-    )
-    wetfrac_out_da = regridder(ocean_src)
-
-    # ------------------------------------------------------------------
-    # Extract 2-D arrays and post-process
-    # ------------------------------------------------------------------
-    depth_out = np.asarray(depth_out_da).reshape(dst_grid.ny, dst_grid.nx)
-    wetfrac_out = np.asarray(wetfrac_out_da).reshape(dst_grid.ny, dst_grid.nx)
-
-    # Cells with no ocean coverage are land
     ocean_mask = wetfrac_out > 0.0
     depth_out = np.where(ocean_mask, depth_out, 0.0)
 
@@ -211,80 +195,6 @@ def regrid_summary(dst: xr.Dataset, dst_grid: BaseGrid) -> dict:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _source_ds(src: xr.Dataset) -> xr.Dataset:
-    """Build xESMF-compatible Dataset from the source (1-D regular grid)."""
-    lon = src.lon.values
-    lat = src.lat.values
-    dlon = float(np.diff(lon).mean())
-    dlat = float(np.diff(lat).mean())
-    lon_b = np.append(lon - dlon / 2.0, lon[-1] + dlon / 2.0)
-    lat_b = np.append(lat - dlat / 2.0, lat[-1] + dlat / 2.0)
-    return xr.Dataset(
-        {
-            "lat": ("lat", lat),
-            "lon": ("lon", lon),
-            "lat_b": ("lat_b", lat_b),
-            "lon_b": ("lon_b", lon_b),
-        }
-    )
-
-
-def _dst_ds(dst_grid: BaseGrid) -> xr.Dataset:
-    """Build xESMF-compatible Dataset from BaseGrid (always 2-D bounds).
-
-    Using 2-D corner arrays works for regular, rotated, and Cartesian grids
-    without any special-casing.
-    """
-    return xr.Dataset(
-        {
-            "lat": (["y", "x"], dst_grid.center_lat),
-            "lon": (["y", "x"], dst_grid.center_lon),
-            "lat_b": (["y_b", "x_b"], dst_grid.corner_lat),
-            "lon_b": (["y_b", "x_b"], dst_grid.corner_lon),
-        }
-    )
-
-
-def _cache_key(src_ds: xr.Dataset, dst_grid: BaseGrid) -> str:
-    """MD5 hash of source shape + extents + destination grid identity."""
-    info = (
-        f"src={src_ds.sizes['lat']}x{src_ds.sizes['lon']}"
-        f"_slat={float(src_ds.lat.min()):.4f}_{float(src_ds.lat.max()):.4f}"
-        f"_slon={float(src_ds.lon.min()):.4f}_{float(src_ds.lon.max()):.4f}"
-        f"_dst={type(dst_grid).__name__}_{dst_grid.ny}x{dst_grid.nx}"
-        f"_dlat={dst_grid.lat_bounds[0]:.4f}_{dst_grid.lat_bounds[1]:.4f}"
-        f"_dlon={dst_grid.lon_bounds[0]:.4f}_{dst_grid.lon_bounds[1]:.4f}"
-    )
-    return hashlib.md5(info.encode()).hexdigest()[:12]
-
-
-def _get_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset,
-                   dst_grid: BaseGrid, cache_dir: str):
-    """Return a conservative xe.Regridder, loading cached weights if available.
-
-    Mirrors the caching logic in stats/lib/regridding.py::RegridManager.
-    """
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    key = _cache_key(src_ds, dst_grid)
-    weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
-
-    if weight_file.exists():
-        print(f"  Loading cached weights: {weight_file.name}")
-        regridder = xe.Regridder(
-            src_ds, dst_ds, "conservative",
-            reuse_weights=True,
-            filename=str(weight_file),
-            unmapped_to_nan=True,
-        )
-    else:
-        print("  Computing conservative weights (first run only) …")
-        regridder = xe.Regridder(src_ds, dst_ds, "conservative", unmapped_to_nan=True)
-        regridder.to_netcdf(str(weight_file))
-        print(f"  Weights saved: {weight_file.name}")
-
-    return regridder
-
-
 def _dst_resolution(dst_grid: BaseGrid) -> float:
     """Estimate the destination grid cell size in degrees (smaller of lon/lat)."""
     try:
@@ -301,55 +211,160 @@ def _dst_resolution(dst_grid: BaseGrid) -> float:
     return min(d_lon, d_lat)
 
 
-def _maybe_coarsen(src: xr.Dataset, dst_grid: BaseGrid, target_ratio: int = 3) -> xr.Dataset:
-    """Block-average *src* so it is at most *target_ratio* × finer than *dst_grid*.
+def _tile_cache_key(src_ds: xr.Dataset, dst_ds: xr.Dataset) -> str:
+    """MD5 hash uniquely identifying a (source tile, destination tile) pair."""
+    info = (
+        f"src={src_ds.sizes['lat']}x{src_ds.sizes['lon']}"
+        f"_slat={float(src_ds.lat.min()):.5f}_{float(src_ds.lat.max()):.5f}"
+        f"_slon={float(src_ds.lon.min()):.5f}_{float(src_ds.lon.max()):.5f}"
+        f"_dst={dst_ds.sizes['y']}x{dst_ds.sizes['x']}"
+        f"_dlat={float(dst_ds.lat.min()):.5f}_{float(dst_ds.lat.max()):.5f}"
+        f"_dlon={float(dst_ds.lon.min()):.5f}_{float(dst_ds.lon.max()):.5f}"
+    )
+    return hashlib.md5(info.encode()).hexdigest()[:12]
 
-    For conservative regridding accuracy plateaus at ~4 source cells per
-    target cell; beyond that extra source cells only increase memory and
-    weight-computation time.  Coarsening by an integer factor preserves the
-    same FRACAREA depth estimate to within rounding error.
-    """
-    import warnings
 
-    src_dlon = float(np.diff(src.lon.values).mean())
-    dst_res  = _dst_resolution(dst_grid)
-    factor   = max(1, int(dst_res / src_dlon / target_ratio))
+def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: str):
+    """Return a conservative xe.Regridder for one tile, loading cached weights if available."""
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    key = _tile_cache_key(src_ds, dst_ds)
+    weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
 
-    if factor <= 1:
-        return src
-
-    depth = np.where(src["land"].values, np.nan, src["depth"].values).astype(np.float32)
-    lon   = src.lon.values
-    lat   = src.lat.values
-    ny, nx = depth.shape
-    ny_c, nx_c = ny // factor, nx // factor
-
-    depth_trim = depth[: ny_c * factor, : nx_c * factor]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        depth_c = np.nanmean(
-            depth_trim.reshape(ny_c, factor, nx_c, factor), axis=(1, 3)
+    if weight_file.exists():
+        return xe.Regridder(
+            src_ds, dst_ds, "conservative",
+            reuse_weights=True,
+            filename=str(weight_file),
+            unmapped_to_nan=True,
         )
-    land_c = np.isnan(depth_c)
 
-    # Centre lon/lat of each block
-    half = factor // 2
-    lon_c = lon[half : nx_c * factor : factor]
-    lat_c = lat[half : ny_c * factor : factor]
+    regridder = xe.Regridder(src_ds, dst_ds, "conservative", unmapped_to_nan=True)
+    regridder.to_netcdf(str(weight_file))
+    return regridder
 
-    ny_before, nx_before = ny, nx
-    print(
-        f"  Source coarsened {factor}× for regridding: "
-        f"{nx_before}×{ny_before} → {nx_c}×{ny_c} cells "
-        f"({src_dlon:.4g}° → {src_dlon * factor:.4g}°, "
-        f"still {dst_res / (src_dlon * factor):.1f}× finer than target)"
-    )
 
-    return xr.Dataset(
-        {
-            "depth": (["lat", "lon"], np.where(land_c, np.nan, depth_c)),
-            "land":  (["lat", "lon"], land_c),
-        },
-        coords={"lon": lon_c, "lat": lat_c},
-        attrs={**src.attrs, "coarsened_by": factor},
-    )
+def _regrid_tiled(
+    xe,
+    src: xr.Dataset,
+    dst_grid: BaseGrid,
+    cache_dir: str,
+    tile_cells: int = 50,
+    buf_deg: float = 0.5,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Tile-by-tile conservative regridding.
+
+    Splits the destination grid into rectangular tiles of at most
+    *tile_cells* × *tile_cells* grid cells.  For each tile the source
+    dataset is subsetted to the tile bounding box plus *buf_deg* on all
+    sides — only locally relevant source cells are loaded into the weight
+    computation.
+
+    Returns ``(depth_out, wetfrac_out)`` as 2-D arrays shaped ``[ny, nx]``.
+    """
+    ny, nx = dst_grid.ny, dst_grid.nx
+    n_tlon = max(1, int(np.ceil(nx / tile_cells)))
+    n_tlat = max(1, int(np.ceil(ny / tile_cells)))
+    n_total = n_tlon * n_tlat
+
+    src_dlon = float(abs(np.diff(src.lon.values[:2]).mean()))
+    dst_res  = _dst_resolution(dst_grid)
+
+    if n_total == 1:
+        n_src = int((tile_cells * dst_res + 2 * buf_deg) / src_dlon) ** 2
+        print(f"  Single tile  (≈ {n_src / 1e6:.1f} M source cells) …")
+    else:
+        n_src = int((tile_cells * dst_res + 2 * buf_deg) / src_dlon) ** 2
+        print(
+            f"  Tiled regridding: {n_tlon}×{n_tlat} destination tiles "
+            f"(≈ {n_src / 1e6:.1f} M source cells per tile) …"
+        )
+
+    depth_out   = np.full((ny, nx), np.nan)
+    wetfrac_out = np.zeros((ny, nx))
+
+    # Pre-convert full source arrays (subsetting is done per tile via index arrays)
+    depth_src_full = np.where(src["land"].values, np.nan, src["depth"].values).astype(np.float64)
+    ocean_src_full = (~src["land"].values).astype(np.float64)
+    src_lon = src.lon.values
+    src_lat = src.lat.values
+
+    for jt in range(n_tlat):
+        j0 = jt * tile_cells
+        j1 = min(j0 + tile_cells, ny)
+
+        for it in range(n_tlon):
+            i0 = it * tile_cells
+            i1 = min(i0 + tile_cells, nx)
+            k  = jt * n_tlon + it + 1
+
+            if n_total > 1:
+                print(f"    Tile {k}/{n_total} …", end=" ", flush=True)
+
+            # ---- Destination tile (2-D centre + corner coords) ----
+            tile_center_lon = dst_grid.center_lon[j0:j1, i0:i1]
+            tile_center_lat = dst_grid.center_lat[j0:j1, i0:i1]
+            tile_corner_lon = dst_grid.corner_lon[j0:j1 + 1, i0:i1 + 1]
+            tile_corner_lat = dst_grid.corner_lat[j0:j1 + 1, i0:i1 + 1]
+
+            tile_dst_ds = xr.Dataset({
+                "lat":   (["y",   "x"  ], tile_center_lat),
+                "lon":   (["y",   "x"  ], tile_center_lon),
+                "lat_b": (["y_b", "x_b"], tile_corner_lat),
+                "lon_b": (["y_b", "x_b"], tile_corner_lon),
+            })
+
+            # ---- Source subset (bbox of corner coords + buffer) ----
+            slon_min = float(tile_corner_lon.min()) - buf_deg
+            slon_max = float(tile_corner_lon.max()) + buf_deg
+            slat_min = float(tile_corner_lat.min()) - buf_deg
+            slat_max = float(tile_corner_lat.max()) + buf_deg
+
+            lon_idx = np.where((src_lon >= slon_min) & (src_lon <= slon_max))[0]
+            lat_idx = np.where((src_lat >= slat_min) & (src_lat <= slat_max))[0]
+
+            if len(lon_idx) < 2 or len(lat_idx) < 2:
+                if n_total > 1:
+                    print("(no source data)")
+                continue
+
+            tile_lon = src_lon[lon_idx]
+            tile_lat = src_lat[lat_idx]
+            tile_depth_data = depth_src_full[np.ix_(lat_idx, lon_idx)]
+            tile_ocean_data = ocean_src_full[np.ix_(lat_idx, lon_idx)]
+
+            # xESMF source DS with explicit 1-D bounds
+            tile_dlon = float(np.diff(tile_lon).mean())
+            tile_dlat = float(np.diff(tile_lat).mean())
+            tile_lon_b = np.append(tile_lon - tile_dlon / 2, tile_lon[-1] + tile_dlon / 2)
+            tile_lat_b = np.append(tile_lat - tile_dlat / 2, tile_lat[-1] + tile_dlat / 2)
+
+            tile_src_ds = xr.Dataset({
+                "lat":   ("lat",   tile_lat),
+                "lon":   ("lon",   tile_lon),
+                "lat_b": ("lat_b", tile_lat_b),
+                "lon_b": ("lon_b", tile_lon_b),
+            })
+
+            # ---- Regrid tile ----
+            regridder = _get_tile_regridder(xe, tile_src_ds, tile_dst_ds, cache_dir)
+
+            depth_da = xr.DataArray(
+                tile_depth_data, dims=["lat", "lon"],
+                coords={"lat": tile_lat, "lon": tile_lon},
+            )
+            ocean_da = xr.DataArray(
+                tile_ocean_data, dims=["lat", "lon"],
+                coords={"lat": tile_lat, "lon": tile_lon},
+            )
+
+            tile_d = np.asarray(regridder(depth_da)).reshape(j1 - j0, i1 - i0)
+            tile_w = np.asarray(regridder(ocean_da)).reshape(j1 - j0, i1 - i0)
+
+            depth_out[j0:j1, i0:i1]   = tile_d
+            wetfrac_out[j0:j1, i0:i1] = tile_w
+
+            if n_total > 1:
+                n_wet = int(np.sum(tile_w > 0))
+                print(f"({n_wet} wet cells)")
+
+    return depth_out, wetfrac_out
