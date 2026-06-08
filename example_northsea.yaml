@@ -62,7 +62,7 @@ output:
 
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4d — after isolation masking, before rx0 smoothing.
-# Supported types: rectangle, polygon, point.
+# Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
 # mask_regions:
 #   - type: rectangle
 #     lon_min: 9.0
@@ -81,3 +81,14 @@ output:
 #     lon: 8.5
 #     lat: 54.8
 #     name: Isolated tidal pool
+#   # Grid-index variants (0-based row i, column j from the output NetCDF):
+#   - type: ij_rectangle
+#     i_min: 10
+#     i_max: 20
+#     j_min: 5
+#     j_max: 15
+#     name: Index-based rectangle
+#   - type: ij_point
+#     i: 15
+#     j: 8
+#     name: Single cell by index

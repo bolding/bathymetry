@@ -210,17 +210,24 @@ output:
 
 # Force geographic areas to land (step 4c, before isolation masking).
 # Masking a fjord mouth causes its interior to be removed automatically
-# by the isolation step (4d).  Types: rectangle, polygon, point.
+# by the isolation step (4d).
+# Types: rectangle, polygon, point, ij_rectangle, ij_point.
 # mask_regions:
-#   - type: rectangle
+#   - type: rectangle       # geographic bounding box
 #     lon_min: 9.0  lon_max: 10.5  lat_min: 54.5  lat_max: 55.5
 #     name: Kiel Bight
-#   - type: polygon
+#   - type: polygon         # arbitrary geographic polygon
 #     vertices: [[10,55],[11,55.5],[11.5,54.5],[10,54]]
 #     name: Custom bay
-#   - type: point
+#   - type: point           # nearest cell to given lon/lat
 #     lon: 8.5  lat: 54.8
 #     name: Isolated pool
+#   - type: ij_rectangle    # 0-based grid indices (i=row, j=col)
+#     i_min: 10  i_max: 20  j_min: 5  j_max: 15
+#     name: Index-based region
+#   - type: ij_point        # single cell by 0-based grid index
+#     i: 15  j: 8
+#     name: Single index cell
 ```
 
 ## Pipeline steps
@@ -232,7 +239,7 @@ output:
 | 3 | `interpolate` | xESMF conservative regrid; weight file cached for reuse |
 | 4a | `analysis` | Flag narrow / blocked interfaces (SILL_DEFICIT, AREA_DEFICIT, BLOCKED) |
 | 4b | `analysis` | Apply user fixes from `fixes:` (set_depth, open_cell, close_cell) |
-| 4c | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point) |
+| 4c | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4d | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
 | 5 | `smooth` | rx0 slope smoothing via linear programming (optional) |
 | 6 | — | Write output NetCDF + final plots for every depth variable |
@@ -395,8 +402,11 @@ never overwritten by `--skip-regrid`, so the base data is always recoverable.
 
 To exclude a water body (fjord, lagoon, estuary) from the model domain:
 
-1. Add a `mask_regions:` entry (rectangle, polygon, or point) that covers the
-   **mouth** of the feature.
+1. Add a `mask_regions:` entry that covers the **mouth** of the feature.
+   Use geographic types (`rectangle`, `polygon`, `point`) when you know the
+   coordinates, or index types (`ij_rectangle`, `ij_point`) when you have
+   identified specific cells in the output NetCDF (indices are 0-based row `i`,
+   column `j`).
 2. Rerun.  The masking step (4c) closes the mouth; the isolation step (4d)
    then automatically removes the now-disconnected interior.
 

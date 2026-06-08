@@ -686,6 +686,14 @@ def apply_mask_regions(
     ``point``
         Keys: ``lon``, ``lat``.  Masks the single nearest wet cell.
 
+    ``ij_rectangle`` (aliases: ``ij_rect``, ``ij_box``)
+        Keys: ``i_min``, ``i_max``, ``j_min``, ``j_max`` — 0-based row/column
+        indices into the coarse destination grid.  Useful when the exact grid
+        indices are known from inspecting the NetCDF output.
+
+    ``ij_point`` (alias: ``index_point``)
+        Keys: ``i``, ``j`` — 0-based row/column index of a single cell.
+
     All types accept an optional ``name`` key used only in the report.
 
     Returns
@@ -731,10 +739,25 @@ def apply_mask_regions(
             iy, ix = np.unravel_index(int(dist.argmin()), dist.shape)
             sel = np.zeros_like(mask)
             sel[iy, ix] = mask[iy, ix]   # only if the cell is wet
+        elif rtype in ("ij_rectangle", "ij_rect", "ij_box"):
+            ny, nx = mask.shape
+            i_min = int(region.get("i_min", 0))
+            i_max = int(region.get("i_max", ny - 1))
+            j_min = int(region.get("j_min", 0))
+            j_max = int(region.get("j_max", nx - 1))
+            sel_ij = np.zeros_like(mask)
+            sel_ij[i_min:i_max + 1, j_min:j_max + 1] = True
+            sel = sel_ij & mask
+        elif rtype in ("ij_point", "index_point"):
+            i = int(region["i"])
+            j = int(region["j"])
+            sel = np.zeros_like(mask)
+            if 0 <= i < mask.shape[0] and 0 <= j < mask.shape[1]:
+                sel[i, j] = mask[i, j]
         else:
             raise ValueError(
                 f"Unknown mask region type {rtype!r}. "
-                "Supported: rectangle, polygon, point."
+                "Supported: rectangle, polygon, point, ij_rectangle, ij_point."
             )
 
         n = int(sel.sum())

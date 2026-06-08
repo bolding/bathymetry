@@ -57,7 +57,7 @@ output:
 
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4d — after isolation masking, before rx0 smoothing.
-# Supported types: rectangle, polygon, point.
+# Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
 # mask_regions:
 #   - type: rectangle
 #     lon_min: 9.0
