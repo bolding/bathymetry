@@ -23,6 +23,8 @@ Example YAML (``north_sea.yaml``)::
       cache_dir: ./regrid_weights
       min_depth: 2.0
       min_wet_fraction: 0.05
+      # tile_cells: 50      # enable tiled regridding (50×50 dst cells per tile)
+      # tile_buf_deg: 0.5   # source-side buffer around each tile (degrees)
 
     analysis:
       nkeep_basins: 1
@@ -413,6 +415,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     min_depth     = _merge(args.min_depth,    cfg, "regridding", "min_depth",     default=0.0)
     min_wf        = _merge(args.min_wet_fraction, cfg, "regridding", "min_wet_fraction",
                            default=0.0)
+    tile_cells    = int(_merge(None, cfg, "regridding", "tile_cells", default=0))
+    tile_buf_deg  = float(_merge(None, cfg, "regridding", "tile_buf_deg", default=0.5))
     nkeep         = _merge(args.nkeep_basins, cfg, "analysis",   "nkeep_basins",  default=1)
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
@@ -543,6 +547,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         min_depth=float(min_depth),
         min_wet_fraction=float(min_wf),
         cache_dir=str(cache_dir),
+        tile_cells=tile_cells,
+        tile_buf_deg=tile_buf_deg,
     )
     dst_sum = interpolate.regrid_summary(dst, dst_grid)
     report.print_table(dst_sum, title="Regridded destination")
@@ -598,6 +604,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             min_depth=float(min_depth),
             min_wet_fraction=float(min_wf),
             cache_dir=str(cache_dir),
+            tile_cells=tile_cells,
+            tile_buf_deg=tile_buf_deg,
         )
         print(f"      done in {time.time()-t0:.1f} s")
 

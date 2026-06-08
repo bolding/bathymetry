@@ -18,16 +18,18 @@ NaN handling at field-application time, not at weight-computation time.
 Cell-corner bounds are always passed explicitly so that rotated and Cartesian
 destination grids are handled correctly.
 
-Memory strategy — tiled regridding
------------------------------------
-At native EMODnet resolution (1/480° ≈ 230 m) a padded North Sea domain
-contains ~47 M source cells.  Building a single weight matrix over all of
-them is unnecessarily expensive.  Instead the destination grid is split into
-tiles of *tile_cells* × *tile_cells* grid cells; for each tile the source is
-subsetted to the tile's bounding box plus a *tile_buf_deg* margin.  At 50-cell
-tiles and 0.5° buffer a tile at 0.05° covers a ~3.5°×3.5° source area
-(≈ 2.8 M cells) and needs only ~50 MB for the weight matrix and data arrays.
-Weight files are cached per tile so subsequent runs skip the computation.
+Memory strategy — optional tiled regridding
+-------------------------------------------
+The default ``regrid()`` call uses a single-pass weight matrix over the full
+source and destination grids.  For very high-resolution sources (e.g. native
+EMODnet at 1/480° ≈ 230 m) a padded North Sea domain contains ~47 M source
+cells.  Pass ``tile_cells > 0`` to enable tiled regridding: the destination
+grid is split into tiles of *tile_cells* × *tile_cells* grid cells; for each
+tile the source is subsetted to the tile's bounding box plus a *tile_buf_deg*
+margin.  At 50-cell tiles and 0.5° buffer a tile at 0.05° covers a ~3.5°×3.5°
+source area (≈ 2.8 M cells) and needs only ~50 MB for the weight matrix and
+data arrays.  Weight files are cached per tile so subsequent runs skip the
+computation.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ def regrid(
     min_depth: float = 0.0,
     min_wet_fraction: float = 0.0,
     cache_dir: str = "./regrid_weights",
-    tile_cells: int = 50,
+    tile_cells: int = 0,
     tile_buf_deg: float = 0.5,
 ) -> xr.Dataset:
     """Regrid fine-resolution bathymetry onto *dst_grid* conservatively.
@@ -73,11 +75,15 @@ def regrid(
     cache_dir : str
         Directory for cached xESMF weight files.
     tile_cells : int
-        Maximum destination grid cells per tile in each dimension (default 50).
-        Smaller values reduce peak memory at the cost of more tiles.
+        Maximum destination grid cells per tile in each dimension.
+        ``0`` (default) — single-pass regridding (no tiling).
+        Positive value — tiled regridding: splits the destination grid into
+        tiles of at most *tile_cells* × *tile_cells* cells, subsetting the
+        source per tile.  Use when the full source dataset is too large to
+        fit in memory.
     tile_buf_deg : float
         Source-side buffer (degrees) added around each destination tile when
-        subsetting the source dataset.  Prevents edge artefacts.
+        tiling is enabled.  Prevents edge artefacts.
 
     Returns
     -------
@@ -97,14 +103,16 @@ def regrid(
     import xesmf as xe  # noqa: PLC0415
 
     # ------------------------------------------------------------------
-    # Tiled conservative regridding — preserves native source resolution
-    # while keeping per-tile memory bounded.
+    # Single-pass or tiled conservative regridding.
     # ------------------------------------------------------------------
-    depth_out, wetfrac_out = _regrid_tiled(
-        xe, src, dst_grid, cache_dir,
-        tile_cells=tile_cells,
-        buf_deg=tile_buf_deg,
-    )
+    if tile_cells > 0:
+        depth_out, wetfrac_out = _regrid_tiled(
+            xe, src, dst_grid, cache_dir,
+            tile_cells=tile_cells,
+            buf_deg=tile_buf_deg,
+        )
+    else:
+        depth_out, wetfrac_out = _regrid_single(xe, src, dst_grid, cache_dir)
 
     # ------------------------------------------------------------------
     # Post-process assembled arrays
@@ -241,6 +249,63 @@ def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: s
     regridder = xe.Regridder(src_ds, dst_ds, "conservative", unmapped_to_nan=True)
     regridder.to_netcdf(str(weight_file))
     return regridder
+
+
+def _regrid_single(
+    xe,
+    src: xr.Dataset,
+    dst_grid: BaseGrid,
+    cache_dir: str,
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Single-pass conservative regridding (no tiling).
+
+    Builds one weight matrix that covers the entire source and destination
+    grids.  Suitable when the source dataset fits comfortably in memory.
+    """
+    ny, nx = dst_grid.ny, dst_grid.nx
+
+    # Source DS with explicit 1-D bounds
+    src_dlon = float(np.diff(src.lon.values[:2]).mean())
+    src_dlat = float(np.diff(src.lat.values[:2]).mean())
+    src_lon_b = np.append(src.lon.values - src_dlon / 2,
+                          src.lon.values[-1] + src_dlon / 2)
+    src_lat_b = np.append(src.lat.values - src_dlat / 2,
+                          src.lat.values[-1] + src_dlat / 2)
+    src_ds = xr.Dataset({
+        "lat":   ("lat",   src.lat.values),
+        "lon":   ("lon",   src.lon.values),
+        "lat_b": ("lat_b", src_lat_b),
+        "lon_b": ("lon_b", src_lon_b),
+    })
+
+    # Destination DS with explicit 2-D corner bounds
+    dst_ds = xr.Dataset({
+        "lat":   (["y",   "x"  ], dst_grid.center_lat),
+        "lon":   (["y",   "x"  ], dst_grid.center_lon),
+        "lat_b": (["y_b", "x_b"], dst_grid.corner_lat),
+        "lon_b": (["y_b", "x_b"], dst_grid.corner_lon),
+    })
+
+    n_src = src.sizes["lat"] * src.sizes["lon"]
+    print(f"  Single-pass regridding ({n_src / 1e6:.1f} M source cells) …")
+
+    regridder = _get_tile_regridder(xe, src_ds, dst_ds, cache_dir)
+
+    depth_src = xr.DataArray(
+        np.where(src["land"].values, np.nan, src["depth"].values.astype(np.float64)),
+        dims=["lat", "lon"],
+        coords={"lat": src.lat.values, "lon": src.lon.values},
+    )
+    ocean_src = xr.DataArray(
+        (~src["land"].values).astype(np.float64),
+        dims=["lat", "lon"],
+        coords={"lat": src.lat.values, "lon": src.lon.values},
+    )
+
+    depth_out   = np.asarray(regridder(depth_src)).reshape(ny, nx)
+    wetfrac_out = np.asarray(regridder(ocean_src)).reshape(ny, nx)
+
+    return depth_out, wetfrac_out
 
 
 def _regrid_tiled(

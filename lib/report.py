@@ -277,11 +277,13 @@ def plot_rotated_pole(
 ) -> None:
     """Two-panel globe plot illustrating the rotated-pole grid geometry.
 
-    Left  — standard Orthographic globe centred on the domain: shows the grid
-            footprint and rotated-pole marker in geographic context.
-    Right — Orthographic globe centred on the rotated North Pole: the domain
-            appears near the rotated equator, making the equidistant cell
-            spacing obvious.
+    Left  — Mollweide (whole-world) projection: always shows both the domain
+            footprint and the rotated-pole marker regardless of their angular
+            separation.
+    Right — AzimuthalEquidistant centred on the rotated North Pole: the pole
+            is at the map centre; the domain (exactly 90° away by construction)
+            always appears at mid-map radius.  The rotated equator (great
+            circle 90° from the pole) is drawn as a dashed reference.
     """
     try:
         import cartopy.crs as ccrs
@@ -293,7 +295,7 @@ def plot_rotated_pole(
 
     path = _ensure_dir(path)
 
-    # Build domain perimeter from the corner-coordinate grid
+    # Domain perimeter from corner-coordinate grid
     perim_lon = np.concatenate([
         corner_lon[0, :],          # bottom: left → right
         corner_lon[1:, -1],        # right:  bottom → top
@@ -307,50 +309,104 @@ def plot_rotated_pole(
         corner_lat[-2::-1, 0],
     ])
 
-    center_lon = float(corner_lon.mean())
-    center_lat = float(corner_lat.mean())
     geo = ccrs.PlateCarree()
+    _DOMAIN_COLOR = "#e07b00"   # orange — contrasts well with both ocean and land
 
-    fig = plt.figure(figsize=(12, 5))
+    # ------------------------------------------------------------------ #
+    # Rotated-equator (great circle 90° from the rotated pole) in       #
+    # geographic coordinates, for the right panel.                       #
+    # Inline inverse rotated-pole transform: (rlon, rlat=0) → (geo_lon, geo_lat)
+    # ------------------------------------------------------------------ #
+    rlon_eq = np.linspace(-180.0, 180.0, 361)
+    pp = np.radians(pole_lat)
+    rr = np.radians(rlon_eq)
+    sin_lat = np.sin(pp) * np.sin(np.zeros(361)) + np.cos(pp) * np.cos(np.zeros(361)) * np.cos(rr)
+    sin_lat = np.clip(sin_lat, -1.0, 1.0)
+    req_lat = np.degrees(np.arcsin(sin_lat))
+    cos_req = np.cos(np.radians(req_lat))
+    safe = cos_req > 1e-10
+    sn = np.where(safe, np.cos(np.zeros(361)) * np.sin(rr) / cos_req, 0.0)
+    cs = np.where(
+        safe,
+        (np.cos(pp) * np.sin(np.zeros(361)) - np.sin(pp) * np.cos(np.zeros(361)) * np.cos(rr)) / cos_req,
+        np.sign(np.cos(pp)),
+    )
+    req_lon = (pole_lon + np.degrees(np.arctan2(sn, cs)) + 180.0) % 360.0 - 180.0
 
-    panel_specs = [
-        (center_lon, center_lat,
-         f"Geographic view  |  rotated pole at ({pole_lon:.2f}°E, {pole_lat:.2f}°N)"),
-        (pole_lon, pole_lat,
-         "View from rotated North Pole  |  domain near rotated equator"),
-    ]
+    fig = plt.figure(figsize=(13, 5))
 
-    for col, (c_lon, c_lat, panel_title) in enumerate(panel_specs):
-        proj = ccrs.Orthographic(central_longitude=c_lon, central_latitude=c_lat)
-        ax = fig.add_subplot(1, 2, col + 1, projection=proj)
-        ax.set_global()  # type: ignore[union-attr]
+    # ------------------------------------------------------------------ #
+    # Left panel — Mollweide (global, shows everything)                  #
+    # ------------------------------------------------------------------ #
+    ax_l = fig.add_subplot(1, 2, 1, projection=ccrs.Mollweide())
+    ax_l.set_global()  # type: ignore[union-attr]
+    ax_l.add_feature(cfeature.OCEAN, facecolor="#cde8f6", zorder=0)  # type: ignore[union-attr]
+    ax_l.add_feature(cfeature.LAND,  facecolor="#e8dcc8", zorder=1)  # type: ignore[union-attr]
+    ax_l.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)  # type: ignore[union-attr]
+    ax_l.gridlines(linewidth=0.25, color="grey", alpha=0.5, zorder=2)  # type: ignore[union-attr]
 
-        ax.add_feature(cfeature.OCEAN, facecolor="#cde8f6", zorder=0)  # type: ignore[union-attr]
-        ax.add_feature(cfeature.LAND,  facecolor="#e8dcc8", zorder=1)  # type: ignore[union-attr]
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)  # type: ignore[union-attr]
-        ax.gridlines(linewidth=0.25, color="grey", alpha=0.5, zorder=2)  # type: ignore[union-attr]
+    ax_l.fill(  # type: ignore[union-attr]
+        np.append(perim_lon, perim_lon[0]),
+        np.append(perim_lat, perim_lat[0]),
+        color=_DOMAIN_COLOR, alpha=0.45, transform=geo, zorder=3,
+    )
+    ax_l.plot(  # type: ignore[union-attr]
+        np.append(perim_lon, perim_lon[0]),
+        np.append(perim_lat, perim_lat[0]),
+        color=_DOMAIN_COLOR, linewidth=1.5, transform=geo, zorder=4,
+    )
+    ax_l.plot(  # type: ignore[union-attr]
+        pole_lon, pole_lat,
+        marker="*", markersize=14, color="firebrick",
+        transform=geo, zorder=5,
+        label=f"Rotated N-pole ({pole_lon:.1f}°E, {pole_lat:.1f}°N)",
+    )
+    ax_l.legend(loc="lower left", fontsize=7, framealpha=0.85)  # type: ignore[union-attr]
+    ax_l.set_title(
+        f"Geographic view  |  rotated pole at ({pole_lon:.2f}°E, {pole_lat:.2f}°N)",
+        fontsize=8, pad=4,
+    )  # type: ignore[union-attr]
 
-        # Domain footprint
-        ax.fill(  # type: ignore[union-attr]
-            np.append(perim_lon, perim_lon[0]),
-            np.append(perim_lat, perim_lat[0]),
-            color="steelblue", alpha=0.45, transform=geo, zorder=3,
-        )
-        ax.plot(  # type: ignore[union-attr]
-            np.append(perim_lon, perim_lon[0]),
-            np.append(perim_lat, perim_lat[0]),
-            color="steelblue", linewidth=1.5, transform=geo, zorder=4,
-        )
+    # ------------------------------------------------------------------ #
+    # Right panel — AzimuthalEquidistant centred on rotated pole        #
+    # ------------------------------------------------------------------ #
+    proj_r = ccrs.AzimuthalEquidistant(
+        central_longitude=pole_lon, central_latitude=pole_lat,
+    )
+    ax_r = fig.add_subplot(1, 2, 2, projection=proj_r)
+    ax_r.set_global()  # type: ignore[union-attr]
+    ax_r.add_feature(cfeature.OCEAN, facecolor="#cde8f6", zorder=0)  # type: ignore[union-attr]
+    ax_r.add_feature(cfeature.LAND,  facecolor="#e8dcc8", zorder=1)  # type: ignore[union-attr]
+    ax_r.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)  # type: ignore[union-attr]
+    ax_r.gridlines(linewidth=0.25, color="grey", alpha=0.5, zorder=2)  # type: ignore[union-attr]
 
-        # Rotated-pole marker
-        ax.plot(  # type: ignore[union-attr]
-            pole_lon, pole_lat,
-            marker="*", markersize=15, color="firebrick",
-            transform=geo, zorder=5,
-            label=f"Rotated N-pole\n({pole_lon:.2f}°E, {pole_lat:.2f}°N)",
-        )
-        ax.legend(loc="lower left", fontsize=7, framealpha=0.85)  # type: ignore[union-attr]
-        ax.set_title(panel_title, fontsize=8, pad=4)  # type: ignore[union-attr]
+    # Rotated equator — dashed grey great circle
+    ax_r.plot(  # type: ignore[union-attr]
+        req_lon, req_lat,
+        color="grey", linewidth=1.0, linestyle="--",
+        transform=geo, zorder=3, label="Rotated equator",
+    )
+
+    ax_r.fill(  # type: ignore[union-attr]
+        np.append(perim_lon, perim_lon[0]),
+        np.append(perim_lat, perim_lat[0]),
+        color=_DOMAIN_COLOR, alpha=0.45, transform=geo, zorder=4,
+    )
+    ax_r.plot(  # type: ignore[union-attr]
+        np.append(perim_lon, perim_lon[0]),
+        np.append(perim_lat, perim_lat[0]),
+        color=_DOMAIN_COLOR, linewidth=1.5, transform=geo, zorder=5,
+    )
+    ax_r.plot(  # type: ignore[union-attr]
+        pole_lon, pole_lat,
+        marker="*", markersize=14, color="firebrick",
+        transform=geo, zorder=6,
+    )
+    ax_r.legend(loc="lower left", fontsize=7, framealpha=0.85)  # type: ignore[union-attr]
+    ax_r.set_title(
+        "View from rotated North Pole  |  domain at 90° radius",
+        fontsize=8, pad=4,
+    )  # type: ignore[union-attr]
 
     fig.suptitle(title, fontsize=11, y=1.01)
     fig.tight_layout()
