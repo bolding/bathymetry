@@ -397,6 +397,10 @@ def _analyse_u_interface(
         "suggested_fix": fix,
         "_depth_section": depth_section,
         "_dlat_km": dlat_km,
+        "_fine_sub": fine_sub,
+        "_fine_lons": src_lon[il_start:il_end],
+        "_fine_lats": src_lat[ia_start:ia_end],
+        "_cs_col": cs_col,
     }
 
 
@@ -472,6 +476,10 @@ def _analyse_v_interface(
         "suggested_fix": fix,
         "_depth_section": depth_section,
         "_dlon_km": dlon_km,
+        "_fine_sub": fine_sub,
+        "_fine_lons": src_lon[il_start:il_end],
+        "_fine_lats": src_lat[ia_start:ia_end],
+        "_cs_row": cs_row,
     }
 
 

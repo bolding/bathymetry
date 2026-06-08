@@ -692,6 +692,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 rec["lon"] - _zoom_lon, rec["lon"] + _zoom_lon,
                 rec["lat"] - _zoom_lat, rec["lat"] + _zoom_lat,
             ),
+            fine_sub=rec.get("_fine_sub"),
+            fine_lons=rec.get("_fine_lons"),
+            fine_lats=rec.get("_fine_lats"),
+            cs_col=rec.get("_cs_col"),
+            cs_row=rec.get("_cs_row"),
         )
         section_images.append(img)
 

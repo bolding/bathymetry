@@ -643,16 +643,83 @@ def plot_section_profile(
     inset_lon: Optional[float] = None,
     inset_lat: Optional[float] = None,
     inset_bounds: Optional[tuple[float, float, float, float]] = None,
+    fine_sub: Optional[npt.NDArray] = None,
+    fine_lons: Optional[npt.NDArray] = None,
+    fine_lats: Optional[npt.NDArray] = None,
+    cs_col: Optional[int] = None,
+    cs_row: Optional[int] = None,
 ) -> None:
-    """Cross-section depth profile with optional map inset showing location."""
+    """Cross-section depth profile with optional map inset and plan view.
+
+    When *fine_sub* is provided (the 2-D fine-resolution sub-grid around the
+    flagged interface), the figure gains a second panel below showing a plan
+    view of the fine bathymetry.  The main section profile also gains two
+    dashed neighbour curves — one coarse-cell step to either side of the
+    central section — to show the spatial variability across the strait.
+
+    Parameters
+    ----------
+    fine_sub : [ny_f, nx_f] array
+        Fine-resolution depth sub-grid.  Positive = ocean.
+    fine_lons : [nx_f] array
+        Longitude coordinates of *fine_sub* columns.
+    fine_lats : [ny_f] array
+        Latitude coordinates of *fine_sub* rows.
+    cs_col : int
+        Column index of the cross-section in *fine_sub* (U-interface).
+    cs_row : int
+        Row index of the cross-section in *fine_sub* (V-interface).
+    """
     import matplotlib.pyplot as plt
 
     path = _ensure_dir(path)
-    fig, ax = plt.subplots(figsize=(8, 4))
+    has_plan = (
+        fine_sub is not None
+        and fine_lons is not None
+        and fine_lats is not None
+        and (cs_col is not None or cs_row is not None)
+    )
 
+    if has_plan:
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(2, 1, 1)
+    else:
+        fig, ax = plt.subplots(figsize=(8, 4))
+
+    # ---- Section profile ----
     ax.fill_between(distance_km, 0, depth_fine, where=depth_fine > 0,
-                    color="steelblue", alpha=0.45, label="Fine resolution")
-    ax.plot(distance_km, depth_fine, color="steelblue", linewidth=1.2)
+                    color="steelblue", alpha=0.35, label="Fine (central section)")
+    ax.plot(distance_km, depth_fine, color="steelblue", linewidth=1.4)
+
+    # Neighbouring sections: ±1 coarse-cell step in the perpendicular direction
+    if has_plan:
+        assert fine_sub is not None  # for type-checker
+        if cs_col is not None:
+            # U-interface — section along lat; neighbours are lon-shifted columns
+            step = max(1, fine_sub.shape[1] // 4)
+            for sign, lbl in [(-1, "−"), (+1, "+")]:
+                nb = cs_col + sign * step
+                if 0 <= nb < fine_sub.shape[1]:
+                    nb_depth = fine_sub[:, nb].astype(float)
+                    nb_depth = np.where(nb_depth > 0, nb_depth, np.nan)
+                    ax.plot(distance_km, nb_depth,
+                            color="steelblue", linewidth=0.8,
+                            linestyle="--", alpha=0.6,
+                            label=f"Fine ({lbl}½ cell E/W)")
+        else:
+            # V-interface — section along lon; neighbours are lat-shifted rows
+            assert cs_row is not None
+            step = max(1, fine_sub.shape[0] // 4)
+            for sign, lbl in [(-1, "−"), (+1, "+")]:
+                nb = cs_row + sign * step
+                if 0 <= nb < fine_sub.shape[0]:
+                    nb_depth = fine_sub[nb, :].astype(float)
+                    nb_depth = np.where(nb_depth > 0, nb_depth, np.nan)
+                    ax.plot(distance_km, nb_depth,
+                            color="steelblue", linewidth=0.8,
+                            linestyle="--", alpha=0.6,
+                            label=f"Fine ({lbl}½ cell N/S)")
+
     ax.axhline(depth_coarse, color="firebrick", linewidth=1.5, linestyle="--",
                label=f"Coarse cell mean: {depth_coarse:.1f} m")
     ax.set_xlabel("Distance along section (km)")
@@ -661,16 +728,65 @@ def plot_section_profile(
     ax.set_title(title)
     ax.legend(fontsize=9)
 
-    # Inset map showing where the section is.
-    # Call tight_layout BEFORE adding the inset so layout is settled first;
-    # add_axes with a fixed position is incompatible with tight_layout if
-    # called afterwards (produces a UserWarning and may shift the inset).
+    # ---- Plan view panel (when fine_sub available) ----
+    if has_plan:
+        assert fine_sub is not None and fine_lons is not None and fine_lats is not None
+        ax_plan = fig.add_subplot(2, 1, 2)
+
+        R = 6371.0
+        clat = float(fine_lats.mean())
+        lon_km = (fine_lons - fine_lons.mean()) * np.pi / 180.0 * R * np.cos(np.radians(clat))
+        lat_km = (fine_lats - fine_lats.mean()) * np.pi / 180.0 * R
+
+        depth_masked = np.where(fine_sub > 0, fine_sub.astype(float), np.nan)
+        lon_km_2d, lat_km_2d = np.meshgrid(lon_km, lat_km)
+        vmax = float(np.nanmax(depth_masked)) if np.isfinite(depth_masked).any() else 1.0
+        pcm = ax_plan.pcolormesh(
+            lon_km_2d, lat_km_2d, depth_masked,
+            cmap=_cm_depth(), vmin=0.0, vmax=vmax, shading="auto",
+        )
+        fig.colorbar(pcm, ax=ax_plan, label="Fine depth (m)", fraction=0.03, pad=0.04)
+
+        # Cross-section line and neighbours
+        if cs_col is not None:
+            step = max(1, fine_sub.shape[1] // 4)
+            ax_plan.axvline(lon_km[cs_col], color="firebrick", linewidth=1.5,
+                            linestyle="-", label="Section")
+            for sign in (-1, +1):
+                nb = cs_col + sign * step
+                if 0 <= nb < len(lon_km):
+                    ax_plan.axvline(lon_km[nb], color="firebrick", linewidth=0.8,
+                                    linestyle="--", alpha=0.7)
+            ax_plan.set_xlabel("E–W distance from interface (km)")
+            ax_plan.set_ylabel("N–S distance from interface (km)")
+        else:
+            assert cs_row is not None
+            step = max(1, fine_sub.shape[0] // 4)
+            ax_plan.axhline(lat_km[cs_row], color="firebrick", linewidth=1.5,
+                            linestyle="-", label="Section")
+            for sign in (-1, +1):
+                nb = cs_row + sign * step
+                if 0 <= nb < len(lat_km):
+                    ax_plan.axhline(lat_km[nb], color="firebrick", linewidth=0.8,
+                                    linestyle="--", alpha=0.7)
+            ax_plan.set_xlabel("E–W distance from interface (km)")
+            ax_plan.set_ylabel("N–S distance from interface (km)")
+
+        ax_plan.set_title("Fine-resolution bathymetry (plan view)", fontsize=9)
+        ax_plan.legend(fontsize=8, loc="upper right")
+
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    # ---- Original layout: single panel + optional Cartopy inset ----
     has_inset = inset_lon is not None and inset_lat is not None
     if not has_inset:
         fig.tight_layout()
 
     if has_inset:
-        fig.subplots_adjust(right=0.60)   # reserve right 40 % for inset
+        fig.subplots_adjust(right=0.60)
         try:
             import cartopy.crs as ccrs
             import cartopy.feature as cfeature
