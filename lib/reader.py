@@ -32,9 +32,12 @@ import xarray as xr
 _EMODNET_BASE_URL = (
     "https://ows.emodnet-bathymetry.eu/wcs?service=wcs&version=1.0.0&"
 )
-_EMODNET_DEFAULT_RES = 1.0 / 480  # native EMODnet ≈ 230 m (7.5 arcseconds)
-_EMODNET_CACHE_DIR   = "./emodnet_cache"
-_EMODNET_MAX_CELLS   = 20_000_000  # ~80 MB at 4 bytes/cell; server limit is ~97 MB
+_EMODNET_DEFAULT_RES    = 1.0 / 480  # native EMODnet ≈ 230 m (7.5 arcseconds)
+_EMODNET_CACHE_DIR      = "./emodnet_cache"
+# Server size limit is ~97.66 MB. Empirically, 17°×4° ≈ 478 MB (>> limit), so
+# the server counts native-resolution source cells (~7 MB/deg²).  Use 12 deg²
+# per tile (≈ 84 MB) with 2-D tiling so any domain works at full resolution.
+_EMODNET_MAX_AREA_DEG2  = 12.0
 
 
 def read_source(
@@ -191,91 +194,120 @@ def _read_emodnet(
         print(f"  Using cached EMODnet data: {cache_path}")
         return xr.open_dataset(str(cache_path))
 
-    # Estimate number of cells and split into lat strips if needed
-    n_lon_cells = int(np.ceil((lon_max - lon_min) / resolution)) + 2
-    n_lat_cells = int(np.ceil((lat_max - lat_min) / resolution)) + 2
-    total_cells = n_lon_cells * n_lat_cells
+    # 2-D tiling: the WCS server reads native-resolution source data internally
+    # before resampling, so the effective cost is ~7 MB/deg² (empirical).
+    # Split into tiles no larger than _EMODNET_MAX_AREA_DEG2 to stay within
+    # the server's 97.66 MB hard limit.
+    W = lon_max - lon_min
+    H = lat_max - lat_min
+    area = W * H
 
-    if total_cells <= _EMODNET_MAX_CELLS:
-        lat_strips = [(lat_min, lat_max)]
+    if area <= _EMODNET_MAX_AREA_DEG2:
+        n_tlon, n_tlat = 1, 1
     else:
-        n_strips = int(np.ceil(total_cells / _EMODNET_MAX_CELLS))
-        strip_h = (lat_max - lat_min) / n_strips
-        lat_strips = [
-            (lat_min + i * strip_h, lat_min + (i + 1) * strip_h)
-            for i in range(n_strips)
-        ]
+        n_tiles = int(np.ceil(area / _EMODNET_MAX_AREA_DEG2))
+        n_tlon  = max(1, round(np.sqrt(n_tiles * W / H)))
+        n_tlat  = max(1, int(np.ceil(n_tiles / n_tlon)))
+        # Guarantee tile area ≤ limit (rounding may overshoot)
+        while (W / n_tlon) * (H / n_tlat) > _EMODNET_MAX_AREA_DEG2:
+            n_tlat += 1
         print(
-            f"  Domain too large for one WCS request "
-            f"({total_cells / 1e6:.1f}M cells at {resolution:.6g}°); "
-            f"splitting into {n_strips} lat strips …"
+            f"  Domain ({W:.1f}°×{H:.1f}° = {area:.0f} deg²) exceeds WCS limit "
+            f"({_EMODNET_MAX_AREA_DEG2} deg²/tile); "
+            f"tiling {n_tlon}×{n_tlat} (lon×lat) = {n_tlon * n_tlat} tiles …"
         )
 
-    lon_out: list = []
-    lat_out: list = []
-    elev_out: list = []
+    tile_w = W / n_tlon
+    tile_h = H / n_tlat
 
-    for k, (tlat_min, tlat_max) in enumerate(lat_strips):
-        if len(lat_strips) > 1:
-            print(f"  Downloading strip {k + 1}/{len(lat_strips)} "
-                  f"({tlat_min:.2f}°–{tlat_max:.2f}°N) …")
-        else:
-            print(f"  Downloading EMODnet bathymetry from WCS ({total_cells / 1e6:.1f}M cells) …")
+    # Download tiles row-by-row (lat ascending); collect lon/lat/elev arrays
+    # Grid: rows[j][i] = (lon_1d, lat_1d, elev_2d) for tile (i, j)
+    grid: list = [[None] * n_tlon for _ in range(n_tlat)]
+    n_total = n_tlon * n_tlat
 
-        url = (
-            _EMODNET_BASE_URL
-            + f"request=GetCoverage&coverage=emodnet:mean&crs=EPSG:4326"
-            f"&BBOX={lon_min - resolution},{tlat_min - resolution},"
-            f"{lon_max + resolution},{tlat_max + resolution}"
-            f"&format=GeoTIFF&interpolation=nearest"
-            f"&resx={resolution}&resy={resolution}"
-        )
+    for j in range(n_tlat):
+        for i in range(n_tlon):
+            k = j * n_tlon + i
+            tlon_min = lon_min + i * tile_w
+            tlon_max = lon_min + (i + 1) * tile_w
+            tlat_min = lat_min + j * tile_h
+            tlat_max = lat_min + (j + 1) * tile_h
 
-        with urllib.request.urlopen(url) as resp:
-            content = resp.read()
+            if n_total > 1:
+                print(f"  Tile {k + 1}/{n_total}: "
+                      f"lon {tlon_min:.2f}°–{tlon_max:.2f}°, "
+                      f"lat {tlat_min:.2f}°–{tlat_max:.2f}°N …")
+            else:
+                tile_area = (tlon_max - tlon_min) * (tlat_max - tlat_min)
+                print(f"  Downloading EMODnet from WCS "
+                      f"({tile_area:.1f} deg² at {resolution:.6g}°/cell) …")
 
-        if content[:5] == b"<?xml" or b"ServiceException" in content[:500]:
-            match = re.search(
-                rb"<ServiceException[^>]*>(.*?)</ServiceException>",
-                content, re.DOTALL,
-            )
-            msg = (
-                match.group(1).decode(errors="replace").strip()
-                if match
-                else content[:400].decode(errors="replace")
-            )
-            raise RuntimeError(
-                f"EMODnet WCS error (strip {k + 1}/{len(lat_strips)}):\n  {msg}\n\n"
-                f"Hint: set 'emodnet_resolution' in the config to a coarser value "
-                f"(current: {resolution:.6g}°)."
+            url = (
+                _EMODNET_BASE_URL
+                + f"request=GetCoverage&coverage=emodnet:mean&crs=EPSG:4326"
+                f"&BBOX={tlon_min - resolution},{tlat_min - resolution},"
+                f"{tlon_max + resolution},{tlat_max + resolution}"
+                f"&format=GeoTIFF&interpolation=nearest"
+                f"&resx={resolution}&resy={resolution}"
             )
 
-        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
+            with urllib.request.urlopen(url) as resp:
+                content = resp.read()
 
-        try:
-            da = rioxarray.open_rasterio(tmp_path, default_name="elevation")
-            if da.ndim == 3 and da.shape[0] == 1:
-                da = da[0, :, :]
-            strip_elev = da.values.astype(np.float64)
-            strip_lon  = da.x.values.astype(np.float64)
-            strip_lat  = da.y.values.astype(np.float64)
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
+            if content[:5] == b"<?xml" or b"ServiceException" in content[:500]:
+                match = re.search(
+                    rb"<ServiceException[^>]*>(.*?)</ServiceException>",
+                    content, re.DOTALL,
+                )
+                msg = (
+                    match.group(1).decode(errors="replace").strip()
+                    if match
+                    else content[:400].decode(errors="replace")
+                )
+                raise RuntimeError(
+                    f"EMODnet WCS error (tile {k + 1}/{n_total}):\n  {msg}\n\n"
+                    f"Reduce _EMODNET_MAX_AREA_DEG2 (currently {_EMODNET_MAX_AREA_DEG2}) "
+                    f"or set 'emodnet_resolution' to a coarser value."
+                )
 
-        if strip_lat[0] > strip_lat[-1]:
-            strip_elev = strip_elev[::-1, :]
-            strip_lat  = strip_lat[::-1]
+            with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
 
-        lon_out.append(strip_lon)
-        lat_out.append(strip_lat)
-        elev_out.append(strip_elev)
+            try:
+                da = rioxarray.open_rasterio(tmp_path, default_name="elevation")
+                if da.ndim == 3 and da.shape[0] == 1:
+                    da = da[0, :, :]
+                t_elev = da.values.astype(np.float64)
+                t_lon  = da.x.values.astype(np.float64)
+                t_lat  = da.y.values.astype(np.float64)
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
 
-    # Merge strips: same lon coords, concatenate lat; deduplicate overlap rows
-    lon_1d   = lon_out[0]
-    lat_1d   = np.concatenate(lat_out)
-    elevation = np.concatenate(elev_out, axis=0)
+            if t_lat[0] > t_lat[-1]:
+                t_elev = t_elev[::-1, :]
+                t_lat  = t_lat[::-1]
+
+            grid[j][i] = (t_lon, t_lat, t_elev)
+
+    # Merge: first concatenate tiles within each lat-row along lon, then stack rows
+    row_lons: list = []
+    row_lats: list = []
+    row_elevs: list = []
+    for j in range(n_tlat):
+        lons  = np.concatenate([grid[j][i][0] for i in range(n_tlon)])
+        lat   = grid[j][0][1]  # same for all tiles in a lat-row
+        elevs = np.concatenate([grid[j][i][2] for i in range(n_tlon)], axis=1)
+        # deduplicate overlapping lon boundary columns
+        _, uidx = np.unique(lons, return_index=True)
+        row_lons.append(lons[uidx])
+        row_lats.append(lat)
+        row_elevs.append(elevs[:, uidx])
+
+    lon_1d    = row_lons[0]
+    lat_1d    = np.concatenate(row_lats)
+    elevation = np.concatenate(row_elevs, axis=0)
+    # deduplicate overlapping lat boundary rows
     _, unique_idx = np.unique(lat_1d, return_index=True)
     lat_1d    = lat_1d[unique_idx]
     elevation = elevation[unique_idx, :]
