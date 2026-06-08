@@ -267,6 +267,97 @@ def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
 # Static (cartopy) plots
 # ---------------------------------------------------------------------------
 
+def plot_rotated_pole(
+    corner_lon: npt.NDArray,
+    corner_lat: npt.NDArray,
+    pole_lon: float,
+    pole_lat: float,
+    title: str,
+    path: str | Path,
+) -> None:
+    """Two-panel globe plot illustrating the rotated-pole grid geometry.
+
+    Left  — standard Orthographic globe centred on the domain: shows the grid
+            footprint and rotated-pole marker in geographic context.
+    Right — Orthographic globe centred on the rotated North Pole: the domain
+            appears near the rotated equator, making the equidistant cell
+            spacing obvious.
+    """
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+    except ImportError:
+        return
+
+    import matplotlib.pyplot as plt
+
+    path = _ensure_dir(path)
+
+    # Build domain perimeter from the corner-coordinate grid
+    perim_lon = np.concatenate([
+        corner_lon[0, :],          # bottom: left → right
+        corner_lon[1:, -1],        # right:  bottom → top
+        corner_lon[-1, -2::-1],    # top:    right → left
+        corner_lon[-2::-1, 0],     # left:   top → bottom
+    ])
+    perim_lat = np.concatenate([
+        corner_lat[0, :],
+        corner_lat[1:, -1],
+        corner_lat[-1, -2::-1],
+        corner_lat[-2::-1, 0],
+    ])
+
+    center_lon = float(corner_lon.mean())
+    center_lat = float(corner_lat.mean())
+    geo = ccrs.PlateCarree()
+
+    fig = plt.figure(figsize=(12, 5))
+
+    panel_specs = [
+        (center_lon, center_lat,
+         f"Geographic view  |  rotated pole at ({pole_lon:.2f}°E, {pole_lat:.2f}°N)"),
+        (pole_lon, pole_lat,
+         "View from rotated North Pole  |  domain near rotated equator"),
+    ]
+
+    for col, (c_lon, c_lat, panel_title) in enumerate(panel_specs):
+        proj = ccrs.Orthographic(central_longitude=c_lon, central_latitude=c_lat)
+        ax = fig.add_subplot(1, 2, col + 1, projection=proj)
+        ax.set_global()  # type: ignore[union-attr]
+
+        ax.add_feature(cfeature.OCEAN, facecolor="#cde8f6", zorder=0)  # type: ignore[union-attr]
+        ax.add_feature(cfeature.LAND,  facecolor="#e8dcc8", zorder=1)  # type: ignore[union-attr]
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)  # type: ignore[union-attr]
+        ax.gridlines(linewidth=0.25, color="grey", alpha=0.5, zorder=2)  # type: ignore[union-attr]
+
+        # Domain footprint
+        ax.fill(  # type: ignore[union-attr]
+            np.append(perim_lon, perim_lon[0]),
+            np.append(perim_lat, perim_lat[0]),
+            color="steelblue", alpha=0.45, transform=geo, zorder=3,
+        )
+        ax.plot(  # type: ignore[union-attr]
+            np.append(perim_lon, perim_lon[0]),
+            np.append(perim_lat, perim_lat[0]),
+            color="steelblue", linewidth=1.5, transform=geo, zorder=4,
+        )
+
+        # Rotated-pole marker
+        ax.plot(  # type: ignore[union-attr]
+            pole_lon, pole_lat,
+            marker="*", markersize=15, color="firebrick",
+            transform=geo, zorder=5,
+            label=f"Rotated N-pole\n({pole_lon:.2f}°E, {pole_lat:.2f}°N)",
+        )
+        ax.legend(loc="lower left", fontsize=7, framealpha=0.85)  # type: ignore[union-attr]
+        ax.set_title(panel_title, fontsize=8, pad=4)  # type: ignore[union-attr]
+
+    fig.suptitle(title, fontsize=11, y=1.01)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_depth_diff(
     lon: npt.NDArray,
     lat: npt.NDArray,

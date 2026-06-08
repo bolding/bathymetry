@@ -471,11 +471,34 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     dst_grid = _build_grid(cfg, args)
     grid_summary = dst_grid.summary()
     report.print_table(grid_summary, title="Target grid")
+
+    # Rotated-pole: two-panel globe plot showing grid footprint and pole location
+    grid_images: list[str] = []
+    grid_extra_text = ""
+    if isinstance(dst_grid, gridmod.RotatedPoleGrid):
+        rp_plot = pfx + "01_rotated_pole.png"
+        report.plot_rotated_pole(
+            dst_grid.corner_lon, dst_grid.corner_lat,
+            dst_grid.pole_lon, dst_grid.pole_lat,
+            title=f"{name} — rotated-pole grid geometry",
+            path=os.path.join(report_dir, rp_plot),
+        )
+        grid_images.append(rp_plot)
+        grid_extra_text = (
+            f"  \nRotated North Pole at "
+            f"({dst_grid.pole_lon:.4f}°E, {dst_grid.pole_lat:.4f}°N).  "
+            "Left globe: geographic view; right globe: view centred on the rotated pole."
+        )
+
     rpt.add_section(
         "Target grid",
-        text=f"Grid type: **{type(dst_grid).__name__}**, "
-             f"{dst_grid.nx} × {dst_grid.ny} cells.",
+        text=(
+            f"Grid type: **{type(dst_grid).__name__}**, "
+            f"{dst_grid.nx} × {dst_grid.ny} cells."
+            + grid_extra_text
+        ),
         table=grid_summary,
+        images=grid_images,
     )
 
     # ------------------------------------------------------------------
