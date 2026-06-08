@@ -73,6 +73,7 @@ import numpy as np
 import xarray as xr
 
 import analysis
+import boundary as boundarymod
 import grid as gridmod
 import interpolate
 import reader
@@ -402,6 +403,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     out.add_argument("--output", default=None, help="Output NetCDF file.")
     out.add_argument("--report-dir", default=None,
                      help="Directory for report figures, CSV, and Markdown.")
+    out.add_argument("--write-boundaries", action="store_true",
+                     help="Write open-boundary T-grid coordinate CSV files "
+                          "(one per contiguous wet segment on each side: "
+                          "west, north, east, south) into the report directory.")
 
     args = parser.parse_args(argv)
 
@@ -1108,6 +1113,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     report_md = os.path.join(report_dir, pfx + "report.md")
     rpt.write(report_md)
+
+    if args.write_boundaries:
+        print("\nWriting boundary coordinate files …")
+        bdy_files = boundarymod.write_boundary_coords(dst, report_dir, name)
+        for f in bdy_files:
+            print(f"  {f}")
 
     print(f"\nDone.")
     print(f"  Output NetCDF : {output_file}")
