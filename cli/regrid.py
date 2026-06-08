@@ -700,6 +700,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         dst2_mask        = dst2["mask"].values
         dst2_depth_vals  = dst2["depth"].values
+        common_ocean_3b  = (dst["mask"].values == 1) & (dst2_mask == 1)
+
         cmp_plot = pfx + "03b_source_comparison.png"
         report.plot_source_comparison(
             dst.lon.values, dst.lat.values,
@@ -707,6 +709,20 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             name1=src1_label, name2=src2_label,
             path=os.path.join(report_dir, cmp_plot),
         )
+
+        diff_plot_3b = pfx + "03b_depth_diff.png"
+        diff_arr_3b = np.where(
+            common_ocean_3b,
+            dst["depth"].values - dst2_depth_vals,
+            np.nan,
+        )
+        report.plot_depth_diff(
+            dst.lon.values, dst.lat.values,
+            diff_arr_3b,
+            title=f"{name} — raw depth difference: {src1_label} − {src2_label}",
+            path=os.path.join(report_dir, diff_plot_3b),
+        )
+
         n_both   = int(((dst["mask"].values == 1) & (dst2_mask == 1)).sum())
         n_src1   = int(((dst["mask"].values == 1) & (dst2_mask == 0)).sum())
         n_src2   = int(((dst["mask"].values == 0) & (dst2_mask == 1)).sum())
@@ -726,7 +742,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 f"{src1_label} only (water)": n_src1,
                 f"{src2_label} only (water)": n_src2,
             },
-            images=[cmp_plot],
+            images=[cmp_plot, diff_plot_3b],
         )
 
     # ------------------------------------------------------------------
