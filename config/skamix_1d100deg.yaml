@@ -47,7 +47,7 @@ output:
   # file and report_dir are derived from 'name' above when not set:
   #   file       → northsea_1d15deg.nc
   #   report_dir → ./report/northsea_1d15deg/
-  # log_depth_scale: true
+  log_depth_scale: true
 
 # Fixes: re-run with --accept-fixes to apply all suggestions automatically,
 # or paste selected entries here.  Available actions: set_depth, open_cell, close_cell

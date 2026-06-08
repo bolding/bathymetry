@@ -534,6 +534,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "Run without --skip-regrid first to create it."
             )
         print(f"\n[2/6] Skipped (--skip-regrid)")
+        # Re-include any source plots produced by the previous full run.
+        src_images = [
+            f for f in (pfx + "02a_source_raw.png",
+                        pfx + "02b_source_coastline_masked.png")
+            if os.path.exists(os.path.join(report_dir, f))
+        ]
+        rpt.add_section(
+            "Source bathymetry",
+            text="Source reading skipped (`--skip-regrid`); plots from previous full run.",
+            images=src_images,
+        )
+
         print(f"\n[3/6] Loading cached raw-regrid result: {raw_regrid_cache}")
         dst = xr.open_dataset(raw_regrid_cache).load()
         dst_sum = interpolate.regrid_summary(dst, dst_grid)
