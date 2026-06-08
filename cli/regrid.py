@@ -28,6 +28,7 @@ Example YAML (``north_sea.yaml``)::
 
     analysis:
       nkeep_basins: 1
+      max_section_profiles: 10   # section plots shown in report (all saved to CSV)
       wet_frac_threshold: 0.3
       sill_ratio_threshold: 0.7
       area_ratio_threshold: 0.5
@@ -418,6 +419,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     tile_cells    = int(_merge(None, cfg, "regridding", "tile_cells", default=0))
     tile_buf_deg  = float(_merge(None, cfg, "regridding", "tile_buf_deg", default=0.5))
     nkeep         = _merge(args.nkeep_basins, cfg, "analysis",   "nkeep_basins",  default=1)
+    max_sections  = int(_merge(None, cfg, "analysis", "max_section_profiles", default=10))
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
     sill_thr      = _merge(args.sill_ratio_threshold, cfg, "analysis", "sill_ratio_threshold",
@@ -795,9 +797,15 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     )
 
     # Cross-section profiles — one report section per flagged interface.
+    # Capped at max_sections (YAML: analysis.max_section_profiles, default 10).
+    n_total_straits = len(strait_records)
+    shown_records   = strait_records[:max_sections]
+    if n_total_straits > max_sections:
+        print(f"      (showing {max_sections} of {n_total_straits} section profiles; "
+              f"set analysis.max_section_profiles in YAML to show more)")
     _zoom_lon = getattr(dst_grid, "dlon", 0.1) * 10
     _zoom_lat = getattr(dst_grid, "dlat", 0.1) * 10
-    for k, rec in enumerate(strait_records[:10]):
+    for k, rec in enumerate(shown_records):
         dist_key = "_dlat_km" if rec["direction"] == "U" else "_dlon_km"
         depth_sec = rec["_depth_section"]
         cell_km = rec.get(dist_key, 0.1)
@@ -823,7 +831,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
         direction_label = "U (N–S section)" if rec["direction"] == "U" else "V (E–W section)"
         rpt.add_section(
-            f"Interface {k + 1}/{len(strait_records[:10])}: "
+            f"Interface {k + 1}/{n_total_straits}: "
             f"{rec['category']} | {direction_label} | "
             f"lon={rec['lon']:.3f}°, lat={rec['lat']:.3f}°",
             table={
@@ -836,6 +844,15 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "suggested fix":       rec.get("suggested_fix", ""),
             },
             images=[img],
+        )
+    if n_total_straits > max_sections:
+        rpt.add_section(
+            f"… {n_total_straits - max_sections} more interface(s) not shown",
+            text=(
+                f"Set `analysis.max_section_profiles: {n_total_straits}` in your YAML "
+                "config to generate profiles for all flagged interfaces. "
+                "All interfaces are listed in the straits CSV and `fixes_suggested.yaml`."
+            ),
         )
 
     # ------------------------------------------------------------------
