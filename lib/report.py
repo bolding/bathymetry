@@ -808,6 +808,9 @@ def plot_section_profile(
         lon_km = (fine_lons - fine_lons.mean()) * np.pi / 180.0 * R * np.cos(np.radians(clat))
         lat_km = (fine_lats - fine_lats.mean()) * np.pi / 180.0 * R
 
+        # Grey background so coarse grid lines are visible over land/NaN areas
+        ax_plan.set_facecolor("#c8c8c8")
+
         depth_masked = np.where(fine_sub > 0, fine_sub.astype(float), np.nan)
         lon_km_2d, lat_km_2d = np.meshgrid(lon_km, lat_km)
         vmax = float(np.nanmax(depth_masked)) if np.isfinite(depth_masked).any() else 1.0
@@ -827,7 +830,7 @@ def plot_section_profile(
                 * np.pi / 180.0 * R * np.cos(np.radians(ref_lat))
             )
             cc_lat_km = (coarse_corner_lats - ref_lat) * np.pi / 180.0 * R
-            _gkw = dict(color="white", linewidth=0.9, alpha=0.9, zorder=3)
+            _gkw = dict(color="black", linewidth=1.2, alpha=0.8, zorder=3)
             # Draw each row of corners as a polyline (constant-lat cell edges)
             for k in range(cc_lon_km.shape[0]):
                 ax_plan.plot(cc_lon_km[k, :], cc_lat_km[k, :], **_gkw)
