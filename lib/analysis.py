@@ -687,12 +687,14 @@ def apply_mask_regions(
         Keys: ``lon``, ``lat``.  Masks the single nearest wet cell.
 
     ``ij_rectangle`` (aliases: ``ij_rect``, ``ij_box``)
-        Keys: ``i_min``, ``i_max``, ``j_min``, ``j_max`` — 0-based row/column
-        indices into the coarse destination grid.  Useful when the exact grid
-        indices are known from inspecting the NetCDF output.
+        Keys: ``i_min``, ``i_max``, ``j_min``, ``j_max`` — 0-based grid indices
+        as shown in ncview: i = x-direction (longitude column), j = y-direction
+        (latitude row).  Useful when the exact indices are known from inspecting
+        the NetCDF output.
 
     ``ij_point`` (alias: ``index_point``)
-        Keys: ``i``, ``j`` — 0-based row/column index of a single cell.
+        Keys: ``i``, ``j`` — single cell: i = x (longitude column),
+        j = y (latitude row).
 
     All types accept an optional ``name`` key used only in the report.
 
@@ -740,20 +742,20 @@ def apply_mask_regions(
             sel = np.zeros_like(mask)
             sel[iy, ix] = mask[iy, ix]   # only if the cell is wet
         elif rtype in ("ij_rectangle", "ij_rect", "ij_box"):
-            ny, nx = mask.shape
+            ny, nx = mask.shape  # array shape is [lat(j), lon(i)]
             i_min = int(region.get("i_min", 0))
-            i_max = int(region.get("i_max", ny - 1))
+            i_max = int(region.get("i_max", nx - 1))
             j_min = int(region.get("j_min", 0))
-            j_max = int(region.get("j_max", nx - 1))
+            j_max = int(region.get("j_max", ny - 1))
             sel_ij = np.zeros_like(mask)
-            sel_ij[i_min:i_max + 1, j_min:j_max + 1] = True
+            sel_ij[j_min:j_max + 1, i_min:i_max + 1] = True
             sel = sel_ij & mask
         elif rtype in ("ij_point", "index_point"):
             i = int(region["i"])
             j = int(region["j"])
             sel = np.zeros_like(mask)
-            if 0 <= i < mask.shape[0] and 0 <= j < mask.shape[1]:
-                sel[i, j] = mask[i, j]
+            if 0 <= j < mask.shape[0] and 0 <= i < mask.shape[1]:
+                sel[j, i] = mask[j, i]
         else:
             raise ValueError(
                 f"Unknown mask region type {rtype!r}. "

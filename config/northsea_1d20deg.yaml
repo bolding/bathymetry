@@ -78,7 +78,7 @@ output:
 #     lon: 8.5
 #     lat: 54.8
 #     name: Isolated tidal pool
-#   # Grid-index variants (0-based row i, column j from the output NetCDF):
+#   # Grid-index variants (i = x/longitude column, j = y/latitude row, as in ncview):
 #   - type: ij_rectangle
 #     i_min: 10
 #     i_max: 20

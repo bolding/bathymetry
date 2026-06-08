@@ -66,6 +66,7 @@ mask_regions:
     i_max: 350
     j_min: 0
     j_max: 15
+    name: Southern Kattegat
 #   - type: rectangle
 #     lon_min: 9.0
 #     lon_max: 10.5
