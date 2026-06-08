@@ -363,6 +363,34 @@ The smoothed field is saved as a separate NetCDF variable
 (`depth_rx0_0p20` for rx0=0.2) alongside the unsmoothed `depth`, allowing
 multiple bathymetry variants in a single file.
 
+## Incremental fixing workflow
+
+The regridding step (step 3) is the most expensive part of the pipeline.
+After the first run, the raw post-regrid result is cached as
+`{cache_dir}/{name}_raw_regrid.nc`.  Subsequent runs can load this cache and
+skip straight to the analysis and fixing steps:
+
+```bash
+# First run — regrids and caches the result
+bathymetry-regrid --config my_run.yaml
+
+# Inspect fixes_suggested.yaml, add selected entries to my_run.yaml, then:
+bathymetry-regrid --config my_run.yaml --skip-regrid
+
+# Apply another round of fixes without re-regridding
+bathymetry-regrid --config my_run.yaml --skip-regrid
+```
+
+`--skip-regrid` also pairs with `--accept-fixes`:
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes
+```
+
+The output NetCDF (`{name}.nc`) is always regenerated at the end of each run
+(with the current fixes and smoothing applied), but the raw-regrid cache is
+never overwritten by `--skip-regrid`, so the base data is always recoverable.
+
 ## Mask region workflow
 
 To exclude a water body (fjord, lagoon, estuary) from the model domain:

@@ -320,27 +320,33 @@ def _classify(
     return "OK", ""
 
 
-def _coarse_corners_in_bbox(
+def _coarse_corners_for_interface(
     dst_grid: BaseGrid,
-    fine_lons: npt.NDArray,
-    fine_lats: npt.NDArray,
+    i: int,
+    j: int,
+    direction: str,
+    pad: int = 1,
 ) -> tuple[Optional[npt.NDArray], Optional[npt.NDArray]]:
-    """Return coarse corner arrays for cells whose centres fall inside the fine bbox.
+    """Return coarse corner arrays for the neighbourhood of interface (i,j).
 
-    Returns ``(corner_lons_2d, corner_lats_2d)`` shaped ``[nr+1, nc+1]`` where
-    nr × nc is the number of matching coarse cells, or ``(None, None)`` if none match.
+    For a U-interface the two cells are (i,j) and (i,j+1); for a V-interface
+    they are (i,j) and (i+1,j).  *pad* extra cells are included on every side
+    so the two interface cells are always shown in full even when they sit at
+    the edge of the analysis window.
+
+    Returns ``(corner_lons_2d, corner_lats_2d)`` or ``(None, None)``.
     """
-    lon_min, lon_max = float(fine_lons[0]), float(fine_lons[-1])
-    lat_min, lat_max = float(fine_lats[0]), float(fine_lats[-1])
-    in_bbox = (
-        (dst_grid.center_lon >= lon_min) & (dst_grid.center_lon <= lon_max) &
-        (dst_grid.center_lat >= lat_min) & (dst_grid.center_lat <= lat_max)
-    )
-    rows, cols = np.where(in_bbox)
-    if len(rows) == 0:
-        return None, None
-    i_min, i_max = int(rows.min()), int(rows.max())
-    j_min, j_max = int(cols.min()), int(cols.max())
+    ny, nx = dst_grid.center_lon.shape
+    if direction == "U":
+        i_min = max(0, i - pad)
+        i_max = min(ny - 1, i + pad)
+        j_min = max(0, j - pad)
+        j_max = min(nx - 1, j + 1 + pad)
+    else:  # V
+        i_min = max(0, i - pad)
+        i_max = min(ny - 1, i + 1 + pad)
+        j_min = max(0, j - pad)
+        j_max = min(nx - 1, j + pad)
     return (
         dst_grid.corner_lon[i_min:i_max + 2, j_min:j_max + 2],
         dst_grid.corner_lat[i_min:i_max + 2, j_min:j_max + 2],
@@ -430,7 +436,7 @@ def _analyse_u_interface(
         "_cs_col": cs_col,
         **dict(zip(
             ("_coarse_corner_lons", "_coarse_corner_lats"),
-            _coarse_corners_in_bbox(dst_grid, src_lon[il_start:il_end], src_lat[ia_start:ia_end]),
+            _coarse_corners_for_interface(dst_grid, i, j, "U"),
         )),
     }
 
@@ -513,7 +519,7 @@ def _analyse_v_interface(
         "_cs_row": cs_row,
         **dict(zip(
             ("_coarse_corner_lons", "_coarse_corner_lats"),
-            _coarse_corners_in_bbox(dst_grid, src_lon[il_start:il_end], src_lat[ia_start:ia_end]),
+            _coarse_corners_for_interface(dst_grid, i, j, "V"),
         )),
     }
 

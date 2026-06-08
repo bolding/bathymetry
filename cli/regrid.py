@@ -70,6 +70,7 @@ if _lib not in sys.path:
     sys.path.insert(0, os.path.abspath(_lib))
 
 import numpy as np
+import xarray as xr
 
 import analysis
 import grid as gridmod
@@ -363,6 +364,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     help="Minimum ocean depth after regridding (m).")
     rg.add_argument("--min-wet-fraction", type=float, default=None,
                     help="Force cells with wet_fraction below this threshold to land.")
+    rg.add_argument("--skip-regrid", action="store_true",
+                    help="Skip source reading and regridding (steps 1–3); load the "
+                         "cached raw-regrid file from the cache directory instead.  "
+                         "Use this to re-apply fixes or re-run analysis without "
+                         "repeating the expensive regridding step.")
 
     # Analysis
     an = parser.add_argument_group("Analysis")
@@ -417,6 +423,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     min_wf        = _merge(args.min_wet_fraction, cfg, "regridding", "min_wet_fraction",
                            default=0.0)
     coastline_res = _merge(None, cfg, "regridding", "coastline_mask", default=None)
+    skip_regrid   = bool(args.skip_regrid)
     tile_cells    = int(_merge(None, cfg, "regridding", "tile_cells", default=0))
     tile_buf_deg  = float(_merge(None, cfg, "regridding", "tile_buf_deg", default=0.5))
     nkeep         = _merge(args.nkeep_basins, cfg, "analysis",   "nkeep_basins",  default=1)
@@ -508,113 +515,144 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         images=grid_images,
     )
 
-    # ------------------------------------------------------------------
-    # Step 2 – Read source bathymetry
-    # ------------------------------------------------------------------
-    print("\n[2/6] Reading source bathymetry …")
-    t0 = time.time()
-    src = reader.read_source(
-        source, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
-        emodnet_cache_dir=str(emodnet_cache),
-        emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
-    )
+    # Raw-regrid cache: saved after step 3, reloaded by --skip-regrid
+    raw_regrid_cache = os.path.join(str(cache_dir), f"{name}_raw_regrid.nc")
 
-    src_label = Path(source).name if source != "emodnet" else "EMODnet"
+    # ------------------------------------------------------------------
+    # Steps 2 + 3 – Read source and regrid  (skipped by --skip-regrid)
+    # ------------------------------------------------------------------
+    if skip_regrid:
+        if not os.path.exists(raw_regrid_cache):
+            parser.error(
+                f"--skip-regrid: raw-regrid cache not found: {raw_regrid_cache}\n"
+                "Run without --skip-regrid first to create it."
+            )
+        print(f"\n[2/6] Skipped (--skip-regrid)")
+        print(f"\n[3/6] Loading cached raw-regrid result: {raw_regrid_cache}")
+        dst = xr.open_dataset(raw_regrid_cache).load()
+        dst_sum = interpolate.regrid_summary(dst, dst_grid)
+        report.print_table(dst_sum, title="Regridded destination (cached)")
+        rpt.add_section(
+            "Conservative regridding",
+            text=(
+                f"Loaded from cache (`--skip-regrid`): `{raw_regrid_cache}`.  "
+                "Source reading and regridding were skipped."
+            ),
+            table=dst_sum,
+        )
+    else:
+        # ------------------------------------------------------------------
+        # Step 2 – Read source bathymetry
+        # ------------------------------------------------------------------
+        print("\n[2/6] Reading source bathymetry …")
+        t0 = time.time()
+        src = reader.read_source(
+            source, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
+            emodnet_cache_dir=str(emodnet_cache),
+            emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
+        )
 
-    def _save_src_plot(tag: str, title: str) -> tuple[str, str]:
-        """Save PNG + HTML for current state of *src*; return (png_name, html_name)."""
-        png = pfx + tag + ".png"
-        htm = pfx + tag + ".html"
+        src_label = Path(source).name if source != "emodnet" else "EMODnet"
+
+        def _save_src_plot(tag: str, title: str) -> tuple[str, str]:
+            """Save PNG + HTML for current state of *src*; return (png_name, html_name)."""
+            png = pfx + tag + ".png"
+            htm = pfx + tag + ".html"
+            report.plot_depth(
+                src.lon.values, src.lat.values,
+                src["depth"].values, (~src["land"].values).astype(float),
+                title=title,
+                path=os.path.join(report_dir, png),
+                log_scale=log_depth_scale,
+                interactive=True,
+            )
+            return png, htm
+
+        src_images: list[str] = []
+        src_links:  list[str] = []
+
+        # 2a — raw source
+        raw_png, raw_html = _save_src_plot("02a_source_raw", f"Source (raw): {src_label}")
+        src_images.append(raw_png)
+        src_links.append(f"[Interactive — raw]({raw_html})")
+
+        # 2b — after coastline mask (only when enabled)
+        coast_note = ""
+        if coastline_res:
+            src = reader.apply_coastline_mask(src, resolution=str(coastline_res))
+            cm_png, cm_html = _save_src_plot(
+                "02b_source_coastline_masked",
+                f"Source after coastline mask (NE {coastline_res}): {src_label}",
+            )
+            src_images.append(cm_png)
+            src_links.append(f"[Interactive — coastline masked]({cm_html})")
+            coast_note = f"  Coastline mask applied (Natural Earth {coastline_res})."
+
+        src_sum = reader.source_summary(src)
+        report.print_table(src_sum, title="Source bathymetry")
+        print(f"      done in {time.time()-t0:.1f} s")
+
+        rpt.add_section(
+            "Source bathymetry",
+            text=(
+                f"Source data read and clipped to the target domain "
+                f"(±{pad_deg}° buffer applied).{coast_note}  "
+                + "  ".join(src_links)
+            ),
+            table=src_sum,
+            images=src_images,
+        )
+
+        # ------------------------------------------------------------------
+        # Step 3 – ESMF conservative interpolation
+        # ------------------------------------------------------------------
+        print("\n[3/6] Conservative regridding (xESMF) …  (may take a minute for large grids)")
+        t0 = time.time()
+        dst = interpolate.regrid(
+            src, dst_grid,
+            min_depth=float(min_depth),
+            min_wet_fraction=float(min_wf),
+            cache_dir=str(cache_dir),
+            tile_cells=tile_cells,
+            tile_buf_deg=tile_buf_deg,
+        )
+        # Save raw post-regrid result for --skip-regrid on subsequent runs
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        dst.to_netcdf(raw_regrid_cache)
+        print(f"  Raw-regrid result cached: {raw_regrid_cache}")
+
+        dst_sum = interpolate.regrid_summary(dst, dst_grid)
+        report.print_table(dst_sum, title="Regridded destination")
+        print(f"      done in {time.time()-t0:.1f} s")
+
+        regrid_plot = pfx + "03_regrid_result.png"
+        wf_plot = pfx + "03_wet_fraction.png"
         report.plot_depth(
-            src.lon.values, src.lat.values,
-            src["depth"].values, (~src["land"].values).astype(float),
-            title=title,
-            path=os.path.join(report_dir, png),
-            log_scale=log_depth_scale,
+            dst.lon.values, dst.lat.values,
+            dst["depth"].values, dst["mask"].values,
+            title=f"{name} — regridded depth (m)",
+            path=os.path.join(report_dir, regrid_plot),
             interactive=True,
+            log_scale=log_depth_scale,
         )
-        return png, htm
-
-    src_images: list[str] = []
-    src_links:  list[str] = []
-
-    # 2a — raw source
-    raw_png, raw_html = _save_src_plot("02a_source_raw", f"Source (raw): {src_label}")
-    src_images.append(raw_png)
-    src_links.append(f"[Interactive — raw]({raw_html})")
-
-    # 2b — after coastline mask (only when enabled)
-    coast_note = ""
-    if coastline_res:
-        src = reader.apply_coastline_mask(src, resolution=str(coastline_res))
-        cm_png, cm_html = _save_src_plot(
-            "02b_source_coastline_masked",
-            f"Source after coastline mask (NE {coastline_res}): {src_label}",
+        report.plot_depth(
+            dst.lon.values, dst.lat.values,
+            dst["wet_fraction"].values, dst["mask"].values,
+            title=f"{name} — wet fraction",
+            path=os.path.join(report_dir, wf_plot),
+            cmap=report._cm_fraction(),
+            vmin=0.0, vmax=1.0,
         )
-        src_images.append(cm_png)
-        src_links.append(f"[Interactive — coastline masked]({cm_html})")
-        coast_note = f"  Coastline mask applied (Natural Earth {coastline_res})."
-
-    src_sum = reader.source_summary(src)
-    report.print_table(src_sum, title="Source bathymetry")
-    print(f"      done in {time.time()-t0:.1f} s")
-
-    rpt.add_section(
-        "Source bathymetry",
-        text=(
-            f"Source data read and clipped to the target domain "
-            f"(±{pad_deg}° buffer applied).{coast_note}  "
-            + "  ".join(src_links)
-        ),
-        table=src_sum,
-        images=src_images,
-    )
-
-    # ------------------------------------------------------------------
-    # Step 3 – ESMF conservative interpolation
-    # ------------------------------------------------------------------
-    print("\n[3/6] Conservative regridding (xESMF) …  (may take a minute for large grids)")
-    t0 = time.time()
-    dst = interpolate.regrid(
-        src, dst_grid,
-        min_depth=float(min_depth),
-        min_wet_fraction=float(min_wf),
-        cache_dir=str(cache_dir),
-        tile_cells=tile_cells,
-        tile_buf_deg=tile_buf_deg,
-    )
-    dst_sum = interpolate.regrid_summary(dst, dst_grid)
-    report.print_table(dst_sum, title="Regridded destination")
-    print(f"      done in {time.time()-t0:.1f} s")
-
-    regrid_plot = pfx + "03_regrid_result.png"
-    wf_plot = pfx + "03_wet_fraction.png"
-    report.plot_depth(
-        dst.lon.values, dst.lat.values,
-        dst["depth"].values, dst["mask"].values,
-        title=f"{name} — regridded depth (m)",
-        path=os.path.join(report_dir, regrid_plot),
-        interactive=True,
-        log_scale=log_depth_scale,
-    )
-    report.plot_depth(
-        dst.lon.values, dst.lat.values,
-        dst["wet_fraction"].values, dst["mask"].values,
-        title=f"{name} — wet fraction",
-        path=os.path.join(report_dir, wf_plot),
-        cmap=report._cm_fraction(),
-        vmin=0.0, vmax=1.0,
-    )
-    rpt.add_section(
-        "Conservative regridding",
-        text=(
-            "ESMF first-order conservative regridding (FRACAREA normalisation). "
-            f"Weight file cached in `{cache_dir}`. "
-            f"Minimum depth: {min_depth} m."
-        ),
-        table=dst_sum,
-        images=[regrid_plot, wf_plot],
-    )
+        rpt.add_section(
+            "Conservative regridding",
+            text=(
+                "ESMF first-order conservative regridding (FRACAREA normalisation). "
+                f"Weight file cached in `{cache_dir}`. "
+                f"Minimum depth: {min_depth} m."
+            ),
+            table=dst_sum,
+            images=[regrid_plot, wf_plot],
+        )
 
     # ------------------------------------------------------------------
     # Step 3b – Second source comparison (optional)
