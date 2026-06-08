@@ -44,8 +44,10 @@ smooth:
   rx0: 0.2    # target Haney slope factor; set to null or remove to skip smoothing
 
 output:
-  file: bathymetry_northsea.nc
-  report_dir: ./report/northsea
+  # file and report_dir are derived from 'name' above when not set:
+  #   file       → northsea_1d15deg.nc
+  #   report_dir → ./report/northsea_1d15deg/
+  # log_depth_scale: true
 
 # Fixes: re-run with --accept-fixes to apply all suggestions automatically,
 # or paste selected entries here.  Available actions: set_depth, open_cell, close_cell
