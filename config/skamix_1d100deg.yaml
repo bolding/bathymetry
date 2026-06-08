@@ -61,6 +61,10 @@ output:
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
 mask_regions:
+  - type: ij_point
+    i: 118
+    j: 46
+    name: Limfjorden
   - type: ij_rectangle
     i_min: 250
     i_max: 350
