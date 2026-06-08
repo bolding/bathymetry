@@ -29,6 +29,8 @@ regridding:
   cache_dir: ./regrid_weights
   min_depth: 2.0    # minimum depth for wet cells (m)
   min_wet_fraction: 0.05
+  # emodnet_cache_dir: ./emodnet_cache   # where to cache downloaded EMODnet tiles
+  # emodnet_resolution: 0.002083         # override native ~230 m (1/480°) resolution
 
 analysis:
   nkeep_basins: 1           # keep only the largest connected ocean basin

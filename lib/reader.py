@@ -20,8 +20,10 @@ Both return an ``xr.Dataset`` with:
 
 from __future__ import annotations
 
+import re
 import tempfile
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -30,7 +32,9 @@ import xarray as xr
 _EMODNET_BASE_URL = (
     "https://ows.emodnet-bathymetry.eu/wcs?service=wcs&version=1.0.0&"
 )
-_EMODNET_DEFAULT_RES = 1.0 / 60 / 16  # ~115 m
+_EMODNET_DEFAULT_RES = 1.0 / 480  # native EMODnet ≈ 230 m (7.5 arcseconds)
+_EMODNET_CACHE_DIR   = "./emodnet_cache"
+_EMODNET_MAX_CELLS   = 20_000_000  # ~80 MB at 4 bytes/cell; server limit is ~97 MB
 
 
 def read_source(
@@ -38,6 +42,8 @@ def read_source(
     lon_bounds: tuple[float, float],
     lat_bounds: tuple[float, float],
     pad_deg: float = 1.0,
+    emodnet_cache_dir: str = _EMODNET_CACHE_DIR,
+    emodnet_resolution: Optional[float] = None,
     **kwargs,
 ) -> xr.Dataset:
     """Load fine-resolution bathymetry from *source*, clipped to the area of interest.
@@ -54,10 +60,14 @@ def read_source(
     pad_deg : float
         Extra margin added on all sides before subsetting, to avoid edge
         artefacts during regridding.
+    emodnet_cache_dir : str
+        Directory where downloaded EMODnet tiles are cached as NetCDF.
+        Set to ``""`` to disable caching (default: ``"./emodnet_cache"``).
+    emodnet_resolution : float or None
+        Download resolution in degrees. ``None`` → native EMODnet (~230 m).
+        Large domains are automatically split into tiles; results are cached.
     **kwargs
-        Passed through to the backend:
-        - GEBCO: ``var_name`` (default ``"elevation"``)
-        - EMODnet: ``resolution`` (degrees, default ~115 m), ``tiff_path``
+        Passed through to the GEBCO backend (``var_name`` etc.).
     """
     lon_min = lon_bounds[0] - pad_deg
     lon_max = lon_bounds[1] + pad_deg
@@ -65,7 +75,11 @@ def read_source(
     lat_max = lat_bounds[1] + pad_deg
 
     if source.lower() == "emodnet":
-        return _read_emodnet(lon_min, lon_max, lat_min, lat_max, **kwargs)
+        kw: dict = {}
+        if emodnet_resolution is not None:
+            kw["resolution"] = emodnet_resolution
+        return _read_emodnet(lon_min, lon_max, lat_min, lat_max,
+                             cache_dir=emodnet_cache_dir, **kw)
     else:
         return _read_gebco(source, lon_min, lon_max, lat_min, lat_max, **kwargs)
 
@@ -152,71 +166,144 @@ def _read_emodnet(
     lat_min: float,
     lat_max: float,
     resolution: float = _EMODNET_DEFAULT_RES,
-    tiff_path: Optional[str] = None,
+    cache_dir: str = _EMODNET_CACHE_DIR,
 ) -> xr.Dataset:
     try:
-        import rioxarray  # noqa: F401
+        import rioxarray
     except ImportError as exc:
         raise ImportError(
             "rioxarray is required for EMODnet downloads. "
             "Install it with: pip install rioxarray"
         ) from exc
 
-    import rioxarray
+    # Merged-result cache (NetCDF keyed on bbox + resolution)
+    cache_path: Optional[Path] = None
+    if cache_dir:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        res_tag = f"{resolution:.10f}".rstrip("0").replace(".", "p")
+        fname = (
+            f"emodnet_{lon_min:.4f}_{lon_max:.4f}"
+            f"_{lat_min:.4f}_{lat_max:.4f}_{res_tag}.nc"
+        )
+        cache_path = Path(cache_dir) / fname
 
-    url = (
-        _EMODNET_BASE_URL
-        + f"request=GetCoverage&coverage=emodnet:mean&crs=EPSG:4326"
-        f"&BBOX={lon_min - resolution},{lat_min - resolution},"
-        f"{lon_max + resolution},{lat_max + resolution}"
-        f"&format=GeoTIFF&interpolation=nearest"
-        f"&resx={resolution}&resy={resolution}"
-    )
+    if cache_path is not None and cache_path.exists():
+        print(f"  Using cached EMODnet data: {cache_path}")
+        return xr.open_dataset(str(cache_path))
 
-    if tiff_path is not None:
-        fout = open(tiff_path, "wb")
-        dest = tiff_path
+    # Estimate number of cells and split into lat strips if needed
+    n_lon_cells = int(np.ceil((lon_max - lon_min) / resolution)) + 2
+    n_lat_cells = int(np.ceil((lat_max - lat_min) / resolution)) + 2
+    total_cells = n_lon_cells * n_lat_cells
+
+    if total_cells <= _EMODNET_MAX_CELLS:
+        lat_strips = [(lat_min, lat_max)]
     else:
-        tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
-        fout = tmp
-        dest = tmp.name
+        n_strips = int(np.ceil(total_cells / _EMODNET_MAX_CELLS))
+        strip_h = (lat_max - lat_min) / n_strips
+        lat_strips = [
+            (lat_min + i * strip_h, lat_min + (i + 1) * strip_h)
+            for i in range(n_strips)
+        ]
+        print(
+            f"  Domain too large for one WCS request "
+            f"({total_cells / 1e6:.1f}M cells at {resolution:.6g}°); "
+            f"splitting into {n_strips} lat strips …"
+        )
 
-    print(f"Downloading EMODnet bathymetry from WCS …")
-    with urllib.request.urlopen(url) as resp, fout:
-        fout.write(resp.read())
+    lon_out: list = []
+    lat_out: list = []
+    elev_out: list = []
 
-    da = rioxarray.open_rasterio(dest, default_name="elevation")
-    if da.ndim == 3 and da.shape[0] == 1:
-        da = da[0, :, :]
+    for k, (tlat_min, tlat_max) in enumerate(lat_strips):
+        if len(lat_strips) > 1:
+            print(f"  Downloading strip {k + 1}/{len(lat_strips)} "
+                  f"({tlat_min:.2f}°–{tlat_max:.2f}°N) …")
+        else:
+            print(f"  Downloading EMODnet bathymetry from WCS ({total_cells / 1e6:.1f}M cells) …")
 
-    # rioxarray uses x (lon) and y (lat) as coordinate names
-    elevation = da.values.astype(np.float64)
-    lon_1d = da.x.values.astype(np.float64)
-    lat_1d = da.y.values.astype(np.float64)
+        url = (
+            _EMODNET_BASE_URL
+            + f"request=GetCoverage&coverage=emodnet:mean&crs=EPSG:4326"
+            f"&BBOX={lon_min - resolution},{tlat_min - resolution},"
+            f"{lon_max + resolution},{tlat_max + resolution}"
+            f"&format=GeoTIFF&interpolation=nearest"
+            f"&resx={resolution}&resy={resolution}"
+        )
 
-    # Ensure lat is ascending
-    if lat_1d[0] > lat_1d[-1]:
-        elevation = elevation[::-1, :]
-        lat_1d = lat_1d[::-1]
+        with urllib.request.urlopen(url) as resp:
+            content = resp.read()
+
+        if content[:5] == b"<?xml" or b"ServiceException" in content[:500]:
+            match = re.search(
+                rb"<ServiceException[^>]*>(.*?)</ServiceException>",
+                content, re.DOTALL,
+            )
+            msg = (
+                match.group(1).decode(errors="replace").strip()
+                if match
+                else content[:400].decode(errors="replace")
+            )
+            raise RuntimeError(
+                f"EMODnet WCS error (strip {k + 1}/{len(lat_strips)}):\n  {msg}\n\n"
+                f"Hint: set 'emodnet_resolution' in the config to a coarser value "
+                f"(current: {resolution:.6g}°)."
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            da = rioxarray.open_rasterio(tmp_path, default_name="elevation")
+            if da.ndim == 3 and da.shape[0] == 1:
+                da = da[0, :, :]
+            strip_elev = da.values.astype(np.float64)
+            strip_lon  = da.x.values.astype(np.float64)
+            strip_lat  = da.y.values.astype(np.float64)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        if strip_lat[0] > strip_lat[-1]:
+            strip_elev = strip_elev[::-1, :]
+            strip_lat  = strip_lat[::-1]
+
+        lon_out.append(strip_lon)
+        lat_out.append(strip_lat)
+        elev_out.append(strip_elev)
+
+    # Merge strips: same lon coords, concatenate lat; deduplicate overlap rows
+    lon_1d   = lon_out[0]
+    lat_1d   = np.concatenate(lat_out)
+    elevation = np.concatenate(elev_out, axis=0)
+    _, unique_idx = np.unique(lat_1d, return_index=True)
+    lat_1d    = lat_1d[unique_idx]
+    elevation = elevation[unique_idx, :]
 
     depth = -elevation
-    land = depth <= 0.0
+    land  = depth <= 0.0
 
-    return xr.Dataset(
+    ds = xr.Dataset(
         {
             "depth": (["lat", "lon"], np.where(land, np.nan, depth)),
-            "land": (["lat", "lon"], land),
+            "land":  (["lat", "lon"], land),
         },
         coords={"lon": lon_1d, "lat": lat_1d},
         attrs={
-            "source": "emodnet",
+            "source":         "emodnet",
             "resolution_deg": resolution,
-            "lon_min": float(lon_1d.min()),
-            "lon_max": float(lon_1d.max()),
-            "lat_min": float(lat_1d.min()),
-            "lat_max": float(lat_1d.max()),
+            "lon_min":        float(lon_1d.min()),
+            "lon_max":        float(lon_1d.max()),
+            "lat_min":        float(lat_1d.min()),
+            "lat_max":        float(lat_1d.max()),
         },
     )
+
+    if cache_path is not None:
+        ds.to_netcdf(str(cache_path))
+        print(f"  Cached to: {cache_path}")
+
+    return ds
 
 
 # ---------------------------------------------------------------------------

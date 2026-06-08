@@ -406,6 +406,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     pad_deg       = _merge(args.pad_deg,       cfg, "pad_deg",            default=1.0)
     cache_dir     = _merge(args.cache_dir,    cfg, "regridding", "cache_dir",
                            default="./regrid_weights")
+    emodnet_cache = _merge(None, cfg, "regridding", "emodnet_cache_dir",
+                           default="./emodnet_cache")
+    emodnet_res   = _merge(None, cfg, "regridding", "emodnet_resolution",
+                           default=None)   # None → reader default (1 arcminute)
     min_depth     = _merge(args.min_depth,    cfg, "regridding", "min_depth",     default=0.0)
     min_wf        = _merge(args.min_wet_fraction, cfg, "regridding", "min_wet_fraction",
                            default=0.0)
@@ -480,7 +484,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     print("\n[2/6] Reading source bathymetry …")
     t0 = time.time()
     src = reader.read_source(
-        source, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg)
+        source, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
+        emodnet_cache_dir=str(emodnet_cache),
+        emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
     )
     src_sum = reader.source_summary(src)
     report.print_table(src_sum, title="Source bathymetry")
@@ -558,7 +564,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         print(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
         t0 = time.time()
         src2 = reader.read_source(
-            source2, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg)
+            source2, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
+            emodnet_cache_dir=str(emodnet_cache),
+            emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
         )
         dst2 = interpolate.regrid(
             src2, dst_grid,
