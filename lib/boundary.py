@@ -33,66 +33,38 @@ import os
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _first_wet_inward(mask, fixed_idx, scan_range, axis):
-    """Return the first wet cell scanning inward along *axis*.
-
-    Parameters
-    ----------
-    mask : 2-D bool array, shape (ny, nx)
-    fixed_idx : int
-        The index that stays fixed (j for west/east, i for north/south).
-    scan_range : iterable of int
-        Indices to scan in inward order (e.g. range(0, nx) for west side).
-    axis : 'i' | 'j'
-        Which axis is being scanned.
-
-    Returns
-    -------
-    (i, j) or None
-    """
-    for idx in scan_range:
-        if axis == "i":          # scanning across longitude columns
-            i, j = idx, fixed_idx
-        else:                    # scanning across latitude rows
-            i, j = fixed_idx, idx
-        if mask[j, i]:
-            return (i, j)
-    return None
-
-
 def _find_boundary_cells(mask, side):
-    """Return ordered (i, j) list for *side*, one entry per traversal position.
+    """Return ordered (i, j) list of wet cells on the grid edge for *side*.
 
-    Positions with no wet cell at all are omitted (pure-land rows/columns).
+    Only the outermost column/row is checked — no inward scanning.  This
+    keeps longitude constant for west/east and latitude constant for
+    north/south.  Land edge cells are simply skipped.
+
+    Corner ownership: west and east include the corner cells (full j range);
+    north and south skip the first and last columns (i = 1 … nx-2).
     """
     ny, nx = mask.shape
     cells = []
 
     if side == "west":
         for j in range(ny):
-            c = _first_wet_inward(mask, j, range(nx), axis="i")
-            if c is not None:
-                cells.append(c)
+            if mask[j, 0]:
+                cells.append((0, j))
 
     elif side == "east":
         for j in range(ny):
-            c = _first_wet_inward(mask, j, range(nx - 1, -1, -1), axis="i")
-            if c is not None:
-                cells.append(c)
+            if mask[j, nx - 1]:
+                cells.append((nx - 1, j))
 
     elif side == "north":
-        # corners owned by west/east → i = 1 … nx-2
         for i in range(1, nx - 1):
-            c = _first_wet_inward(mask, i, range(ny - 1, -1, -1), axis="j")
-            if c is not None:
-                cells.append(c)
+            if mask[ny - 1, i]:
+                cells.append((i, ny - 1))
 
     elif side == "south":
-        # corners owned by west/east → i = 1 … nx-2
         for i in range(1, nx - 1):
-            c = _first_wet_inward(mask, i, range(ny), axis="j")
-            if c is not None:
-                cells.append(c)
+            if mask[0, i]:
+                cells.append((i, 0))
 
     else:
         raise ValueError(f"Unknown boundary side {side!r}")
