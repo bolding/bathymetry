@@ -78,6 +78,15 @@ def regrid(
     import xesmf as xe  # noqa: PLC0415
 
     # ------------------------------------------------------------------
+    # Auto-coarsen source to keep it ~3× finer than the destination.
+    # Conservative regridding accuracy does not improve beyond ~4 source
+    # cells per target cell, but memory and weight-matrix size scale with
+    # n_source.  At 1/480° over a padded North Sea domain the source has
+    # ~47 M cells; coarsening to ~1/60° reduces this to ~750 K cells.
+    # ------------------------------------------------------------------
+    src = _maybe_coarsen(src, dst_grid)
+
+    # ------------------------------------------------------------------
     # Build xESMF-compatible source and destination Datasets with bounds
     # ------------------------------------------------------------------
     src_ds = _source_ds(src)
@@ -274,3 +283,73 @@ def _get_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset,
         print(f"  Weights saved: {weight_file.name}")
 
     return regridder
+
+
+def _dst_resolution(dst_grid: BaseGrid) -> float:
+    """Estimate the destination grid cell size in degrees (smaller of lon/lat)."""
+    try:
+        return min(float(dst_grid.dlon), float(dst_grid.dlat))  # type: ignore[attr-defined]
+    except AttributeError:
+        pass
+    # General case: central-difference estimate from centre-coordinate arrays
+    clon = dst_grid.center_lon
+    clat = dst_grid.center_lat
+    mid_j = clon.shape[0] // 2
+    mid_i = clon.shape[1] // 2
+    d_lon = float(abs(np.diff(clon[mid_j, :]).mean()))
+    d_lat = float(abs(np.diff(clat[:, mid_i]).mean()))
+    return min(d_lon, d_lat)
+
+
+def _maybe_coarsen(src: xr.Dataset, dst_grid: BaseGrid, target_ratio: int = 3) -> xr.Dataset:
+    """Block-average *src* so it is at most *target_ratio* × finer than *dst_grid*.
+
+    For conservative regridding accuracy plateaus at ~4 source cells per
+    target cell; beyond that extra source cells only increase memory and
+    weight-computation time.  Coarsening by an integer factor preserves the
+    same FRACAREA depth estimate to within rounding error.
+    """
+    import warnings
+
+    src_dlon = float(np.diff(src.lon.values).mean())
+    dst_res  = _dst_resolution(dst_grid)
+    factor   = max(1, int(dst_res / src_dlon / target_ratio))
+
+    if factor <= 1:
+        return src
+
+    depth = np.where(src["land"].values, np.nan, src["depth"].values).astype(np.float32)
+    lon   = src.lon.values
+    lat   = src.lat.values
+    ny, nx = depth.shape
+    ny_c, nx_c = ny // factor, nx // factor
+
+    depth_trim = depth[: ny_c * factor, : nx_c * factor]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        depth_c = np.nanmean(
+            depth_trim.reshape(ny_c, factor, nx_c, factor), axis=(1, 3)
+        )
+    land_c = np.isnan(depth_c)
+
+    # Centre lon/lat of each block
+    half = factor // 2
+    lon_c = lon[half : nx_c * factor : factor]
+    lat_c = lat[half : ny_c * factor : factor]
+
+    ny_before, nx_before = ny, nx
+    print(
+        f"  Source coarsened {factor}× for regridding: "
+        f"{nx_before}×{ny_before} → {nx_c}×{ny_c} cells "
+        f"({src_dlon:.4g}° → {src_dlon * factor:.4g}°, "
+        f"still {dst_res / (src_dlon * factor):.1f}× finer than target)"
+    )
+
+    return xr.Dataset(
+        {
+            "depth": (["lat", "lon"], np.where(land_c, np.nan, depth_c)),
+            "land":  (["lat", "lon"], land_c),
+        },
+        coords={"lon": lon_c, "lat": lat_c},
+        attrs={**src.attrs, "coarsened_by": factor},
+    )
