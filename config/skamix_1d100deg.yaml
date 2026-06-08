@@ -7,18 +7,18 @@
 #   output NetCDF  → northsea_0p05deg.nc
 #   report dir     → ./report/northsea_0p05deg/
 #   figures        → northsea_0p05deg_02_source_depth.png, etc.
-name: northsea_1d15deg
+name: skamix_1d100deg
 
 source: /server/data/GEBCO/GEBCO_2023.nc
 
 grid:
   type: spherical
-  lon_min: 0.0
-  lon_max: 15.0
-  lat_min: 50.0
+  lon_min: 6.0
+  lon_max: 12.75
+  lat_min: 56.5
   lat_max: 60.0
-  dlon: 0.05
-  dlat: 0.066666667
+  dlon: 0.01
+  dlat: 0.01
   # equidistant: true   # omit dlon (keep dlat) to compute dlon = dlat / cos(lat_center)
   #                     # so cells are approximately square in physical distance;
   #                     # this reduces the number of longitude grid points

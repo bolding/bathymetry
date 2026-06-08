@@ -6,7 +6,6 @@ Any option given on the command line overrides the corresponding YAML value.
 Example YAML (``north_sea.yaml``)::
 
     source: /server/data/GEBCO/GEBCO_2023.nc
-    pad_deg: 1.0
 
     grid:
       type: spherical
@@ -25,6 +24,7 @@ Example YAML (``north_sea.yaml``)::
       min_wet_fraction: 0.05
       # tile_cells: 50      # enable tiled regridding (50×50 dst cells per tile)
       # tile_buf_deg: 0.5   # source-side buffer around each tile (degrees)
+      # pad_deg: 1.0        # extra source margin beyond grid extent (expert)
 
     analysis:
       nkeep_basins: 1
@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     source        = _merge(args.source,        cfg, "source")
     source2       = _merge(args.source2,       cfg, "source2",            default=None)
-    pad_deg       = _merge(args.pad_deg,       cfg, "pad_deg",            default=1.0)
+    pad_deg       = _merge(args.pad_deg,       cfg, "regridding", "pad_deg", default=1.0)
     cache_dir     = _merge(args.cache_dir,    cfg, "regridding", "cache_dir",
                            default="./regrid_weights")
     emodnet_cache = _merge(None, cfg, "regridding", "emodnet_cache_dir",

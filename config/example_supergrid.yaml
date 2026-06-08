@@ -20,7 +20,6 @@
 name: my_model_supergrid
 
 source: /server/data/GEBCO/GEBCO_2023.nc
-pad_deg: 1.0
 
 grid:
   type: supergrid
@@ -36,6 +35,7 @@ regridding:
   # coastline_mask: "10m"   # overlay NE land polygons on source; "10m" | "50m" | "110m"
   # tile_cells: 0           # tiled regridding tile size (0 = single pass)
   # tile_buf_deg: 0.5       # overlap buffer between tiles (degrees)
+  # pad_deg: 1.0            # extra source margin beyond grid extent (expert)
 
 analysis:
   nkeep_basins: 1              # keep only the largest connected ocean basin
