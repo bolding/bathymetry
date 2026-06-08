@@ -678,10 +678,33 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         ),
     )
 
-    # Cross-section profiles for the first 10 flagged interfaces.
-    # Each inset is zoomed to a tight area around the specific interface
-    # (~10 coarse cells on each side) so the local geography is visible.
-    section_images = []
+    warn_msgs = []
+    if strait_sum.get("BLOCKED", 0):
+        warn_msgs.append(
+            f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
+            "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
+        )
+    if strait_sum.get("SILL_DEFICIT", 0):
+        warn_msgs.append(
+            f"{strait_sum['SILL_DEFICIT']} SILL_DEFICIT interface(s) — coarse sill shallower "
+            "than fine-grid sill. Dense bottom-water inflow may be blocked."
+        )
+    rpt.add_section(
+        "Strait and connectivity analysis",
+        text=(
+            "Each interface between adjacent wet cells is checked for narrow width, "
+            "sill-depth deficit, and connectivity breaks.\n\n"
+            f"Suggested fixes written to `{fixes_yaml_path}`. "
+            "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
+            "config and re-run."
+        ),
+        table=strait_sum,
+        images=[straits_plot],
+        warnings=warn_msgs,
+    )
+
+    # Cross-section profiles — one report section per flagged interface so
+    # the reader can navigate them individually.
     _zoom_lon = getattr(dst_grid, "dlon", 0.1) * 10
     _zoom_lat = getattr(dst_grid, "dlat", 0.1) * 10
     for k, rec in enumerate(strait_records[:10]):
@@ -708,32 +731,22 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             coarse_corner_lons=rec.get("_coarse_corner_lons"),
             coarse_corner_lats=rec.get("_coarse_corner_lats"),
         )
-        section_images.append(img)
-
-    warn_msgs = []
-    if strait_sum.get("BLOCKED", 0):
-        warn_msgs.append(
-            f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
-            "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
+        direction_label = "U (N–S section)" if rec["direction"] == "U" else "V (E–W section)"
+        rpt.add_section(
+            f"Interface {k + 1}/{len(strait_records[:10])}: "
+            f"{rec['category']} | {direction_label} | "
+            f"lon={rec['lon']:.3f}°, lat={rec['lat']:.3f}°",
+            table={
+                "sill depth (fine)":   f"{rec['sill_depth_fine']:.1f} m",
+                "sill depth (coarse)": f"{rec['sill_depth_coarse']:.1f} m",
+                "sill ratio":          f"{rec['sill_ratio']:.3f}",
+                "width (fine)":        f"{rec['width_km']:.2f} km",
+                "area ratio":          f"{rec['area_ratio']:.3f}",
+                "connected":           str(rec["connected"]),
+                "suggested fix":       rec.get("suggested_fix", ""),
+            },
+            images=[img],
         )
-    if strait_sum.get("SILL_DEFICIT", 0):
-        warn_msgs.append(
-            f"{strait_sum['SILL_DEFICIT']} SILL_DEFICIT interface(s) — coarse sill shallower "
-            "than fine-grid sill. Dense bottom-water inflow may be blocked."
-        )
-    rpt.add_section(
-        "Strait and connectivity analysis",
-        text=(
-            "Each interface between adjacent wet cells is checked for narrow width, "
-            "sill-depth deficit, and connectivity breaks.\n\n"
-            f"Suggested fixes written to `{fixes_yaml_path}`. "
-            "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
-            "config and re-run."
-        ),
-        table=strait_sum,
-        images=[straits_plot] + section_images,
-        warnings=warn_msgs,
-    )
 
     # ------------------------------------------------------------------
     # Step 4b – Apply user fixes (if any)
