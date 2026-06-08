@@ -233,22 +233,24 @@ def _tile_cache_key(src_ds: xr.Dataset, dst_ds: xr.Dataset) -> str:
 
 
 def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: str):
-    """Return a conservative xe.Regridder for one tile, loading cached weights if available."""
+    """Return a conservative xe.Regridder, loading cached weights when available.
+
+    Always passes *filename* to the constructor so xESMF writes the weights on
+    first use and reads them on subsequent calls.  ``reuse_weights`` is set from
+    whether the file already exists — this is the canonical xESMF cache pattern.
+    """
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     key = _tile_cache_key(src_ds, dst_ds)
     weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
-
-    if weight_file.exists():
-        return xe.Regridder(
-            src_ds, dst_ds, "conservative",
-            reuse_weights=True,
-            filename=str(weight_file),
-            unmapped_to_nan=True,
-        )
-
-    regridder = xe.Regridder(src_ds, dst_ds, "conservative", unmapped_to_nan=True)
-    regridder.to_netcdf(str(weight_file))
-    return regridder
+    cached = weight_file.exists()
+    if cached:
+        print(f"    (weights cached: {weight_file.name})", end=" ", flush=True)
+    return xe.Regridder(
+        src_ds, dst_ds, "conservative",
+        filename=str(weight_file),
+        reuse_weights=cached,
+        unmapped_to_nan=True,
+    )
 
 
 def _regrid_single(
