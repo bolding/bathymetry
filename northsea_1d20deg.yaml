@@ -27,15 +27,18 @@ grid:
 
 regridding:
   cache_dir: ./regrid_weights
-  min_depth: 2.0    # minimum depth for wet cells (m)
-  min_wet_fraction: 0.4
+  min_depth: 2.0            # minimum depth for wet cells (m)
+  min_wet_fraction: 0.4     # cells below this ocean fraction → forced to land
   # coastline_mask: "10m"   # overlay NE land polygons on source; "10m" | "50m" | "110m"
+  # tile_cells: 0           # tiled regridding tile size (0 = single pass)
+  # tile_buf_deg: 0.5       # overlap buffer between tiles (degrees)
 
 analysis:
-  nkeep_basins: 1           # keep only the largest connected ocean basin
-  wet_frac_threshold: 0.3   # inspect interfaces where wet_frac < this
-  sill_ratio_threshold: 0.7 # flag if sill_depth_fine / sill_depth_coarse < this
-  area_ratio_threshold: 0.5 # flag if section_area_fine / section_area_coarse < this
+  nkeep_basins: 1              # keep only the largest connected ocean basin
+  wet_frac_threshold: 0.3      # inspect interfaces where wet_frac < this
+  sill_ratio_threshold: 0.7    # flag if sill_depth_fine / sill_depth_coarse < this
+  area_ratio_threshold: 0.5    # flag if section_area_fine / section_area_coarse < this
+  # max_section_profiles: 10   # max cross-section plots in the report
 
 smooth:
   rx0: 0.2    # target Haney slope factor; set to null or remove to skip smoothing
