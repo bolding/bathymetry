@@ -118,6 +118,14 @@ def regrid(
     # Post-process assembled arrays
     # ------------------------------------------------------------------
     ocean_mask = wetfrac_out > 0.0
+
+    # Force cells with insufficient ocean coverage to land.
+    # These are typically marginal coastal/tidal cells where the conservative
+    # average picked up a tiny sliver of ocean.  Removing them before basin
+    # detection and strait analysis avoids large numbers of spurious flags.
+    if min_wet_fraction > 0.0:
+        ocean_mask = ocean_mask & (wetfrac_out >= min_wet_fraction)
+
     depth_out = np.where(ocean_mask, depth_out, 0.0)
 
     # Replace NaN depths that slipped through (unmapped cells)
@@ -128,6 +136,9 @@ def regrid(
         depth_out = np.where(ocean_mask, np.maximum(depth_out, min_depth), depth_out)
 
     mask_out = ocean_mask.astype(np.int8)
+    n_dropped = int((wetfrac_out > 0.0).sum()) - int(ocean_mask.sum())
+    if min_wet_fraction > 0.0 and n_dropped:
+        print(f"  min_wet_fraction={min_wet_fraction}: {n_dropped} marginal cells forced to land")
 
     return xr.Dataset(
         {
@@ -141,7 +152,7 @@ def regrid(
         },
         attrs={
             "min_depth": min_depth,
-            "min_wet_fraction_flag": min_wet_fraction,
+            "min_wet_fraction": min_wet_fraction,
         },
     )
 
