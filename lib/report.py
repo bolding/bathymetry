@@ -267,6 +267,71 @@ def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
 # Static (cartopy) plots
 # ---------------------------------------------------------------------------
 
+def plot_depth_diff(
+    lon: npt.NDArray,
+    lat: npt.NDArray,
+    diff: npt.NDArray,
+    title: str,
+    path: str | Path,
+    subtitle: str = "",
+    vmax: Optional[float] = None,
+) -> None:
+    """Signed depth difference map (source1 − source2) at common ocean cells.
+
+    *diff* should be NaN wherever either source is land.  A diverging colormap
+    is used, symmetric around zero.  Mean, std and RMSE are printed as a
+    subtitle so the reader can judge the magnitude of the discrepancy.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    path = _ensure_dir(path)
+
+    valid = ~np.isnan(diff)
+    if not valid.any():
+        return
+
+    dvals = diff[valid]
+    mean_d = float(np.mean(dvals))
+    std_d  = float(np.std(dvals))
+    rmse   = float(np.sqrt(np.mean(dvals ** 2)))
+    n_cells = int(valid.sum())
+
+    if vmax is None:
+        vmax = float(np.nanpercentile(np.abs(diff), 99))
+    vmax = max(vmax, 0.1)
+
+    cmap = _cm_correction()
+    norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+
+    stats_str = (
+        f"mean={mean_d:+.1f} m   std={std_d:.1f} m   RMSE={rmse:.1f} m   "
+        f"n={n_cells:,} cells"
+    )
+    full_title = "\n".join(t for t in [title, subtitle, stats_str] if t)
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        im = ax.pcolormesh(lon, lat, diff,  # type: ignore[union-attr]
+                           cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
+        plt.colorbar(im, ax=ax, label="Depth difference (m)", fraction=0.046, pad=0.04)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _apply_gridlines(ax)  # type: ignore[arg-type]
+    except ImportError:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        im = ax.pcolormesh(lon, lat, diff, cmap=cmap, norm=norm)  # type: ignore[union-attr]
+        plt.colorbar(im, ax=ax, label="Depth difference (m)")
+
+    ax.set_title(full_title, fontsize=10)  # type: ignore[union-attr]
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_source_comparison(
     lon: npt.NDArray,
     lat: npt.NDArray,

@@ -557,10 +557,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     # Step 3b – Second source comparison (optional)
     # ------------------------------------------------------------------
-    dst2_mask = None   # set below if source2 is provided
+    dst2_mask = None        # set below if source2 is provided
+    dst2_depth_vals = None  # raw regridded depth from source2
+    src1_label = Path(source).name if source != "emodnet" else "EMODnet"
+    src2_label: str = ""
     if source2 is not None:
         src2_label = Path(source2).name if source2 != "emodnet" else "EMODnet"
-        src1_label = Path(source).name  if source  != "emodnet" else "EMODnet"
         print(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
         t0 = time.time()
         src2 = reader.read_source(
@@ -576,7 +578,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
         print(f"      done in {time.time()-t0:.1f} s")
 
-        dst2_mask = dst2["mask"].values
+        dst2_mask        = dst2["mask"].values
+        dst2_depth_vals  = dst2["depth"].values
         cmp_plot = pfx + "03b_source_comparison.png"
         report.plot_source_comparison(
             dst.lon.values, dst.lat.values,
@@ -858,6 +861,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     }
     if "basin_labels" in dst.data_vars:
         out_vars["basin_labels"] = dst["basin_labels"]
+    if dst2_mask is not None and dst2_depth_vals is not None:
+        out_vars["depth_source2"] = xr.DataArray(
+            np.where(dst2_mask, dst2_depth_vals, np.nan),
+            dims=["lat", "lon"], coords=dst.coords,
+            attrs={"long_name": f"Sea floor depth from {src2_label}", "units": "m"},
+        )
     if dst2_mask is not None:
         comp_arr = np.zeros(dst["mask"].shape, dtype=np.int8)
         comp_arr[(dst["mask"].values == 1) & (dst2_mask == 1)] = 1
@@ -917,6 +926,22 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
         final_plots.append(fname)
         print(f"  {fname}")
+
+    # Depth difference plots between the two sources (one per depth variant)
+    if dst2_mask is not None and dst2_depth_vals is not None:
+        common_ocean = (dst["mask"].values == 1) & (dst2_mask == 1)
+        for var_name, depth_arr, label in depth_variants:
+            diff_arr = np.where(common_ocean, depth_arr - dst2_depth_vals, np.nan)
+            diff_fname = pfx + f"06_diff_{var_name}.png"
+            report.plot_depth_diff(
+                dst.lon.values, dst.lat.values,
+                diff_arr,
+                title=f"{name} — depth difference: {src1_label} − {src2_label} ({label})",
+                subtitle=subtitle,
+                path=os.path.join(report_dir, diff_fname),
+            )
+            final_plots.append(diff_fname)
+            print(f"  {diff_fname}")
 
     var_list = ", ".join(f"`{v}`" for v in out_vars if v not in ("wet_fraction", "mask", "basin_labels", "depth_corrections"))
     rpt.add_section(
