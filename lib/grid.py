@@ -59,10 +59,10 @@ class BaseGrid(ABC):
             "type": type(self).__name__,
             "nx": self.nx,
             "ny": self.ny,
-            "lon_min": f"{self.lon_bounds[0]:.4f}",
-            "lon_max": f"{self.lon_bounds[1]:.4f}",
-            "lat_min": f"{self.lat_bounds[0]:.4f}",
-            "lat_max": f"{self.lat_bounds[1]:.4f}",
+            "lon_min": f"{float(self.center_lon.min()):.4f}",
+            "lon_max": f"{float(self.center_lon.max()):.4f}",
+            "lat_min": f"{float(self.center_lat.min()):.4f}",
+            "lat_max": f"{float(self.center_lat.max()):.4f}",
         }
 
 
@@ -133,8 +133,9 @@ class SphericalGrid(BaseGrid):
         nx = round((self.lon_max - self.lon_min) / self.dlon)
         ny = round((self.lat_max - self.lat_min) / self.dlat)
 
-        lon_c1d = self.lon_min + np.arange(nx + 1) * self.dlon
-        lat_c1d = self.lat_min + np.arange(ny + 1) * self.dlat
+        # lon_min/lat_min are T-point positions; corners are offset by ±half cell
+        lon_c1d = (self.lon_min - 0.5 * self.dlon) + np.arange(nx + 1) * self.dlon
+        lat_c1d = (self.lat_min - 0.5 * self.dlat) + np.arange(ny + 1) * self.dlat
         lon_c, lat_c = np.meshgrid(lon_c1d, lat_c1d)  # [ny+1, nx+1]
 
         if self.rotation_deg != 0.0:
