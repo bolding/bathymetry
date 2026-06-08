@@ -521,6 +521,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     # Steps 2 + 3 – Read source and regrid  (skipped by --skip-regrid)
     # ------------------------------------------------------------------
+    src = None   # populated in the else branch; None signals skip_regrid to callers
     if skip_regrid:
         if not os.path.exists(raw_regrid_cache):
             parser.error(
@@ -806,64 +807,72 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # basins or enclosed seas.
     # ------------------------------------------------------------------
     print("\n[4d/6] Detecting narrow straits …")
-    t0 = time.time()
-
-    strait_records = analysis.sort_straits(analysis.find_straits(
-        src, dst, dst_grid,
-        wet_frac_threshold=float(wf_thr),
-        sill_ratio_threshold=float(sill_thr),
-        area_ratio_threshold=float(area_thr),
-    ))
-
-    strait_sum = analysis.strait_summary(strait_records)
-    report.print_table(strait_sum, title="Strait detection")
-    print(f"      {len(strait_records)} interfaces flagged in {time.time()-t0:.1f} s")
-
-    clean_records = [{k: v for k, v in r.items() if not k.startswith("_")}
-                     for r in strait_records]
-    csv_path = os.path.join(report_dir, pfx + "04d_straits.csv")
-    report.save_csv(clean_records, csv_path)
-
-    fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
-    report.save_fixes_yaml(clean_records, fixes_yaml_path)
-
-    straits_plot = pfx + "04d_straits.png"
-    report.plot_straits(
-        dst.lon.values, dst.lat.values,
-        dst["depth"].values, dst["mask"].values,
-        strait_records=clean_records,
-        path=os.path.join(report_dir, straits_plot),
-        domain_bounds=(
-            dst_grid.lon_bounds[0], dst_grid.lon_bounds[1],
-            dst_grid.lat_bounds[0], dst_grid.lat_bounds[1],
-        ),
-    )
-
-    warn_msgs = []
-    if strait_sum.get("BLOCKED", 0):
-        warn_msgs.append(
-            f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
-            "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
+    if src is None:
+        print("      Skipped (--skip-regrid: fine source not available; see previous report).")
+        strait_records = []
+        rpt.add_section(
+            "Strait and connectivity analysis",
+            text="Skipped (`--skip-regrid`): fine-resolution source not loaded. "
+                 "Strait results from the initial full run are still in the report directory.",
         )
-    if strait_sum.get("SILL_DEFICIT", 0):
-        warn_msgs.append(
-            f"{strait_sum['SILL_DEFICIT']} SILL_DEFICIT interface(s) — coarse sill shallower "
-            "than fine-grid sill. Dense bottom-water inflow may be blocked."
+    else:
+        t0 = time.time()
+        strait_records = analysis.sort_straits(analysis.find_straits(
+            src, dst, dst_grid,
+            wet_frac_threshold=float(wf_thr),
+            sill_ratio_threshold=float(sill_thr),
+            area_ratio_threshold=float(area_thr),
+        ))
+
+        strait_sum = analysis.strait_summary(strait_records)
+        report.print_table(strait_sum, title="Strait detection")
+        print(f"      {len(strait_records)} interfaces flagged in {time.time()-t0:.1f} s")
+
+        clean_records = [{k: v for k, v in r.items() if not k.startswith("_")}
+                         for r in strait_records]
+        csv_path = os.path.join(report_dir, pfx + "04d_straits.csv")
+        report.save_csv(clean_records, csv_path)
+
+        fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
+        report.save_fixes_yaml(clean_records, fixes_yaml_path)
+
+        straits_plot = pfx + "04d_straits.png"
+        report.plot_straits(
+            dst.lon.values, dst.lat.values,
+            dst["depth"].values, dst["mask"].values,
+            strait_records=clean_records,
+            path=os.path.join(report_dir, straits_plot),
+            domain_bounds=(
+                dst_grid.lon_bounds[0], dst_grid.lon_bounds[1],
+                dst_grid.lat_bounds[0], dst_grid.lat_bounds[1],
+            ),
         )
-    rpt.add_section(
-        "Strait and connectivity analysis",
-        text=(
-            "Each interface between adjacent wet cells is checked for narrow width, "
-            "sill-depth deficit, and connectivity breaks. "
-            "Runs after basin removal so only connected-ocean interfaces are checked.\n\n"
-            f"Suggested fixes written to `{fixes_yaml_path}`. "
-            "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
-            "config and re-run."
-        ),
-        table=strait_sum,
-        images=[straits_plot],
-        warnings=warn_msgs,
-    )
+
+        warn_msgs = []
+        if strait_sum.get("BLOCKED", 0):
+            warn_msgs.append(
+                f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
+                "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
+            )
+        if strait_sum.get("SILL_DEFICIT", 0):
+            warn_msgs.append(
+                f"{strait_sum['SILL_DEFICIT']} SILL_DEFICIT interface(s) — coarse sill shallower "
+                "than fine-grid sill. Dense bottom-water inflow may be blocked."
+            )
+        rpt.add_section(
+            "Strait and connectivity analysis",
+            text=(
+                "Each interface between adjacent wet cells is checked for narrow width, "
+                "sill-depth deficit, and connectivity breaks. "
+                "Runs after basin removal so only connected-ocean interfaces are checked.\n\n"
+                f"Suggested fixes written to `{fixes_yaml_path}`. "
+                "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
+                "config and re-run."
+            ),
+            table=strait_sum,
+            images=[straits_plot],
+            warnings=warn_msgs,
+        )
 
     # Cross-section profiles — one report section per flagged interface.
     # Capped at max_sections (YAML: analysis.max_section_profiles, default 10).
@@ -980,8 +989,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Step 6 – Build output dataset, final plots for every depth variant
     # ------------------------------------------------------------------
     print("\n[6/6] Writing output …")
-
-    import xarray as xr
 
     # C-grid staggered depths: U = east face, V = north face of each T-cell.
     # Both have the same shape [ny, nx] as the T-point depth.

@@ -14,8 +14,8 @@ source: /server/data/GEBCO/GEBCO_2023.nc
 grid:
   type: spherical
   lon_min: 6.0
-  lon_max: 12.75
-  lat_min: 56.5
+  lon_max: 13.0
+  lat_min: 56.25
   lat_max: 60.0
   dlon: 0.01
   dlat: 0.01
@@ -60,31 +60,18 @@ output:
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
-# mask_regions:
+mask_regions:
+  - type: ij_rectangle
+    i_min: 250
+    i_max: 350
+    j_min: 0
+    j_max: 15
 #   - type: rectangle
 #     lon_min: 9.0
 #     lon_max: 10.5
 #     lat_min: 54.5
 #     lat_max: 55.5
 #     name: Kiel Bight
-#   - type: polygon
-#     name: Custom enclosed bay
-#     vertices:        # list of [lon, lat] corner pairs
-#       - [10.0, 55.0]
-#       - [11.0, 55.5]
-#       - [11.5, 54.5]
-#       - [10.0, 54.0]
-#   - type: point
-#     lon: 8.5
-#     lat: 54.8
-#     name: Isolated tidal pool
-#   # Grid-index variants (0-based row i, column j from the output NetCDF):
-#   - type: ij_rectangle
-#     i_min: 10
-#     i_max: 20
-#     j_min: 5
-#     j_max: 15
-#     name: Index-based rectangle
 #   - type: ij_point
 #     i: 15
 #     j: 8
