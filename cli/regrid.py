@@ -641,9 +641,100 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
 
     # ------------------------------------------------------------------
-    # Step 4a – Strait detection
+    # Step 4a – Apply user fixes (if any)
+    # Run first so fixes affect which cells are kept by basin removal and
+    # which interfaces are checked by strait detection.
     # ------------------------------------------------------------------
-    print("\n[4a/6] Detecting narrow straits …")
+    if fixes_list:
+        print(f"\n[4a] Applying {len(fixes_list)} fix(es) from config …")
+        dst, applied_fixes = analysis.apply_fixes(dst, fixes_list)
+        report.print_table({"fixes applied": len(applied_fixes)}, title="User fixes")
+        report.save_csv(applied_fixes, os.path.join(report_dir, pfx + "04a_fixes_applied.csv"))
+        rpt.add_section(
+            "User-specified fixes",
+            text=f"{len(applied_fixes)} fix(es) applied from configuration.",
+            table_rows=applied_fixes,
+        )
+    else:
+        print("\n[4a] No fixes configured — skipping.")
+
+    # ------------------------------------------------------------------
+    # Step 4b – Explicit mask regions (force areas to land)
+    # Runs BEFORE isolated-cell masking so that blocking a fjord mouth
+    # causes the interior cells to be picked up as isolated and removed.
+    # ------------------------------------------------------------------
+    mask_regions_list = _nested_get(cfg, "mask_regions") or []
+    if mask_regions_list:
+        print(f"\n[4b] Applying {len(mask_regions_list)} explicit mask region(s) …")
+        dst, mr_applied = analysis.apply_mask_regions(dst, mask_regions_list)
+        mr_sum = analysis.mask_regions_summary(mr_applied)
+        report.print_table(mr_sum, title="Explicit mask regions")
+        report.save_csv(mr_applied, os.path.join(report_dir, pfx + "04b_mask_regions.csv"))
+        mr_plot = pfx + "04b_mask_regions.png"
+        report.plot_depth(
+            dst.lon.values, dst.lat.values,
+            dst["depth"].values, dst["mask"].values,
+            title=f"{name} — after explicit masking",
+            path=os.path.join(report_dir, mr_plot),
+            log_scale=log_depth_scale,
+        )
+        rpt.add_section(
+            "Explicit mask regions",
+            text=(
+                f"{len(mask_regions_list)} region(s) forced to land regardless of "
+                "bathymetry (e.g. closing a fjord mouth so the interior is later "
+                "removed by the isolation step). "
+                "Specified under `mask_regions:` in the YAML config. "
+                "Supported types: `rectangle`, `polygon`, `point`."
+            ),
+            table=mr_sum,
+            table_rows=mr_applied,
+            images=[mr_plot],
+        )
+    else:
+        print("\n[4b] No explicit mask regions configured — skipping.")
+
+    # ------------------------------------------------------------------
+    # Step 4c – Isolated-cell masking
+    # Runs AFTER explicit masking (fjord mouth closed → interior removed)
+    # and BEFORE strait detection so that isolated basins do not generate
+    # spurious interface flags.
+    # ------------------------------------------------------------------
+    print(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
+    dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep))
+    iso_sum = analysis.isolation_summary(basin_records)
+    report.print_table(iso_sum, title="Isolated cells")
+    report.save_csv(basin_records, os.path.join(report_dir, pfx + "04c_basins.csv"))
+    basins_plot = pfx + "04c_basins.png"
+    report.plot_basins(
+        dst_clean.lon.values, dst_clean.lat.values,
+        dst_clean["basin_labels"].values,
+        title="Connected ocean basins",
+        path=os.path.join(report_dir, basins_plot),
+        nkeep=int(nkeep),
+    )
+    rpt.add_section(
+        "Isolated-cell masking",
+        text=(
+            f"Connected-component labelling (4-connectivity). "
+            f"Keeping {nkeep} largest basin(s). "
+            "Runs after explicit mask regions so that fjord interiors "
+            "whose mouth was closed above are removed here automatically, "
+            "and before strait detection so isolated basins do not generate "
+            "spurious interface flags."
+        ),
+        table=iso_sum,
+        images=[basins_plot],
+    )
+    dst = dst_clean
+
+    # ------------------------------------------------------------------
+    # Step 4d – Strait detection
+    # Runs on the basin-cleaned grid so only interfaces between genuinely
+    # connected ocean cells are checked — no spurious flags from isolated
+    # basins or enclosed seas.
+    # ------------------------------------------------------------------
+    print("\n[4d/6] Detecting narrow straits …")
     t0 = time.time()
 
     strait_records = analysis.find_straits(
@@ -659,19 +750,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     clean_records = [{k: v for k, v in r.items() if not k.startswith("_")}
                      for r in strait_records]
-    csv_path = os.path.join(report_dir, pfx + "04a_straits.csv")
+    csv_path = os.path.join(report_dir, pfx + "04d_straits.csv")
     report.save_csv(clean_records, csv_path)
 
     fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
     report.save_fixes_yaml(clean_records, fixes_yaml_path)
 
-    straits_plot = pfx + "04a_straits.png"
+    straits_plot = pfx + "04d_straits.png"
     report.plot_straits(
         dst.lon.values, dst.lat.values,
         dst["depth"].values, dst["mask"].values,
         strait_records=clean_records,
         path=os.path.join(report_dir, straits_plot),
-        # Small inset showing the domain in regional geographic context
         domain_bounds=(
             dst_grid.lon_bounds[0], dst_grid.lon_bounds[1],
             dst_grid.lat_bounds[0], dst_grid.lat_bounds[1],
@@ -693,7 +783,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         "Strait and connectivity analysis",
         text=(
             "Each interface between adjacent wet cells is checked for narrow width, "
-            "sill-depth deficit, and connectivity breaks.\n\n"
+            "sill-depth deficit, and connectivity breaks. "
+            "Runs after basin removal so only connected-ocean interfaces are checked.\n\n"
             f"Suggested fixes written to `{fixes_yaml_path}`. "
             "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
             "config and re-run."
@@ -703,8 +794,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         warnings=warn_msgs,
     )
 
-    # Cross-section profiles — one report section per flagged interface so
-    # the reader can navigate them individually.
+    # Cross-section profiles — one report section per flagged interface.
     _zoom_lon = getattr(dst_grid, "dlon", 0.1) * 10
     _zoom_lat = getattr(dst_grid, "dlat", 0.1) * 10
     for k, rec in enumerate(strait_records[:10]):
@@ -712,7 +802,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         depth_sec = rec["_depth_section"]
         cell_km = rec.get(dist_key, 0.1)
         dist = np.arange(len(depth_sec)) * cell_km
-        img = pfx + f"04a_section_{k:03d}.png"
+        img = pfx + f"04d_section_{k:03d}.png"
         report.plot_section_profile(
             dist, depth_sec, rec["sill_depth_coarse"],
             title=(f"{rec['category']} | lon={rec['lon']:.3f}, lat={rec['lat']:.3f}"),
@@ -747,89 +837,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             },
             images=[img],
         )
-
-    # ------------------------------------------------------------------
-    # Step 4b – Apply user fixes (if any)
-    # ------------------------------------------------------------------
-    if fixes_list:
-        print(f"\n[4b] Applying {len(fixes_list)} fix(es) from config …")
-        dst, applied_fixes = analysis.apply_fixes(dst, fixes_list)
-        report.print_table({"fixes applied": len(applied_fixes)}, title="User fixes")
-        report.save_csv(applied_fixes, os.path.join(report_dir, pfx + "04b_fixes_applied.csv"))
-        rpt.add_section(
-            "User-specified fixes",
-            text=f"{len(applied_fixes)} fix(es) applied from configuration.",
-            table_rows=applied_fixes,
-        )
-    else:
-        print("\n[4b] No fixes configured — skipping.")
-
-    # ------------------------------------------------------------------
-    # Step 4c – Explicit mask regions (force areas to land)
-    # Runs BEFORE isolated-cell masking so that blocking a fjord mouth
-    # causes the interior cells to be picked up as isolated and removed.
-    # ------------------------------------------------------------------
-    mask_regions_list = _nested_get(cfg, "mask_regions") or []
-    if mask_regions_list:
-        print(f"\n[4c] Applying {len(mask_regions_list)} explicit mask region(s) …")
-        dst, mr_applied = analysis.apply_mask_regions(dst, mask_regions_list)
-        mr_sum = analysis.mask_regions_summary(mr_applied)
-        report.print_table(mr_sum, title="Explicit mask regions")
-        report.save_csv(mr_applied, os.path.join(report_dir, pfx + "04c_mask_regions.csv"))
-        mr_plot = pfx + "04c_mask_regions.png"
-        report.plot_depth(
-            dst.lon.values, dst.lat.values,
-            dst["depth"].values, dst["mask"].values,
-            title=f"{name} — after explicit masking",
-            path=os.path.join(report_dir, mr_plot),
-            log_scale=log_depth_scale,
-        )
-        rpt.add_section(
-            "Explicit mask regions",
-            text=(
-                f"{len(mask_regions_list)} region(s) forced to land regardless of "
-                "bathymetry (e.g. closing a fjord mouth so the interior is later "
-                "removed by the isolation step). "
-                "Specified under `mask_regions:` in the YAML config. "
-                "Supported types: `rectangle`, `polygon`, `point`."
-            ),
-            table=mr_sum,
-            table_rows=mr_applied,
-            images=[mr_plot],
-        )
-    else:
-        print("\n[4c] No explicit mask regions configured — skipping.")
-
-    # ------------------------------------------------------------------
-    # Step 4d – Isolated-cell masking
-    # Runs AFTER explicit masking so fjord interiors (whose mouth was
-    # just closed) are correctly identified as disconnected and removed.
-    # ------------------------------------------------------------------
-    print(f"\n[4d/6] Masking isolated ocean regions (keep {nkeep}) …")
-    dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep))
-    iso_sum = analysis.isolation_summary(basin_records)
-    report.print_table(iso_sum, title="Isolated cells")
-    report.save_csv(basin_records, os.path.join(report_dir, pfx + "04d_basins.csv"))
-    basins_plot = pfx + "04d_basins.png"
-    report.plot_basins(
-        dst_clean.lon.values, dst_clean.lat.values,
-        dst_clean["basin_labels"].values,
-        title="Connected ocean basins",
-        path=os.path.join(report_dir, basins_plot),
-        nkeep=int(nkeep),
-    )
-    rpt.add_section(
-        "Isolated-cell masking",
-        text=(
-            f"Connected-component labelling (4-connectivity). "
-            f"Keeping {nkeep} largest basin(s). "
-            "Runs after explicit mask regions so that fjord interiors "
-            "whose mouth was closed above are removed here automatically."
-        ),
-        table=iso_sum,
-        images=[basins_plot],
-    )
-    dst = dst_clean
 
     # ------------------------------------------------------------------
     # Step 5 – Optional rx0 smoothing
