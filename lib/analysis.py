@@ -518,6 +518,23 @@ def _analyse_v_interface(
     }
 
 
+_CAT_RANK = {"BLOCKED": 0, "SILL_DEFICIT": 1, "AREA_DEFICIT": 2, "OK": 3}
+
+
+def sort_straits(records: list[dict]) -> list[dict]:
+    """Return records sorted by severity: BLOCKED → SILL_DEFICIT → AREA_DEFICIT.
+
+    Within each category, interfaces are ordered by sill_ratio ascending
+    (lower ratio = coarse grid more deficient vs fine grid) then by
+    area_ratio ascending as a tiebreaker.
+    """
+    return sorted(records, key=lambda r: (
+        _CAT_RANK.get(r.get("category", "OK"), 9),
+        r.get("sill_ratio", 0.0),
+        r.get("area_ratio", 0.0),
+    ))
+
+
 def strait_summary(records: list[dict]) -> dict:
     categories = [r["category"] for r in records]
     return {

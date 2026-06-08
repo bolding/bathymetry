@@ -739,12 +739,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     print("\n[4d/6] Detecting narrow straits …")
     t0 = time.time()
 
-    strait_records = analysis.find_straits(
+    strait_records = analysis.sort_straits(analysis.find_straits(
         src, dst, dst_grid,
         wet_frac_threshold=float(wf_thr),
         sill_ratio_threshold=float(sill_thr),
         area_ratio_threshold=float(area_thr),
-    )
+    ))
 
     strait_sum = analysis.strait_summary(strait_records)
     report.print_table(strait_sum, title="Strait detection")
