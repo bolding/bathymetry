@@ -1169,168 +1169,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             ),
         )
 
-    # ------------------------------------------------------------------
-    # Step 4e – Thalweg comparison (fine vs coarse)  [--thalweg / --no-thalweg]
-    # ------------------------------------------------------------------
-    if run_thalweg:
-        logger.info("\n[4e/6] Computing thalwegs …")
-        t0 = time.time()
-
-        thalweg_records: list[dict] = []
-
-        # With --skip-regrid the fine source was not loaded; load it now.
-        # This is cheap relative to the MST build that follows.
-        _thalweg_src = src
-        if _thalweg_src is None and source is not None:
-            logger.info("      Loading fine source for thalweg …")
-            _t_src = time.time()
-            try:
-                _thalweg_src = reader.read_source(
-                    source, dst_grid.lon_bounds, dst_grid.lat_bounds,
-                    pad_deg=float(pad_deg),
-                    emodnet_cache_dir=str(emodnet_cache),
-                    emodnet_resolution=(float(emodnet_res)
-                                        if emodnet_res is not None else None),
-                )
-                if coastline_res is not None:
-                    _thalweg_src = reader.apply_coastline_mask(
-                        _thalweg_src, resolution=str(coastline_res)
-                    )
-                logger.info("      Fine source loaded in %.1f s",
-                            time.time() - _t_src)
-            except Exception as exc:
-                logger.warning("      Could not load fine source (%s) — "
-                               "thalweg skipped.", exc)
-                _thalweg_src = None
-
-        if _thalweg_src is None:
-            logger.warning("      Thalweg skipped: fine source unavailable.")
-        else:
-            # Mode A: strait-based (top straits from step 4d)
-            if strait_records:
-                tw_a = thalwegmod.compute_strait_thalwegs(src, dst, strait_records,
-                                                           n_straits=max_sections)
-                thalweg_records.extend(tw_a)
-                logger.info("      strait-based: %d thalweg(s)", len(tw_a))
-
-            # Always write the boundary CSV from the finalised mask so the
-            # user has the file for reference.
-            _auto_bdy_csv = os.path.join(report_dir, f"{name}_bdy.csv")
-            if not _thalweg_boundaries_csv:
-                _bdy_files, _bdy_segs = boundarymod.write_boundary_coords(
-                    dst, report_dir, name
-                )
-                logger.info("      boundary CSV: %s (%d cell(s))",
-                            _auto_bdy_csv,
-                            sum(s["n_cells"] for s in _bdy_segs))
-
-            # Mode B: boundary auto-detection thalwegs.
-            # Disabled by default — enable with thalweg.boundary_thalwegs: true
-            if run_boundary_thalweg:
-                tw_b = thalwegmod.boundary_thalwegs(
-                    _thalweg_src, dst,
-                    min_sill_m=thalweg_min_sill,
-                    max_detour=thalweg_bdy_detour,
-                    sill_dedup_tol_m=thalweg_sill_dedup,
-                    boundaries_csv=_thalweg_boundaries_csv,
-                )
-                thalweg_records.extend(tw_b)
-                logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
-            else:
-                logger.info("      boundary auto: disabled "
-                            "(set thalweg.boundary_thalwegs: true to enable)")
-
-            # Mode C: user waypoints
-            if user_waypoints_cfg:
-                tw_c = thalwegmod.waypoint_thalwegs(
-                    _thalweg_src, dst, user_waypoints_cfg,
-                    max_detour=thalweg_max_detour,
-                )
-                thalweg_records.extend(tw_c)
-                logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
-
-        logger.info("      total: %d thalweg(s) in %.1f s",
-                    len(thalweg_records), time.time() - t0)
-
-        thalwegmod.print_thalweg_table(thalweg_records)
-        tw_sum = thalwegmod.thalweg_summary(thalweg_records)
-        report.print_table(tw_sum, title="Thalweg summary")
-
-        # Overview section: description + per-thalweg table
-        _tw_rows = [
-            {
-                "name":            tw.get("name", f"#{k}"),
-                "category":        tw.get("category", "?"),
-                "fine sill (m)":   f"{tw['fine']['sill_depth']:.1f}",
-                "coarse sill (m)": (f"{tw['coarse']['sill_depth']:.1f}"
-                                    if np.isfinite(tw["coarse"]["sill_depth"]) else "n/a"),
-                "deficit (m)":     (f"{tw.get('sill_deficit_m', float('nan')):.1f}"
-                                    if np.isfinite(tw.get("sill_deficit_m", float("nan"))) else "n/a"),
-                "MAE (m)":         (f"{tw.get('path_mae_m', float('nan')):.1f}"
-                                    if np.isfinite(tw.get("path_mae_m", float("nan"))) else "n/a"),
-                "RMSE (m)":        (f"{tw.get('path_rmse_m', float('nan')):.1f}"
-                                    if np.isfinite(tw.get("path_rmse_m", float("nan"))) else "n/a"),
-            }
-            for k, tw in enumerate(thalweg_records)
-        ]
-        rpt.add_section(
-            "Thalweg analysis",
-            text=(
-                "Each thalweg is the maximum-bottleneck path between two open-boundary "
-                "segments, extracted on the fine source grid and sampled on the coarse "
-                "grid.  The sill depth is the shallowest point along the path; the "
-                "deficit is fine minus coarse (positive = coarse grid is shallower). "
-                "MAE and RMSE are computed along the full path."
-            ),
-            table_rows=_tw_rows,
-            images=[],
-        )
-
-        for k, tw in enumerate(thalweg_records):
-            cat = tw.get("category", "tw")
-            tw_name = tw.get("name", f"thalweg_{k:03d}")
-            safe = (tw_name.replace(" ", "_").replace("→", "-")
-                    .replace("[", "").replace("]", ""))
-            img = pfx + f"04e_thalweg_{k:03d}_{safe}.png"
-            report.plot_thalweg_comparison(
-                tw, _thalweg_src, dst,
-                png_path=os.path.join(report_dir, img),
-            )
-            deficit = tw.get("sill_deficit_m", float("nan"))
-            mae     = tw.get("path_mae_m",   float("nan"))
-            rmse    = tw.get("path_rmse_m",  float("nan"))
-            coarse_sill = tw["coarse"]["sill_depth"]
-            _stats = (
-                f"Category: **{cat}**.  "
-                f"Fine sill: **{tw['fine']['sill_depth']:.1f} m**.  "
-                f"Coarse sill: **{coarse_sill:.1f} m**.  "
-                f"Deficit: **{deficit:.1f} m**.  "
-                f"MAE: **{mae:.1f} m**.  RMSE: **{rmse:.1f} m**."
-                if np.isfinite(deficit) and np.isfinite(mae) else
-                f"Category: **{cat}**.  Fine sill: {tw['fine']['sill_depth']:.1f} m."
-            )
-            rpt.add_section(
-                f"Thalweg: {tw_name}",
-                text=_stats,
-                table={},
-                images=[img],
-            )
-            csv_name = pfx + f"04e_thalweg_{k:03d}_{safe}.csv"
-            thalwegmod.write_thalweg_csv(
-                tw, csv_path=os.path.join(report_dir, csv_name)
-            )
-            logger.info("        wrote %s", csv_name)
-            if tw.get("zoomable", False):
-                html_name = pfx + f"04e_thalweg_{k:03d}_{safe}.html"
-                report.plot_thalweg_html(
-                    tw, html_path=os.path.join(report_dir, html_name)
-                )
-                logger.info("        wrote %s (zoomable)", html_name)
-
-        if not thalweg_records:
-            logger.info("      no thalwegs to plot")
-    else:
-        logger.info("\n[4e/6] Thalweg analysis skipped (use --thalweg to enable).")
+    # (Thalweg analysis runs in step 5e, after smoothing, so it can compare
+    #  raw and smoothed coarse depths along the same fine-grid paths.)
 
     # ------------------------------------------------------------------
     # Step 5 – Optional rx0 smoothing (one pass per target value)
@@ -1386,6 +1226,180 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             smooth_variants.append((rx0_val, depth_smooth, corrections))
     else:
         logger.info("\n[5/6] Smoothing skipped.")
+
+    # ------------------------------------------------------------------
+    # Step 5e – Thalweg analysis: raw coarse + each smoothed variant
+    #           [--thalweg / --no-thalweg]
+    # ------------------------------------------------------------------
+    if run_thalweg:
+        logger.info("\n[5e/6] Computing thalwegs …")
+        t0 = time.time()
+
+        thalweg_records: list[dict] = []
+
+        # With --skip-regrid the fine source may not have been loaded.
+        _thalweg_src = src
+        if _thalweg_src is None and source is not None:
+            logger.info("      Loading fine source for thalweg …")
+            _t_src = time.time()
+            try:
+                _thalweg_src = reader.read_source(
+                    source, dst_grid.lon_bounds, dst_grid.lat_bounds,
+                    pad_deg=float(pad_deg),
+                    emodnet_cache_dir=str(emodnet_cache),
+                    emodnet_resolution=(float(emodnet_res)
+                                        if emodnet_res is not None else None),
+                )
+                if coastline_res is not None:
+                    _thalweg_src = reader.apply_coastline_mask(
+                        _thalweg_src, resolution=str(coastline_res)
+                    )
+                logger.info("      Fine source loaded in %.1f s",
+                            time.time() - _t_src)
+            except Exception as exc:
+                logger.warning("      Could not load fine source (%s) — "
+                               "thalweg skipped.", exc)
+                _thalweg_src = None
+
+        if _thalweg_src is None:
+            logger.warning("      Thalweg skipped: fine source unavailable.")
+        else:
+            # Mode A: strait-based (top straits from step 4d)
+            if strait_records:
+                tw_a = thalwegmod.compute_strait_thalwegs(src, dst, strait_records,
+                                                           n_straits=max_sections)
+                thalweg_records.extend(tw_a)
+                logger.info("      strait-based: %d thalweg(s)", len(tw_a))
+
+            # Always write the boundary CSV from the finalised mask.
+            _auto_bdy_csv = os.path.join(report_dir, f"{name}_bdy.csv")
+            if not _thalweg_boundaries_csv:
+                _bdy_files, _bdy_segs = boundarymod.write_boundary_coords(
+                    dst, report_dir, name
+                )
+                logger.info("      boundary CSV: %s (%d cell(s))",
+                            _auto_bdy_csv,
+                            sum(s["n_cells"] for s in _bdy_segs))
+
+            # Mode B: boundary auto-detection
+            if run_boundary_thalweg:
+                tw_b = thalwegmod.boundary_thalwegs(
+                    _thalweg_src, dst,
+                    min_sill_m=thalweg_min_sill,
+                    max_detour=thalweg_bdy_detour,
+                    sill_dedup_tol_m=thalweg_sill_dedup,
+                    boundaries_csv=_thalweg_boundaries_csv,
+                )
+                thalweg_records.extend(tw_b)
+                logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
+            else:
+                logger.info("      boundary auto: disabled "
+                            "(set thalweg.boundary_thalwegs: true to enable)")
+
+            # Mode C: user waypoints
+            if user_waypoints_cfg:
+                tw_c = thalwegmod.waypoint_thalwegs(
+                    _thalweg_src, dst, user_waypoints_cfg,
+                    max_detour=thalweg_max_detour,
+                )
+                thalweg_records.extend(tw_c)
+                logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
+
+            # Add one smoothed-coarse profile per rx0 variant.
+            # dst still holds raw depths; smooth depths are in smooth_variants.
+            if smooth_variants and thalweg_records:
+                _sm_pairs = [(_smooth_var_name(rv), ds)
+                             for rv, ds, _ in smooth_variants]
+                thalwegmod.add_smooth_coarse(thalweg_records, dst, _sm_pairs)
+                logger.info("      added %d smooth variant(s) to each thalweg",
+                            len(_sm_pairs))
+
+        logger.info("      total: %d thalweg(s) in %.1f s",
+                    len(thalweg_records), time.time() - t0)
+
+        thalwegmod.print_thalweg_table(thalweg_records)
+        tw_sum = thalwegmod.thalweg_summary(thalweg_records)
+        report.print_table(tw_sum, title="Thalweg summary")
+
+        # Overview table: one row per thalweg, columns for each depth variant
+        _tw_rows = []
+        for k, tw in enumerate(thalweg_records):
+            def _fmt(v: float) -> str:
+                return f"{v:.1f}" if np.isfinite(v) else "n/a"
+            row: dict = {
+                "name":         tw.get("name", f"#{k}"),
+                "category":     tw.get("category", "?"),
+                "fine sill (m)": _fmt(tw["fine"]["sill_depth"]),
+                "raw sill (m)":  _fmt(tw["coarse"]["sill_depth"]),
+                "raw deficit (m)": _fmt(tw.get("sill_deficit_m", float("nan"))),
+                "raw MAE (m)":   _fmt(tw.get("path_mae_m", float("nan"))),
+            }
+            for lbl, sc in tw.get("smooth_coarse", {}).items():
+                row[f"{lbl} sill (m)"]    = _fmt(sc["sill_depth"])
+                row[f"{lbl} deficit (m)"] = _fmt(sc["deficit_m"])
+                row[f"{lbl} MAE (m)"]     = _fmt(sc["path_mae_m"])
+            _tw_rows.append(row)
+
+        rpt.add_section(
+            "Thalweg analysis",
+            text=(
+                "Each thalweg is the maximum-bottleneck path between two open-boundary "
+                "segments, extracted on the fine source grid.  Depths are sampled on "
+                "the raw (pre-smoothing) and each smoothed coarse grid.  Sill depth is "
+                "the path minimum; deficit = fine − coarse (positive = coarse is shallower)."
+            ),
+            table_rows=_tw_rows,
+            images=[],
+        )
+
+        for k, tw in enumerate(thalweg_records):
+            cat = tw.get("category", "tw")
+            tw_name = tw.get("name", f"thalweg_{k:03d}")
+            safe = (tw_name.replace(" ", "_").replace("→", "-")
+                    .replace("[", "").replace("]", ""))
+            img = pfx + f"05e_thalweg_{k:03d}_{safe}.png"
+            report.plot_thalweg_comparison(
+                tw, _thalweg_src, dst,
+                png_path=os.path.join(report_dir, img),
+            )
+            deficit = tw.get("sill_deficit_m", float("nan"))
+            mae     = tw.get("path_mae_m",   float("nan"))
+            coarse_sill = tw["coarse"]["sill_depth"]
+            _parts = [
+                f"Category: **{cat}**.",
+                f"Fine sill: **{tw['fine']['sill_depth']:.1f} m**.",
+                f"Raw coarse sill: **{coarse_sill:.1f} m**.",
+                (f"Deficit: **{deficit:.1f} m**." if np.isfinite(deficit) else ""),
+                (f"MAE: **{mae:.1f} m**." if np.isfinite(mae) else ""),
+            ]
+            for lbl, sc in tw.get("smooth_coarse", {}).items():
+                _parts.append(
+                    f"{lbl} sill: **{sc['sill_depth']:.1f} m** "
+                    f"(deficit {sc['deficit_m']:.1f} m, MAE {sc['path_mae_m']:.1f} m)."
+                    if np.isfinite(sc["sill_depth"]) else ""
+                )
+            rpt.add_section(
+                f"Thalweg: {tw_name}",
+                text="  ".join(p for p in _parts if p),
+                table={},
+                images=[img],
+            )
+            csv_name = pfx + f"05e_thalweg_{k:03d}_{safe}.csv"
+            thalwegmod.write_thalweg_csv(
+                tw, csv_path=os.path.join(report_dir, csv_name)
+            )
+            logger.info("        wrote %s", csv_name)
+            if tw.get("zoomable", False):
+                html_name = pfx + f"05e_thalweg_{k:03d}_{safe}.html"
+                report.plot_thalweg_html(
+                    tw, html_path=os.path.join(report_dir, html_name)
+                )
+                logger.info("        wrote %s (zoomable)", html_name)
+
+        if not thalweg_records:
+            logger.info("      no thalwegs to plot")
+    else:
+        logger.info("\n[5e/6] Thalweg analysis skipped (use --thalweg to enable).")
 
     # ------------------------------------------------------------------
     # Step 6 – Build output dataset, final plots for every depth variant

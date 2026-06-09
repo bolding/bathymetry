@@ -1210,6 +1210,77 @@ def boundary_thalwegs(
 
 
 # ---------------------------------------------------------------------------
+# Post-processing: add smoothed-coarse depth profiles to existing records
+# ---------------------------------------------------------------------------
+
+def add_smooth_coarse(
+    records: list[dict],
+    dst,
+    smooth_variants: list[tuple[str, npt.NDArray]],
+) -> None:
+    """Sample smoothed coarse depths along thalweg paths (in-place).
+
+    Called after rx0 smoothing to augment thalweg records with one additional
+    coarse depth profile per smoothed variant, without recomputing the MST.
+    The original ``record["coarse"]`` (raw pre-smoothing depths) is unchanged.
+    Each smooth variant is stored as ``record["smooth_coarse"][label]``.
+
+    Parameters
+    ----------
+    records : list[dict]
+        Thalweg records (modified in-place).
+    dst : xr.Dataset
+        Coarse regridded bathymetry — mask/lon/lat used; depth field ignored.
+    smooth_variants : list of (label, depth_2d)
+        Each entry is a (label_string, numpy_depth_array [ny, nx]) pair.
+    """
+    if not records or not smooth_variants:
+        return
+
+    lon_raw = dst.lon.values
+    lat_raw = dst.lat.values
+    if lon_raw.ndim == 1 and lat_raw.ndim == 1:
+        lon2d, lat2d = np.meshgrid(lon_raw, lat_raw)
+        max_lookup = float(max(abs(np.diff(lon_raw)).mean(),
+                               abs(np.diff(lat_raw)).mean()) * 25)
+    else:
+        lon2d, lat2d = lon_raw, lat_raw
+        max_lookup = float(max(abs(np.diff(lon2d, axis=1)).mean(),
+                               abs(np.diff(lat2d, axis=0)).mean()) * 25)
+
+    mask2d = dst["mask"].values.astype(bool)
+
+    for label, depth_arr in smooth_variants:
+        depth_masked = np.where(mask2d, depth_arr, 0.0)
+        tree, dep_vals = _build_coarse_tree(lon2d, lat2d, depth_masked, mask2d)
+        for rec in records:
+            fine = rec["fine"]
+            c_dep = _sample_coarse(
+                fine["lon"], fine["lat"], tree, dep_vals,  # type: ignore[arg-type]
+                max_dist_deg=max_lookup,
+            )
+            c_valid = np.isfinite(c_dep)
+            sill = float(np.nanmin(c_dep[c_valid])) if c_valid.any() else float("nan")
+            fine_dep = np.array(fine["depth"])
+            both = c_valid & np.isfinite(fine_dep)
+            if both.any():
+                diff = fine_dep[both] - c_dep[both]
+                mae  = float(np.mean(np.abs(diff)))
+                rmse = float(np.sqrt(np.mean(diff ** 2)))
+            else:
+                mae = rmse = float("nan")
+            rec.setdefault("smooth_coarse", {})[label] = {
+                "dist_km":    fine["dist_km"],
+                "depth":      c_dep,
+                "sill_depth": sill,
+                "deficit_m":  (fine["sill_depth"] - sill
+                               if np.isfinite(sill) else float("nan")),
+                "path_mae_m":  mae,
+                "path_rmse_m": rmse,
+            }
+
+
+# ---------------------------------------------------------------------------
 # Mode C: user-specified waypoints
 # ---------------------------------------------------------------------------
 

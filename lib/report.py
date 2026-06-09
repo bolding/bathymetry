@@ -1556,7 +1556,15 @@ def plot_thalweg_comparison(
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
                  lw=1.5, label="Fine")
     ax_prof.scatter(coarse["dist_km"], coarse["depth"], color="darkorange",
-                    s=4, zorder=4, label="Coarse")
+                    s=4, zorder=4, label="Raw coarse")
+
+    _smooth_colors = ["forestgreen", "crimson", "purple", "saddlebrown"]
+    for _si, (_lbl, _sc) in enumerate(record.get("smooth_coarse", {}).items()):
+        _sc_dep = np.asarray(_sc["depth"], dtype=float)
+        _sc_dist = np.asarray(_sc["dist_km"], dtype=float)
+        _col = _smooth_colors[_si % len(_smooth_colors)]
+        ax_prof.plot(_sc_dist, _sc_dep, color=_col, lw=1.2,
+                     label=f"{_lbl} coarse")
 
     sill_d = record.get("sill_depth_m")
     if sill_d is not None:
