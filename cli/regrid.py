@@ -451,7 +451,13 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     name = _merge(args.name, cfg, "name")
     if name is None:
         # Derive from source file stem, stripping common suffixes
-        stem = Path(source).stem if source != "emodnet" else "emodnet"
+        _src_key = source.lower().strip()
+        if _src_key == "emodnet":
+            stem = "emodnet"
+        elif _src_key in ("gebco", "gebco2025"):
+            stem = "gebco2025"
+        else:
+            stem = Path(source).stem
         name = stem.replace(" ", "_")
 
     # Defaults that depend on name
@@ -570,7 +576,13 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             emodnet_resolution=float(emodnet_res) if emodnet_res is not None else None,
         )
 
-        src_label = Path(source).name if source != "emodnet" else "EMODnet"
+        _src_key2 = source.lower().strip()
+        if _src_key2 == "emodnet":
+            src_label = "EMODnet"
+        elif _src_key2 in ("gebco", "gebco2025"):
+            src_label = "GEBCO 2025"
+        else:
+            src_label = Path(source).name
 
         def _save_src_plot(tag: str, title: str) -> tuple[str, str]:
             """Save PNG + HTML for current state of *src*; return (png_name, html_name)."""
@@ -677,10 +689,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     dst2_mask = None        # set below if source2 is provided
     dst2_depth_vals = None  # raw regridded depth from source2
-    src1_label = Path(source).name if source != "emodnet" else "EMODnet"
+    def _src_display_label(s: str) -> str:
+        k = s.lower().strip()
+        if k == "emodnet":
+            return "EMODnet"
+        if k in ("gebco", "gebco2025"):
+            return "GEBCO 2025"
+        return Path(s).name
+
+    src1_label = _src_display_label(source)
     src2_label: str = ""
     if source2 is not None:
-        src2_label = Path(source2).name if source2 != "emodnet" else "EMODnet"
+        src2_label = _src_display_label(source2)
         print(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
         t0 = time.time()
         src2 = reader.read_source(

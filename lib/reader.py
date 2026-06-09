@@ -1,10 +1,15 @@
 """Source bathymetry readers.
 
-Two backends are provided:
+Three backends are provided:
 
-GEBCO
+GEBCO (local file)
     Local NetCDF file (e.g. GEBCO_2024.nc). Variable ``elevation`` is
     positive-up; ocean values are negative.
+
+GEBCO (auto-download)
+    Use ``source: gebco`` (or ``gebco2025``) to download GEBCO 2025 on the
+    fly from CEDA and cache it at ``~/.cache/gebco/gebco_2025.nc``.  The
+    ~10 GB ZIP is downloaded once; subsequent runs use the cached NetCDF.
 
 EMODnet
     Downloaded on-the-fly from the EMODnet WCS service as a GeoTIFF, then
@@ -37,6 +42,7 @@ from __future__ import annotations
 import re
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -46,12 +52,84 @@ import xarray as xr
 _EMODNET_BASE_URL = (
     "https://ows.emodnet-bathymetry.eu/wcs?service=wcs&version=1.0.0&"
 )
+
+_GEBCO_CACHE_DIR = Path.home() / ".cache" / "gebco"
+_GEBCO_VERSIONS: dict[str, str] = {
+    "2025": (
+        "https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2025/"
+        "ice_surface_elevation/netcdf/gebco_2025.zip?download=1"
+    ),
+}
 _EMODNET_DEFAULT_RES    = 1.0 / 480  # native EMODnet ≈ 230 m (7.5 arcseconds)
 _EMODNET_CACHE_DIR      = "./emodnet_cache"
 # Server size limit is ~97.66 MB. Empirically, 17°×4° ≈ 478 MB (>> limit), so
 # the server counts native-resolution source cells (~7 MB/deg²).  Use 12 deg²
 # per tile (≈ 84 MB) with 2-D tiling so any domain works at full resolution.
 _EMODNET_MAX_AREA_DEG2  = 12.0
+
+
+def _ensure_gebco(version: str = "2025") -> str:
+    """Return path to a locally cached GEBCO NetCDF, downloading if necessary.
+
+    The global GEBCO ZIP (~10 GB) is downloaded once and cached at
+    ``~/.cache/gebco/gebco_<version>.nc``.  The ZIP is deleted after
+    extraction to free disk space.
+    """
+    nc_path = _GEBCO_CACHE_DIR / f"gebco_{version}.nc"
+    if nc_path.exists():
+        print(f"  Using cached GEBCO {version}: {nc_path}")
+        return str(nc_path)
+
+    if version not in _GEBCO_VERSIONS:
+        raise ValueError(
+            f"No download URL known for GEBCO version {version!r}. "
+            "Use source: /path/to/GEBCO_<year>.nc instead."
+        )
+    url = _GEBCO_VERSIONS[version]
+
+    _GEBCO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = _GEBCO_CACHE_DIR / f"gebco_{version}.zip"
+
+    print(f"  Downloading GEBCO {version} (~10 GB) from CEDA …")
+    print(f"    → {zip_path}")
+
+    def _progress(block_num: int, block_size: int, total_size: int) -> None:
+        downloaded = block_num * block_size
+        mb = downloaded / 1024 ** 2
+        if total_size > 0:
+            pct = min(100.0, downloaded * 100.0 / total_size)
+            total_mb = total_size / 1024 ** 2
+            print(f"\r    {pct:5.1f}%  ({mb:.0f} / {total_mb:.0f} MB)",
+                  end="", flush=True)
+        else:
+            print(f"\r    {mb:.0f} MB downloaded", end="", flush=True)
+
+    try:
+        urllib.request.urlretrieve(url, str(zip_path), reporthook=_progress)
+    except Exception:
+        zip_path.unlink(missing_ok=True)
+        raise
+    print()  # newline after progress line
+
+    print(f"  Extracting NetCDF from ZIP …")
+    try:
+        with zipfile.ZipFile(str(zip_path)) as zf:
+            nc_names = [n for n in zf.namelist() if n.lower().endswith(".nc")]
+            if not nc_names:
+                raise RuntimeError(
+                    f"No .nc file found inside {zip_path}. "
+                    "The GEBCO ZIP may have an unexpected layout."
+                )
+            extracted = Path(zf.extract(nc_names[0], path=str(_GEBCO_CACHE_DIR)))
+            extracted.rename(nc_path)
+    except Exception:
+        nc_path.unlink(missing_ok=True)
+        raise
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    print(f"  GEBCO {version} cached at: {nc_path}")
+    return str(nc_path)
 
 
 def read_source(
@@ -68,8 +146,10 @@ def read_source(
     Parameters
     ----------
     source : str
-        Either a file path to a GEBCO-style NetCDF, or the string ``"emodnet"``
-        to fetch from the EMODnet WCS service.
+        File path to a GEBCO-style NetCDF, the string ``"emodnet"`` to fetch
+        from the EMODnet WCS service, or the string ``"gebco"`` / ``"gebco2025"``
+        to auto-download GEBCO 2025 from CEDA and cache at
+        ``~/.cache/gebco/gebco_2025.nc``.
     lon_bounds : (lon_min, lon_max)
         Destination grid longitude extent in degrees East.
     lat_bounds : (lat_min, lat_max)
@@ -91,7 +171,11 @@ def read_source(
     lat_min = lat_bounds[0] - pad_deg
     lat_max = lat_bounds[1] + pad_deg
 
-    if source.lower() == "emodnet":
+    src_key = source.lower().strip()
+    if src_key in ("gebco", "gebco2025"):
+        source = _ensure_gebco("2025")
+        return _read_gebco(source, lon_min, lon_max, lat_min, lat_max, **kwargs)
+    elif src_key == "emodnet":
         kw: dict = {}
         if emodnet_resolution is not None:
             kw["resolution"] = emodnet_resolution
