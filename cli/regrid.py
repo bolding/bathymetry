@@ -1209,7 +1209,23 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 thalweg_records.extend(tw_a)
                 logger.info("      strait-based: %d thalweg(s)", len(tw_a))
 
-            # Mode B: boundary auto-detection
+            # Mode B: boundary auto-detection.
+            # Always write the boundary CSV from the finalised mask so the user
+            # has the file for reference even without --write-boundaries.  When
+            # no explicit boundaries_csv is given, this auto-written file is
+            # also what boundary_thalwegs uses for start detection.
+            # NOTE: basins removed by nkeep_basins are absent from this file;
+            # set nkeep_basins: N in the config to keep N basins (and their
+            # open boundaries).
+            _auto_bdy_csv = os.path.join(report_dir, f"{name}_bdy.csv")
+            if not _thalweg_boundaries_csv:
+                _bdy_files, _bdy_segs = boundarymod.write_boundary_coords(
+                    dst, report_dir, name
+                )
+                logger.info("      boundary CSV: %s (%d cell(s))",
+                            _auto_bdy_csv,
+                            sum(s["n_cells"] for s in _bdy_segs))
+
             # boundary_thalwegs detects starts on the coarse grid edges and
             # snaps them to the fine grid by default. Supply boundaries_csv
             # when the open boundaries are not at the physical coarse grid
