@@ -972,8 +972,8 @@ def boundary_thalwegs(
         for cs in raw_starts:
             ij = _snap_to_fine(cs["lon"], cs["lat"])
             if ij is None:
-                logger.debug("      boundary start %s (%.3f,%.3f) — no wet fine cell nearby, skipped",
-                             cs["edge"], cs["lon"], cs["lat"])
+                logger.info("      boundary start %s (%.3f,%.3f) — no wet fine cell nearby, skipped",
+                            cs["edge"], cs["lon"], cs["lat"])
                 continue
             ri, ci = ij
             starts.append({
@@ -1000,6 +1000,18 @@ def boundary_thalwegs(
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
 
+    _dom_lon_min = float(dst_lon2d.min())
+    _dom_lon_max = float(dst_lon2d.max())
+    _dom_lat_min = float(dst_lat2d.min())
+    _dom_lat_max = float(dst_lat2d.max())
+
+    logger.info("      coarse domain: lon [%.3f, %.3f] lat [%.3f, %.3f]",
+                _dom_lon_min, _dom_lon_max, _dom_lat_min, _dom_lat_max)
+    for s in starts:
+        logger.info("      start: %s seg%d  ij=(%d,%d)  lon=%.3f lat=%.3f  depth=%.1f m",
+                    s["edge"], s["segment"], s["ij"][0], s["ij"][1],
+                    s["lon"], s["lat"], s["depth"])
+
     for i, s1 in enumerate(starts):
         for j, s2 in enumerate(starts):
             if s1["edge"] == s2["edge"]:
@@ -1011,16 +1023,19 @@ def boundary_thalwegs(
 
             path = _mst_path(mst, node_id_f, wet_rc_f, s1["ij"], s2["ij"])
             if path is None or len(path) < 5:
+                logger.info("      skip %s→%s: no MST path (path=%s len=%d)",
+                            s1["edge"], s2["edge"],
+                            "None" if path is None else "found", len(path) if path else 0)
                 continue
 
             fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
             fine = _clip_profile_to_domain(
-                fine,
-                float(dst_lon2d.min()), float(dst_lon2d.max()),
-                float(dst_lat2d.min()), float(dst_lat2d.max()),
+                fine, _dom_lon_min, _dom_lon_max, _dom_lat_min, _dom_lat_max,
             )
 
             if fine["sill_depth"] < min_sill_m or len(fine["lon"]) < 2:
+                logger.info("      skip %s→%s: after clip sill=%.1f m pts=%d",
+                            s1["edge"], s2["edge"], fine["sill_depth"], len(fine["lon"]))
                 continue
 
             # Reject paths that detour around the domain instead of crossing it
@@ -1029,9 +1044,9 @@ def boundary_thalwegs(
                 float(fine["lon"][-1]), float(fine["lat"][-1]),
             )
             if direct_km > 0 and float(fine["dist_km"][-1]) > _MAX_DETOUR * direct_km:
-                logger.debug("      skip %s→%s: detour %.1f km vs %.1f km direct",
-                             s1["edge"], s2["edge"],
-                             fine["dist_km"][-1], direct_km)
+                logger.info("      skip %s→%s: detour %.1f km vs %.1f km direct (max_detour=%.1f)",
+                            s1["edge"], s2["edge"],
+                            fine["dist_km"][-1], direct_km, _MAX_DETOUR)
                 continue
 
             # Deduplicate by clipped sill depth (within tolerance) per edge pair
