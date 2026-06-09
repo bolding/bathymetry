@@ -88,13 +88,26 @@ class MarkdownReport:
             images=images or [], warnings=warnings or [],
         ))
 
+    @staticmethod
+    def _anchor(heading: str) -> str:
+        """GitHub-Flavored Markdown anchor from a heading string."""
+        import re
+        return "#" + re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+
     def write(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Table of contents
+        toc = ["## Contents", ""]
+        for sec in self._sections:
+            toc.append(f"- [{sec['heading']}]({self._anchor(sec['heading'])})")
+        toc.append("")
+
         lines: list[str] = [
             f"# {self.title}", "",
             f"*Generated: {self._created}*", "",
-        ]
+        ] + toc
         for sec in self._sections:
             lines += [f"## {sec['heading']}", ""]
             if sec["text"]:
