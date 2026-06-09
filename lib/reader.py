@@ -61,7 +61,7 @@ _GEBCO_VERSIONS: dict[str, str] = {
     ),
 }
 _EMODNET_DEFAULT_RES    = 1.0 / 480  # native EMODnet ≈ 230 m (7.5 arcseconds)
-_EMODNET_CACHE_DIR      = "./emodnet_cache"
+_EMODNET_CACHE_DIR      = str(Path.home() / ".cache" / "emodnet")
 # Server size limit is ~97.66 MB. Empirically, 17°×4° ≈ 478 MB (>> limit), so
 # the server counts native-resolution source cells (~7 MB/deg²).  Use 12 deg²
 # per tile (≈ 84 MB) with 2-D tiling so any domain works at full resolution.
@@ -159,7 +159,7 @@ def read_source(
         artefacts during regridding.
     emodnet_cache_dir : str
         Directory where downloaded EMODnet tiles are cached as NetCDF.
-        Set to ``""`` to disable caching (default: ``"./emodnet_cache"``).
+        Set to ``""`` to disable caching (default: ``~/.cache/emodnet/``).
     emodnet_resolution : float or None
         Download resolution in degrees. ``None`` → native EMODnet (~230 m).
         Large domains are automatically split into tiles; results are cached.

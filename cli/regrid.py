@@ -431,7 +431,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     cache_dir     = _merge(args.cache_dir,    cfg, "regridding", "cache_dir",
                            default="./regrid_weights")
     emodnet_cache = _merge(None, cfg, "regridding", "emodnet_cache_dir",
-                           default="./emodnet_cache")
+                           default=reader._EMODNET_CACHE_DIR)
     emodnet_res   = _merge(None, cfg, "regridding", "emodnet_resolution",
                            default=None)   # None → reader default (1 arcminute)
     min_depth     = _merge(args.min_depth,    cfg, "regridding", "min_depth",     default=0.0)
