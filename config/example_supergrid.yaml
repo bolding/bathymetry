@@ -52,3 +52,6 @@ output:
   #   file       → my_model_supergrid.nc
   #   report_dir → ./report/my_model_supergrid/
   # log_depth_scale: true
+
+thalweg:
+  boundary_thalwegs: false   # set to true to enable boundary auto-detection

@@ -90,3 +90,6 @@ output:
 #     i: 15
 #     j: 8
 #     name: Single cell by index
+
+thalweg:
+  boundary_thalwegs: false   # set to true to enable boundary auto-detection

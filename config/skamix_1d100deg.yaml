@@ -61,6 +61,9 @@ output:
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
+thalweg:
+  boundary_thalwegs: false   # set to true to enable boundary auto-detection
+
 mask_regions:
   - type: ij_point
     i: 118

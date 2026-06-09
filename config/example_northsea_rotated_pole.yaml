@@ -64,3 +64,6 @@ output:
   #   file       → northsea_rotpole.nc
   #   report_dir → ./report/northsea_rotpole/
   # log_depth_scale: true   # log colour scale — good when shelf and deep water coexist
+
+thalweg:
+  boundary_thalwegs: false   # set to true to enable boundary auto-detection
