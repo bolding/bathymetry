@@ -1476,15 +1476,18 @@ def plot_thalweg_comparison(
         crs=geo,
     )
 
+    # ── shared depth colormap — fine background and coarse scatter use same scale
+    cmap = cmocean.cm.deep
+    norm = plt.Normalize(vmin=0, vmax=depth_vmax)
+
     # ── left panel: map ──────────────────────────────────────────────────────
     if fine_lon is not None and fine_lat is not None:
         depth_plot = np.where(fine_mask_wet, fine_depth, np.nan)
         pcm = ax_map.pcolormesh(  # type: ignore[union-attr]
             fine_lon, fine_lat, depth_plot,
-            cmap=cmocean.cm.deep, shading="auto", transform=geo,
-            vmin=0, vmax=depth_vmax,
+            cmap=cmap, norm=norm, shading="auto", transform=geo,
         )
-        plt.colorbar(pcm, ax=ax_map, label="Fine depth (m)", shrink=0.45, pad=0.02)
+        plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.75, pad=0.02)
 
     ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
     ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
@@ -1499,15 +1502,26 @@ def plot_thalweg_comparison(
     ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.2,  # type: ignore[union-attr]
                 transform=geo, label="Fine thalweg", zorder=5)
 
-    # coarse depth scatter — positions are fine path positions (coarse depths sampled there)
-    sc = ax_map.scatter(  # type: ignore[call-arg,union-attr]
+    # coarse depth scatter — same colormap as background for direct comparison
+    ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
-        c=coarse["depth"], cmap=cmocean.cm.thermal,
-        s=6, zorder=6, label="Coarse depth",
-        transform=geo,
-        vmin=0, vmax=depth_vmax,
+        c=coarse["depth"], cmap=cmap, norm=norm,
+        s=6, zorder=6, label="Coarse depth", transform=geo,
     )
-    plt.colorbar(sc, ax=ax_map, label="Coarse depth (m)", shrink=0.45, pad=0.12)
+
+    # start / end markers
+    ax_map.plot(  # type: ignore[union-attr]
+        fine["lon"][0], fine["lat"][0],
+        marker="^", ms=9, color="limegreen", markeredgecolor="k",
+        markeredgewidth=0.5, linestyle="none",
+        transform=geo, label="Start", zorder=9,
+    )
+    ax_map.plot(  # type: ignore[union-attr]
+        fine["lon"][-1], fine["lat"][-1],
+        marker="s", ms=9, color="crimson", markeredgecolor="k",
+        markeredgewidth=0.5, linestyle="none",
+        transform=geo, label="End", zorder=9,
+    )
 
     # sill marker — derive position from fine profile (works for all modes)
     sill_lon = record.get("sill_lon")
@@ -1521,12 +1535,16 @@ def plot_thalweg_comparison(
         ax_map.plot(  # type: ignore[union-attr]
             sill_lon, sill_lat,
             marker="o", linestyle="none", ms=11,
-            markerfacecolor="none", markeredgecolor="crimson", markeredgewidth=2,
+            markerfacecolor="none", markeredgecolor="gold", markeredgewidth=2,
             transform=geo, label="Sill", zorder=7,
         )
 
     ax_map.set_title(f"{name} — map")  # type: ignore[union-attr]
-    ax_map.legend(fontsize=7, loc="upper left")  # type: ignore[union-attr]
+    # legend below the map so it does not obscure bathymetric features
+    ax_map.legend(  # type: ignore[union-attr]
+        fontsize=7, loc="upper left",
+        bbox_to_anchor=(0.0, -0.06), ncol=5, borderaxespad=0, framealpha=0.9,
+    )
 
     # ── right panel: depth profile ───────────────────────────────────────────
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
