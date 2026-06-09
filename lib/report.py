@@ -1404,6 +1404,8 @@ def plot_thalweg_comparison(
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     import numpy as np
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
 
     fine  = record["fine"]
     coarse = record["coarse"]
@@ -1425,29 +1427,45 @@ def plot_thalweg_comparison(
     fine_mask  = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]
 
     # ── figure layout ────────────────────────────────────────────────────────
+    geo = ccrs.PlateCarree()
     fig = plt.figure(figsize=(13, 5))
     gs  = gridspec.GridSpec(1, 2, width_ratios=[1.35, 1], wspace=0.35)
-    ax_map  = fig.add_subplot(gs[0])
+    ax_map  = fig.add_subplot(gs[0], projection=geo)
     ax_prof = fig.add_subplot(gs[1])
 
     # ── left panel: map ──────────────────────────────────────────────────────
     if fine_lon is not None and fine_lat is not None:
         depth_plot = np.where(fine_mask.astype(bool), fine_depth, np.nan)
-        pcm = ax_map.pcolormesh(
+        pcm = ax_map.pcolormesh(  # type: ignore[union-attr]
             fine_lon, fine_lat, depth_plot,
-            cmap="Blues", shading="auto",
+            cmap="Blues", shading="auto", transform=geo,
         )
         plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.85)
 
+        # set extent from fine grid bounds with a small margin
+        lon_margin = (fine_lon.max() - fine_lon.min()) * 0.05
+        lat_margin = (fine_lat.max() - fine_lat.min()) * 0.05
+        ax_map.set_extent(  # type: ignore[union-attr]
+            [fine_lon.min() - lon_margin, fine_lon.max() + lon_margin,
+             fine_lat.min() - lat_margin, fine_lat.max() + lat_margin],
+            crs=geo,
+        )
+
+    ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
+    ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
+    ax_map.gridlines(draw_labels=True, linewidth=0.3, color="grey",          # type: ignore[union-attr]
+                     alpha=0.5, x_inline=False, y_inline=False)
+
     # fine thalweg path
-    ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.5,
-                label="Fine thalweg")
+    ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.5,  # type: ignore[union-attr]
+                transform=geo, label="Fine thalweg", zorder=4)
 
     # coarse depth scatter — positions are fine path positions (coarse depths sampled there)
-    sc = ax_map.scatter(  # type: ignore[call-arg]
+    sc = ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
         c=coarse["depth"], cmap="Oranges_r",
-        s=18, zorder=4, label="Coarse depth",
+        s=18, zorder=5, label="Coarse depth",
+        transform=geo,
         vmin=0, vmax=max(1, float(np.nanmax(fine["depth"]))),
     )
 
@@ -1455,12 +1473,11 @@ def plot_thalweg_comparison(
     sill_lon = record.get("sill_lon")
     sill_lat = record.get("sill_lat")
     if sill_lon is not None and sill_lat is not None:
-        ax_map.plot(sill_lon, sill_lat, "rv", ms=8, zorder=5, label="Sill")
+        ax_map.plot(sill_lon, sill_lat, "rv", ms=8, zorder=6,   # type: ignore[union-attr]
+                    transform=geo, label="Sill")
 
-    ax_map.set_xlabel("Longitude")
-    ax_map.set_ylabel("Latitude")
-    ax_map.set_title(f"{name} — map")
-    ax_map.legend(fontsize=7, loc="upper left")
+    ax_map.set_title(f"{name} — map")  # type: ignore[union-attr]
+    ax_map.legend(fontsize=7, loc="upper left")  # type: ignore[union-attr]
 
     # ── right panel: depth profile ───────────────────────────────────────────
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
