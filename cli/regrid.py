@@ -485,6 +485,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         level=getattr(logging, args.log_level),
         format="%(message)s",
         stream=sys.stdout,
+        force=True,  # override any handlers set by imported libraries
     )
 
     # ------------------------------------------------------------------
