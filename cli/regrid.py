@@ -1256,6 +1256,30 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         tw_sum = thalwegmod.thalweg_summary(thalweg_records)
         report.print_table(tw_sum, title="Thalweg summary")
 
+        # Overview section: description + per-thalweg table
+        _tw_rows = {
+            tw.get("name", f"#{k}"): {
+                "category":    tw.get("category", "?"),
+                "fine sill (m)":   f"{tw['fine']['sill_depth']:.1f}",
+                "coarse sill (m)": (f"{tw['coarse']['sill_depth']:.1f}"
+                                    if np.isfinite(tw["coarse"]["sill_depth"]) else "n/a"),
+                "deficit (m)":     (f"{tw['sill_deficit_m']:.1f}"
+                                    if np.isfinite(tw.get("sill_deficit_m", float("nan"))) else "n/a"),
+            }
+            for k, tw in enumerate(thalweg_records)
+        }
+        rpt.add_section(
+            "Thalweg analysis",
+            text=(
+                "Each thalweg is the maximum-bottleneck path between two open-boundary "
+                "segments, extracted on the fine source grid and sampled on the coarse "
+                "grid.  The sill depth is the shallowest point along the path; the "
+                "deficit is fine minus coarse (positive = coarse grid is shallower)."
+            ),
+            table=_tw_rows,
+            images=[],
+        )
+
         for k, tw in enumerate(thalweg_records):
             cat = tw.get("category", "tw")
             tw_name = tw.get("name", f"thalweg_{k:03d}")

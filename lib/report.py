@@ -1502,22 +1502,32 @@ def plot_thalweg_comparison(
     ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.2,  # type: ignore[union-attr]
                 transform=geo, label="Fine thalweg", zorder=5)
 
-    # coarse depth scatter — same colormap as background for direct comparison
+    # coarse depth scatter — same colormap as background; black centre dot
+    # makes the path easy to follow against the coloured background.
     ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
         c=coarse["depth"], cmap=cmap, norm=norm,
-        s=6, zorder=6, label="Coarse depth", transform=geo,
+        s=18, zorder=6, label="Coarse depth", transform=geo,
+    )
+    ax_map.scatter(  # type: ignore[call-arg,union-attr]
+        fine["lon"], fine["lat"],
+        c="black", s=3, zorder=7, transform=geo,
     )
 
-    # start / end markers
+    # start / end markers — prefer stored boundary detection coordinates so
+    # markers land at the actual domain edge even when the path is clipped.
+    _start_lon = record.get("start_lon", float(fine["lon"][0]))
+    _start_lat = record.get("start_lat", float(fine["lat"][0]))
+    _end_lon   = record.get("end_lon",   float(fine["lon"][-1]))
+    _end_lat   = record.get("end_lat",   float(fine["lat"][-1]))
     ax_map.plot(  # type: ignore[union-attr]
-        fine["lon"][0], fine["lat"][0],
+        _start_lon, _start_lat,
         marker="^", ms=9, color="limegreen", markeredgecolor="k",
         markeredgewidth=0.5, linestyle="none",
         transform=geo, label="Start", zorder=9,
     )
     ax_map.plot(  # type: ignore[union-attr]
-        fine["lon"][-1], fine["lat"][-1],
+        _end_lon, _end_lat,
         marker="s", ms=9, color="crimson", markeredgecolor="k",
         markeredgewidth=0.5, linestyle="none",
         transform=geo, label="End", zorder=9,

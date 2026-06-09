@@ -1170,9 +1170,7 @@ def boundary_thalwegs(
 
             seg1 = s1.get("segment", 0)
             seg2 = s2.get("segment", 0)
-            name = (f"{s1['edge']}[{seg1}]→{s2['edge']}[{seg2}]"
-                    if seg1 > 0 or seg2 > 0
-                    else f"{s1['edge']}→{s2['edge']}")
+            name = f"{s1['edge']}[{seg1}]→{s2['edge']}[{seg2}]"
             cs_str = f"{coarse_sill:.1f} m" if np.isfinite(coarse_sill) else "n/a"
             logger.info("      + %s  fine_sill=%.1f m  coarse_sill=%s  L=%.0f km",
                         name, fine["sill_depth"], cs_str, fine["dist_km"][-1])
@@ -1186,6 +1184,10 @@ def boundary_thalwegs(
                 },
                 "sill_deficit_m": (fine["sill_depth"] - coarse_sill
                                    if np.isfinite(coarse_sill) else np.nan),
+                "start_lon": s1["lon"],
+                "start_lat": s1["lat"],
+                "end_lon":   s2["lon"],
+                "end_lat":   s2["lat"],
                 "lon": float(0.5 * (s1["lon"] + s2["lon"])),
                 "lat": float(0.5 * (s1["lat"] + s2["lat"])),
                 "direction": "auto",
