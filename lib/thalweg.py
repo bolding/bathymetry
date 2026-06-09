@@ -1092,23 +1092,19 @@ def boundary_thalwegs(
                 continue
             ri, ci = ij
             starts.append({
-                "edge":    cs["edge"],
-                "segment": cs["segment"],
-                "ij":      ij,
-                "lon":     float(lon2d_f[ri, ci]),
-                "lat":     float(lat2d_f[ri, ci]),
-                "depth":   float(src_depth[ri, ci]),
+                "edge":      cs["edge"],
+                "segment":   cs["segment"],
+                "coarse_ij": cs["ij"],   # (row, col) in coarse grid
+                "ij":        ij,         # (row, col) in fine grid
+                "lon":       float(lon2d_f[ri, ci]),
+                "lat":       float(lat2d_f[ri, ci]),
+                "depth":     float(src_depth[ri, ci]),
             })
 
     logger.info("      %d boundary start(s) on %d edge(s)",
                 len(starts),
                 len({s["edge"] for s in starts}))
 
-    # Try every ordered pair of starts on different edges.
-    # After clipping to the domain, deduplicate by sill depth (within tolerance)
-    # per edge-pair direction.  Also discard paths whose length is more than
-    # max_detour times the straight-line distance between the clipped endpoints
-    # (catches MST routes that go "around" rather than across).
     _SILL_DEDUP_TOL_M  = sill_dedup_tol_m
     _MAX_DETOUR        = max_detour
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
@@ -1117,8 +1113,9 @@ def boundary_thalwegs(
     logger.info("      coarse domain: lon [%.3f, %.3f] lat [%.3f, %.3f]",
                 _dom_lon_min, _dom_lon_max, _dom_lat_min, _dom_lat_max)
     for s in starts:
-        logger.info("      start: %s seg%d  ij=(%d,%d)  lon=%.3f lat=%.3f  depth=%.1f m",
-                    s["edge"], s["segment"], s["ij"][0], s["ij"][1],
+        cij = s["coarse_ij"]
+        logger.info("      start: %s seg%d  coarse_ij=(%d,%d)  lon=%.3f lat=%.3f  depth=%.1f m",
+                    s["edge"], s["segment"], cij[0], cij[1],
                     s["lon"], s["lat"], s["depth"])
 
     for i, s1 in enumerate(starts):
