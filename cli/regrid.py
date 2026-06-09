@@ -1257,26 +1257,32 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         report.print_table(tw_sum, title="Thalweg summary")
 
         # Overview section: description + per-thalweg table
-        _tw_rows = {
-            tw.get("name", f"#{k}"): {
-                "category":    tw.get("category", "?"),
+        _tw_rows = [
+            {
+                "name":            tw.get("name", f"#{k}"),
+                "category":        tw.get("category", "?"),
                 "fine sill (m)":   f"{tw['fine']['sill_depth']:.1f}",
                 "coarse sill (m)": (f"{tw['coarse']['sill_depth']:.1f}"
                                     if np.isfinite(tw["coarse"]["sill_depth"]) else "n/a"),
-                "deficit (m)":     (f"{tw['sill_deficit_m']:.1f}"
+                "deficit (m)":     (f"{tw.get('sill_deficit_m', float('nan')):.1f}"
                                     if np.isfinite(tw.get("sill_deficit_m", float("nan"))) else "n/a"),
+                "MAE (m)":         (f"{tw.get('path_mae_m', float('nan')):.1f}"
+                                    if np.isfinite(tw.get("path_mae_m", float("nan"))) else "n/a"),
+                "RMSE (m)":        (f"{tw.get('path_rmse_m', float('nan')):.1f}"
+                                    if np.isfinite(tw.get("path_rmse_m", float("nan"))) else "n/a"),
             }
             for k, tw in enumerate(thalweg_records)
-        }
+        ]
         rpt.add_section(
             "Thalweg analysis",
             text=(
                 "Each thalweg is the maximum-bottleneck path between two open-boundary "
                 "segments, extracted on the fine source grid and sampled on the coarse "
                 "grid.  The sill depth is the shallowest point along the path; the "
-                "deficit is fine minus coarse (positive = coarse grid is shallower)."
+                "deficit is fine minus coarse (positive = coarse grid is shallower). "
+                "MAE and RMSE are computed along the full path."
             ),
-            table=_tw_rows,
+            table_rows=_tw_rows,
             images=[],
         )
 
@@ -1291,17 +1297,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 png_path=os.path.join(report_dir, img),
             )
             deficit = tw.get("sill_deficit_m", float("nan"))
+            mae     = tw.get("path_mae_m",   float("nan"))
+            rmse    = tw.get("path_rmse_m",  float("nan"))
             coarse_sill = tw["coarse"]["sill_depth"]
+            _stats = (
+                f"Category: **{cat}**.  "
+                f"Fine sill: **{tw['fine']['sill_depth']:.1f} m**.  "
+                f"Coarse sill: **{coarse_sill:.1f} m**.  "
+                f"Deficit: **{deficit:.1f} m**.  "
+                f"MAE: **{mae:.1f} m**.  RMSE: **{rmse:.1f} m**."
+                if np.isfinite(deficit) and np.isfinite(mae) else
+                f"Category: **{cat}**.  Fine sill: {tw['fine']['sill_depth']:.1f} m."
+            )
             rpt.add_section(
                 f"Thalweg: {tw_name}",
-                text=(
-                    f"Category: **{cat}**.  "
-                    f"Fine sill depth: **{tw['fine']['sill_depth']:.1f} m**.  "
-                    f"Coarse sill depth: **{coarse_sill:.1f} m**.  "
-                    f"Deficit: **{deficit:.1f} m**."
-                    if np.isfinite(deficit) else
-                    f"Category: **{cat}**.  Fine sill: {tw['fine']['sill_depth']:.1f} m."
-                ),
+                text=_stats,
                 table={},
                 images=[img],
             )

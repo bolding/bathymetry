@@ -1425,7 +1425,7 @@ def plot_thalweg_comparison(
     coarse = record["coarse"]
     name  = record.get("name", "Thalweg")
 
-    # ── coordinates from fine grid ──────────────────────────────────────────
+    # ── helper ──────────────────────────────────────────────────────────────
     def _get_coord(ds: Any, candidates: list[str]) -> Any:
         for c in candidates:
             if c in ds.coords or c in ds:
@@ -1434,26 +1434,19 @@ def plot_thalweg_comparison(
                     return arr
         return None
 
-    def _get_2d(ds: Any, candidates: list[str]) -> Any:
-        """Return 2-D lon or lat array, promoting 1-D regular grids via meshgrid."""
-        arr = _get_coord(ds, candidates)
-        return arr if arr is not None and arr.ndim == 2 else arr  # returned as-is; caller meshgrids if 1D
-
-    _fine_lon_raw = _get_coord(fine_ds, ["lon", "longitude", "lont", "nav_lon"])
-    _fine_lat_raw = _get_coord(fine_ds, ["lat", "latitude", "latt", "nav_lat"])
-    if _fine_lon_raw is not None and _fine_lat_raw is not None:
-        if _fine_lon_raw.ndim == 1 and _fine_lat_raw.ndim == 1:
-            fine_lon, fine_lat = np.meshgrid(_fine_lon_raw, _fine_lat_raw)
+    # ── coarse grid arrays (map background) ──────────────────────────────────
+    _clon_raw = _get_coord(coarse_ds, ["lon", "longitude", "lont", "nav_lon"])
+    _clat_raw = _get_coord(coarse_ds, ["lat", "latitude", "latt", "nav_lat"])
+    if _clon_raw is not None and _clat_raw is not None:
+        if _clon_raw.ndim == 1 and _clat_raw.ndim == 1:
+            coarse_lon2d, coarse_lat2d = np.meshgrid(_clon_raw, _clat_raw)
         else:
-            fine_lon, fine_lat = _fine_lon_raw, _fine_lat_raw
+            coarse_lon2d, coarse_lat2d = _clon_raw, _clat_raw
     else:
-        fine_lon = fine_lat = None
-    fine_depth = fine_ds["depth"].values if hasattr(fine_ds["depth"], "values") else fine_ds["depth"]
-    _mask_key  = "mask" if "mask" in fine_ds else "land"
-    _fine_mask_raw = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]
-    # "land" → True = land (invert to get wet); "mask" → True = wet
-    fine_mask_wet = (~_fine_mask_raw.astype(bool) if _mask_key == "land"
-                     else _fine_mask_raw.astype(bool))
+        coarse_lon2d = coarse_lat2d = None
+    _cdepth = coarse_ds["depth"].values if hasattr(coarse_ds["depth"], "values") else coarse_ds["depth"]
+    _cmask  = coarse_ds["mask"].values  if hasattr(coarse_ds["mask"],  "values") else coarse_ds["mask"]
+    coarse_depth_bg = np.where(_cmask.astype(bool), _cdepth, np.nan)
 
     # ── figure layout ────────────────────────────────────────────────────────
     geo = ccrs.PlateCarree()
@@ -1463,7 +1456,6 @@ def plot_thalweg_comparison(
     ax_prof = fig.add_subplot(gs[1])
 
     # ── map extent — zoom to thalweg path bounding box ──────────────────────
-    depth_vmax = max(1.0, float(np.nanmax(fine["depth"])))
     p_lon_min  = float(np.nanmin(fine["lon"]))
     p_lon_max  = float(np.nanmax(fine["lon"]))
     p_lat_min  = float(np.nanmin(fine["lat"]))
@@ -1476,15 +1468,19 @@ def plot_thalweg_comparison(
         crs=geo,
     )
 
-    # ── shared depth colormap — fine background and coarse scatter use same scale
+    # ── shared depth colormap — coarse background and coarse path dots share scale
+    depth_vmax = max(
+        1.0,
+        float(np.nanmax(fine["depth"])),
+        float(np.nanmax(coarse_depth_bg)) if coarse_lon2d is not None else 0.0,
+    )
     cmap = cmocean.cm.deep
     norm = plt.Normalize(vmin=0, vmax=depth_vmax)
 
-    # ── left panel: map ──────────────────────────────────────────────────────
-    if fine_lon is not None and fine_lat is not None:
-        depth_plot = np.where(fine_mask_wet, fine_depth, np.nan)
+    # ── left panel: map — coarse grid as background ──────────────────────────
+    if coarse_lon2d is not None and coarse_lat2d is not None:
         pcm = ax_map.pcolormesh(  # type: ignore[union-attr]
-            fine_lon, fine_lat, depth_plot,
+            coarse_lon2d, coarse_lat2d, coarse_depth_bg,
             cmap=cmap, norm=norm, shading="auto", transform=geo,
         )
         plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.75, pad=0.02)
@@ -1507,11 +1503,11 @@ def plot_thalweg_comparison(
     ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
         c=coarse["depth"], cmap=cmap, norm=norm,
-        s=18, zorder=6, label="Coarse depth", transform=geo,
+        s=8, zorder=6, label="Coarse depth", transform=geo,
     )
     ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
-        c="black", s=3, zorder=7, transform=geo,
+        c="black", s=1, zorder=7, transform=geo,
     )
 
     # start / end markers — prefer stored boundary detection coordinates so

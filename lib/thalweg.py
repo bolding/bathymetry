@@ -1168,6 +1168,16 @@ def boundary_thalwegs(
             c_valid = np.isfinite(coarse_dep)
             coarse_sill = float(np.nanmin(coarse_dep[c_valid])) if c_valid.any() else np.nan
 
+            # Along-path statistics
+            fine_dep_arr = np.array(fine["depth"])
+            both_valid = c_valid & np.isfinite(fine_dep_arr)
+            if both_valid.any():
+                diff = fine_dep_arr[both_valid] - coarse_dep[both_valid]
+                path_mae  = float(np.mean(np.abs(diff)))
+                path_rmse = float(np.sqrt(np.mean(diff ** 2)))
+            else:
+                path_mae = path_rmse = float("nan")
+
             seg1 = s1.get("segment", 0)
             seg2 = s2.get("segment", 0)
             name = f"{s1['edge']}[{seg1}]→{s2['edge']}[{seg2}]"
@@ -1184,6 +1194,8 @@ def boundary_thalwegs(
                 },
                 "sill_deficit_m": (fine["sill_depth"] - coarse_sill
                                    if np.isfinite(coarse_sill) else np.nan),
+                "path_mae_m":  path_mae,
+                "path_rmse_m": path_rmse,
                 "start_lon": s1["lon"],
                 "start_lat": s1["lat"],
                 "end_lon":   s2["lon"],
