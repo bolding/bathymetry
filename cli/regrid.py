@@ -543,6 +543,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     )
     thalweg_min_sill    = float(_tw_cfg.get("min_sill_m",     5.0))
     thalweg_max_detour  = float(_tw_cfg.get("max_detour",     2.5))
+    # Boundary auto-detection uses a looser detour limit: the MST finds the
+    # deepest-water route between two model boundaries, which can be longer
+    # than the straight-line distance.  The waypoint limit (2.5×) blocked
+    # legitimate deep-basin detours; 20× still rejects truly circular paths.
+    thalweg_bdy_detour  = float(_tw_cfg.get("boundary_max_detour", 20.0))
     thalweg_sill_dedup  = float(_tw_cfg.get("sill_dedup_tol_m", 2.0))
     _thalweg_boundaries_csv = _tw_cfg.get("boundaries_csv", None)
     if _thalweg_boundaries_csv:
@@ -1212,7 +1217,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             tw_b = thalwegmod.boundary_thalwegs(
                 _thalweg_src, dst,
                 min_sill_m=thalweg_min_sill,
-                max_detour=thalweg_max_detour,
+                max_detour=thalweg_bdy_detour,
                 sill_dedup_tol_m=thalweg_sill_dedup,
                 boundaries_csv=_thalweg_boundaries_csv,
             )
