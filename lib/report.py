@@ -1433,6 +1433,20 @@ def plot_thalweg_comparison(
     ax_map  = fig.add_subplot(gs[0], projection=geo)
     ax_prof = fig.add_subplot(gs[1])
 
+    # ── map extent — always use the coarse (target) domain ──────────────────
+    coarse_lon = _get_2d(coarse_ds, ["lon", "longitude", "lont", "nav_lon"])
+    coarse_lat = _get_2d(coarse_ds, ["lat", "latitude", "latt", "nav_lat"])
+    if coarse_lon is not None and coarse_lat is not None:
+        c_lon_min, c_lon_max = float(coarse_lon.min()), float(coarse_lon.max())
+        c_lat_min, c_lat_max = float(coarse_lat.min()), float(coarse_lat.max())
+        lon_margin = (c_lon_max - c_lon_min) * 0.03
+        lat_margin = (c_lat_max - c_lat_min) * 0.03
+        ax_map.set_extent(  # type: ignore[union-attr]
+            [c_lon_min - lon_margin, c_lon_max + lon_margin,
+             c_lat_min - lat_margin, c_lat_max + lat_margin],
+            crs=geo,
+        )
+
     # ── left panel: map ──────────────────────────────────────────────────────
     if fine_lon is not None and fine_lat is not None:
         depth_plot = np.where(fine_mask.astype(bool), fine_depth, np.nan)
@@ -1441,15 +1455,6 @@ def plot_thalweg_comparison(
             cmap="Blues", shading="auto", transform=geo,
         )
         plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.85)
-
-        # set extent from fine grid bounds with a small margin
-        lon_margin = (fine_lon.max() - fine_lon.min()) * 0.05
-        lat_margin = (fine_lat.max() - fine_lat.min()) * 0.05
-        ax_map.set_extent(  # type: ignore[union-attr]
-            [fine_lon.min() - lon_margin, fine_lon.max() + lon_margin,
-             fine_lat.min() - lat_margin, fine_lat.max() + lat_margin],
-            crs=geo,
-        )
 
     ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
     ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]

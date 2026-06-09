@@ -574,6 +574,44 @@ def _path_to_profile(
     }
 
 
+def _clip_profile_to_domain(
+    fine: dict,
+    lon_min: float, lon_max: float,
+    lat_min: float, lat_max: float,
+) -> dict:
+    """Return the first contiguous sub-path that lies within the domain box.
+
+    The fine source is padded beyond the coarse domain so boundary-start paths
+    begin outside the domain.  Clipping to the coarse extent keeps only the
+    portion that matters and ensures sill statistics are computed inside the
+    model domain.
+    """
+    in_domain = (
+        (fine["lon"] >= lon_min) & (fine["lon"] <= lon_max) &
+        (fine["lat"] >= lat_min) & (fine["lat"] <= lat_max)
+    )
+    if not in_domain.any():
+        return fine  # nothing inside domain — return unchanged
+
+    idx = np.where(in_domain)[0]
+    i0, i1 = int(idx[0]), int(idx[-1]) + 1
+
+    depths_c = fine["depth"][i0:i1]
+    dist_c   = fine["dist_km"][i0:i1] - fine["dist_km"][i0]
+    valid    = np.isfinite(depths_c) & (depths_c > 0)
+    sill     = float(np.nanmin(depths_c[valid])) if valid.any() else np.nan
+    sill_d   = float(dist_c[int(np.where(valid, depths_c, np.inf).argmin())]) if valid.any() else np.nan
+
+    return {
+        "lon":          fine["lon"][i0:i1],
+        "lat":          fine["lat"][i0:i1],
+        "dist_km":      dist_c,
+        "depth":        depths_c,
+        "sill_depth":   sill,
+        "sill_dist_km": sill_d,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Mode B: boundary auto-detection
 # ---------------------------------------------------------------------------
@@ -720,6 +758,11 @@ def boundary_thalwegs(
                 continue
 
             fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
+            fine = _clip_profile_to_domain(
+                fine,
+                float(dst_lon2d.min()), float(dst_lon2d.max()),
+                float(dst_lat2d.min()), float(dst_lat2d.max()),
+            )
 
             if fine["sill_depth"] < min_sill_m:
                 continue
@@ -852,6 +895,11 @@ def waypoint_thalwegs(
             continue
 
         fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
+        fine = _clip_profile_to_domain(
+            fine,
+            float(dst_lon2d.min()), float(dst_lon2d.max()),
+            float(dst_lat2d.min()), float(dst_lat2d.max()),
+        )
         coarse_dep = _sample_coarse(
             fine["lon"], fine["lat"], coarse_tree, coarse_dep_arr,  # type: ignore[arg-type]
             max_dist_deg=max_lookup,
