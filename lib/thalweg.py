@@ -631,12 +631,12 @@ def _clip_profile_to_domain(
     lon_min: float, lon_max: float,
     lat_min: float, lat_max: float,
 ) -> dict:
-    """Return the first contiguous sub-path that lies within the domain box.
+    """Return the longest contiguous sub-path that lies within the domain box.
 
     The fine source is padded beyond the coarse domain so boundary-start paths
-    begin outside the domain.  Clipping to the coarse extent keeps only the
-    portion that matters and ensures sill statistics are computed inside the
-    model domain.
+    may begin outside the domain.  Taking the longest contiguous in-domain run
+    keeps the relevant portion and ensures sill statistics are computed inside
+    the model domain, even if the path briefly exits and re-enters.
     """
     in_domain = (
         (fine["lon"] >= lon_min) & (fine["lon"] <= lon_max) &
@@ -645,8 +645,19 @@ def _clip_profile_to_domain(
     if not in_domain.any():
         return fine  # nothing inside domain — return unchanged
 
-    idx = np.where(in_domain)[0]
-    i0, i1 = int(idx[0]), int(idx[-1]) + 1
+    # Find the longest contiguous run of in-domain points
+    best_start = best_len = cur_start = cur_len = 0
+    for k, inside in enumerate(in_domain):
+        if inside:
+            if cur_len == 0:
+                cur_start = k
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start = cur_start
+        else:
+            cur_len = 0
+    i0, i1 = best_start, best_start + best_len
 
     depths_c = fine["depth"][i0:i1]
     dist_c   = fine["dist_km"][i0:i1] - fine["dist_km"][i0]
@@ -937,14 +948,26 @@ def boundary_thalwegs(
     max_lookup = float(max(abs(np.diff(src_lon)).mean(),
                           abs(np.diff(src_lat)).mean()) * 25)
 
-    # Build MST once — all pair queries share it
-    logger.info("      building max-bottleneck MST …")
-    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
-
+    # Coarse domain bounds (needed for both MST restriction and snap)
     _dom_lon_min = float(dst_lon2d.min())
     _dom_lon_max = float(dst_lon2d.max())
     _dom_lat_min = float(dst_lat2d.min())
     _dom_lat_max = float(dst_lat2d.max())
+
+    # Restrict fine-grid MST to cells inside the coarse domain.
+    # The fine source is padded beyond the coarse domain; without this
+    # restriction the max-bottleneck algorithm finds deeper routes through the
+    # padded area (e.g. the open North Sea west of a western boundary), which
+    # produces paths that exit and re-enter the domain and inflate distances.
+    _in_domain_f = (
+        (lon2d_f >= _dom_lon_min) & (lon2d_f <= _dom_lon_max) &
+        (lat2d_f >= _dom_lat_min) & (lat2d_f <= _dom_lat_max)
+    )
+    src_mask_mst = src_mask & _in_domain_f
+
+    # Build MST once — all pair queries share it
+    logger.info("      building max-bottleneck MST …")
+    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask_mst)
 
     def _snap_to_fine(lo: float, la: float) -> tuple[int, int] | None:
         """Snap to the nearest wet fine-grid cell that lies inside the coarse domain.
@@ -1021,11 +1044,6 @@ def boundary_thalwegs(
     seen_pairs: set[frozenset]                        = set()
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
-
-    _dom_lon_min = float(dst_lon2d.min())
-    _dom_lon_max = float(dst_lon2d.max())
-    _dom_lat_min = float(dst_lat2d.min())
-    _dom_lat_max = float(dst_lat2d.max())
 
     logger.info("      coarse domain: lon [%.3f, %.3f] lat [%.3f, %.3f]",
                 _dom_lon_min, _dom_lon_max, _dom_lat_min, _dom_lat_max)
