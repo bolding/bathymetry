@@ -7,10 +7,15 @@ source and destination tile geometry, so repeated runs on the same grids skip
 the expensive weight-computation step.
 
 Two fields are produced from a single regridder:
-- depth      – area-weighted mean over ocean source cells (source NaN on land
-               → FRACAREA normalisation)
+- depth      – area-weighted mean over ocean source cells only.
+               Land cells are set to 0 in the source; after regridding both
+               depth and the ocean-fraction field, depth is divided by the
+               ocean fraction to recover the ocean-only average.  This avoids
+               NaN propagation through the sparse weight multiply (NaN-for-land
+               would contaminate any coarse cell that overlaps even one land
+               fine cell, yielding the erroneous min_depth everywhere).
 - wet_fraction – fraction of each destination cell covered by ocean source
-               cells (source 1/0 no NaN → DSTAREA normalisation)
+               cells (source 1/0 → conservative weighted sum)
 
 Both fields share exactly the same conservative weights because xESMF applies
 NaN handling at field-application time, not at weight-computation time.
@@ -127,9 +132,6 @@ def regrid(
         ocean_mask = ocean_mask & (wetfrac_out >= min_wet_fraction)
 
     depth_out = np.where(ocean_mask, depth_out, 0.0)
-
-    # Replace NaN depths that slipped through (unmapped cells)
-    depth_out = np.where(np.isnan(depth_out), 0.0, depth_out)
 
     # Clamp shallow cells
     if min_depth > 0.0:
@@ -343,8 +345,20 @@ def _regrid_single(
 
     regridder = _get_tile_regridder(xe, src_ds, dst_ds, cache_dir)
 
+    # Land cells are set to 0 (not NaN) so NaN does not propagate through the
+    # sparse weight matrix.  After regridding both fields we recover the
+    # ocean-only area-weighted average by dividing by the wet fraction:
+    #
+    #   depth_num  = W @ depth_zeros  = sum_{ocean s}(W_{ds} * depth_s)
+    #   wetfrac    = W @ ocean_flag   = sum_{ocean s}(W_{ds})
+    #   depth_avg  = depth_num / wetfrac   ← area-weighted mean of ocean cells
+    #
+    # With FRACAREA weights (sum_s W_{ds} = 1) this is the correct exclusive
+    # ocean average.  NaN-for-land would propagate through the sparse multiply
+    # and make any coarse cell that overlaps even a single land fine cell NaN,
+    # which is then replaced by 0 and clamped to min_depth — too shallow.
     depth_src = xr.DataArray(
-        np.where(src["land"].values, np.nan, src["depth"].values.astype(np.float64)),
+        np.where(src["land"].values, 0.0, src["depth"].values.astype(np.float64)),
         dims=["lat", "lon"],
         coords={"lat": src.lat.values, "lon": src.lon.values},
     )
@@ -354,8 +368,11 @@ def _regrid_single(
         coords={"lat": src.lat.values, "lon": src.lon.values},
     )
 
-    depth_out   = np.asarray(regridder(depth_src)).reshape(ny, nx)
+    depth_num   = np.asarray(regridder(depth_src)).reshape(ny, nx)
     wetfrac_out = np.asarray(regridder(ocean_src)).reshape(ny, nx)
+
+    # Ocean-only average; cells with no ocean source remain 0 / NaN-free
+    depth_out = np.where(wetfrac_out > 0, depth_num / wetfrac_out, 0.0)
 
     return depth_out, wetfrac_out
 
@@ -399,8 +416,9 @@ def _regrid_tiled(
     depth_out   = np.full((ny, nx), np.nan)
     wetfrac_out = np.zeros((ny, nx))
 
-    # Pre-convert full source arrays (subsetting is done per tile via index arrays)
-    depth_src_full = np.where(src["land"].values, np.nan, src["depth"].values).astype(np.float64)
+    # Pre-convert full source arrays (subsetting is done per tile via index arrays).
+    # Land cells are filled with 0 (not NaN) — see _regrid_single for the rationale.
+    depth_src_full = np.where(src["land"].values, 0.0, src["depth"].values).astype(np.float64)
     ocean_src_full = (~src["land"].values).astype(np.float64)
     src_lon = src.lon.values
     src_lat = src.lat.values
@@ -474,8 +492,11 @@ def _regrid_tiled(
                 coords={"lat": tile_lat, "lon": tile_lon},
             )
 
-            tile_d = np.asarray(regridder(depth_da)).reshape(j1 - j0, i1 - i0)
-            tile_w = np.asarray(regridder(ocean_da)).reshape(j1 - j0, i1 - i0)
+            tile_num = np.asarray(regridder(depth_da)).reshape(j1 - j0, i1 - i0)
+            tile_w   = np.asarray(regridder(ocean_da)).reshape(j1 - j0, i1 - i0)
+
+            # Ocean-only average depth (divide by wet fraction)
+            tile_d = np.where(tile_w > 0, tile_num / tile_w, 0.0)
 
             depth_out[j0:j1, i0:i1]   = tile_d
             wetfrac_out[j0:j1, i0:i1] = tile_w
