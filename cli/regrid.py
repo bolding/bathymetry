@@ -544,6 +544,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     thalweg_min_sill    = float(_tw_cfg.get("min_sill_m",     5.0))
     thalweg_max_detour  = float(_tw_cfg.get("max_detour",     2.5))
     thalweg_sill_dedup  = float(_tw_cfg.get("sill_dedup_tol_m", 2.0))
+    _thalweg_boundaries_csv = _tw_cfg.get("boundaries_csv", None)
+    if _thalweg_boundaries_csv:
+        # Resolve path relative to config file
+        _cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else "."
+        _thalweg_boundaries_csv = os.path.join(_cfg_dir, _thalweg_boundaries_csv)
     _thalweg_default = bool(_tw_cfg.get("enabled", bool(user_waypoints_cfg)))
     run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
 
@@ -1199,12 +1204,17 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 thalweg_records.extend(tw_a)
                 logger.info("      strait-based: %d thalweg(s)", len(tw_a))
 
-            # Mode B: boundary auto-detection (one start per wet segment per edge)
+            # Mode B: boundary auto-detection
+            # boundary_thalwegs detects starts on the coarse grid edges and
+            # snaps them to the fine grid by default. Supply boundaries_csv
+            # when the open boundaries are not at the physical coarse grid
+            # edges (e.g. a custom skamix-style domain).
             tw_b = thalwegmod.boundary_thalwegs(
                 _thalweg_src, dst,
                 min_sill_m=thalweg_min_sill,
                 max_detour=thalweg_max_detour,
                 sill_dedup_tol_m=thalweg_sill_dedup,
+                boundaries_csv=_thalweg_boundaries_csv,
             )
             thalweg_records.extend(tw_b)
             logger.info("      boundary auto: %d thalweg(s)", len(tw_b))

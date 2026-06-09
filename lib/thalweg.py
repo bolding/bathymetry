@@ -735,12 +735,160 @@ def _boundary_starts(
     return starts
 
 
+def boundary_starts_from_csv(
+    csv_path: str,
+    depth: npt.NDArray,
+    mask: npt.NDArray,
+    lon2d: npt.NDArray,
+    lat2d: npt.NDArray,
+) -> list[dict]:
+    """Detect open-boundary start cells from a lon/lat CSV file.
+
+    The CSV defines the boundary cells of a model domain (e.g. exported from
+    GETM/NEMO boundary tooling).  Each row is one boundary cell; physically
+    disconnected boundaries appear as jumps in the sequence.
+
+    Algorithm
+    ---------
+    1. Parse CSV, skipping header lines (any row that contains non-numeric
+       tokens in the first two columns).
+    2. Split into *CSV segments* wherever the spacing between consecutive
+       rows exceeds 5 × the median row spacing (gap-detection).
+    3. For each CSV segment, map every lon/lat to the nearest fine-grid cell
+       index.
+    4. Within the mapped fine-grid indices, find *wet sub-segments*: groups of
+       consecutive cells where |Δrow| ≤ 2 and |Δcol| ≤ 2 (cells that are
+       adjacent in index space, allowing diagonal steps) and the cell is wet.
+    5. Return the deepest wet cell of each sub-segment as a start dict
+       (same schema as :func:`_boundary_starts`).
+
+    The ``edge`` label is ``bdy{i}`` for segment *i*; when a CSV segment
+    splits into multiple wet sub-segments the label is ``bdy{i}_{j}``.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the boundary CSV.  Expected columns: ``lon``, ``lat``
+        (first two numeric columns after any header).
+    depth, mask, lon2d, lat2d : ndarray
+        Fine-grid arrays — same as those passed to :func:`_boundary_starts`.
+    """
+    import csv as _csv
+
+    # --- 1. Parse CSV ---
+    raw_lons: list[float] = []
+    raw_lats: list[float] = []
+    with open(csv_path, newline="") as fh:
+        for row in _csv.reader(fh):
+            if len(row) < 2:
+                continue
+            try:
+                lo = float(row[0])
+                la = float(row[1])
+            except ValueError:
+                continue  # header or non-numeric line
+            raw_lons.append(lo)
+            raw_lats.append(la)
+
+    if len(raw_lons) < 2:
+        logger.warning("boundary_starts_from_csv: no data rows in %s", csv_path)
+        return []
+
+    lons_arr = np.array(raw_lons, dtype=float)
+    lats_arr = np.array(raw_lats, dtype=float)
+
+    # --- 2. Detect CSV-level segments by gap in row spacing ---
+    dists = np.sqrt(np.diff(lons_arr) ** 2 + np.diff(lats_arr) ** 2)
+    median_d = float(np.median(dists))
+    gap_thresh = 5.0 * median_d if median_d > 0 else 1e-3
+    gap_idx = np.where(dists > gap_thresh)[0]  # indices *before* the gap
+
+    seg_bounds: list[tuple[int, int]] = []
+    prev = 0
+    for gi in gap_idx:
+        seg_bounds.append((prev, int(gi) + 1))
+        prev = int(gi) + 1
+    seg_bounds.append((prev, len(lons_arr)))
+
+    # Unique lon/lat arrays for the fine source (1-D)
+    src_lon_1d = lon2d[0, :]  # first row gives unique lons (regular grid)
+    src_lat_1d = lat2d[:, 0]  # first col gives unique lats
+
+    def _nearest_ij(lo: float, la: float) -> tuple[int, int]:
+        ci = int(np.argmin(np.abs(src_lon_1d - lo)))
+        ri = int(np.argmin(np.abs(src_lat_1d - la)))
+        return (ri, ci)
+
+    starts: list[dict] = []
+
+    for seg_i, (s0, s1) in enumerate(seg_bounds):
+        seg_lons = lons_arr[s0:s1]
+        seg_lats = lats_arr[s0:s1]
+        n_pts = s1 - s0
+
+        # --- 3. Map lon/lat → fine-grid (row, col) ---
+        ijs = [_nearest_ij(seg_lons[k], seg_lats[k]) for k in range(n_pts)]
+
+        # --- 4. Contiguous wet sub-segments on the fine grid ---
+        sub_groups: list[list[int]] = []
+        cur_group: list[int] = []
+        for k, (ri, ci) in enumerate(ijs):
+            if mask[ri, ci]:
+                if not cur_group:
+                    cur_group.append(k)
+                else:
+                    prev_ri, prev_ci = ijs[cur_group[-1]]
+                    if abs(ri - prev_ri) <= 2 and abs(ci - prev_ci) <= 2:
+                        cur_group.append(k)
+                    else:
+                        sub_groups.append(cur_group)
+                        cur_group = [k]
+            else:
+                if cur_group:
+                    sub_groups.append(cur_group)
+                    cur_group = []
+        if cur_group:
+            sub_groups.append(cur_group)
+
+        n_subs = len(sub_groups)
+        if n_subs == 0:
+            logger.debug("boundary_starts_from_csv: seg %d has no wet cells — skipped", seg_i)
+            continue
+
+        for sub_j, grp in enumerate(sub_groups):
+            grp_ijs = [ijs[k] for k in grp]
+            grp_d   = np.array([depth[ri, ci] for ri, ci in grp_ijs], dtype=float)
+            best    = int(np.argmax(grp_d))
+            ri, ci  = grp_ijs[best]
+
+            edge_label = f"bdy{seg_i}" if n_subs == 1 else f"bdy{seg_i}_{sub_j}"
+            starts.append({
+                "edge":    edge_label,
+                "segment": sub_j,
+                "ij":      (ri, ci),
+                "lon":     float(lon2d[ri, ci]),
+                "lat":     float(lat2d[ri, ci]),
+                "depth":   float(depth[ri, ci]),
+            })
+            logger.debug(
+                "      boundary_starts_from_csv: %s  ij=(%d,%d)  lon=%.3f lat=%.3f  depth=%.1f m",
+                edge_label, ri, ci, lon2d[ri, ci], lat2d[ri, ci], depth[ri, ci],
+            )
+
+    logger.info(
+        "      boundary_starts_from_csv: %d CSV segment(s) → %d start(s)",
+        len(seg_bounds), len(starts),
+    )
+    return starts
+
+
 def boundary_thalwegs(
     src,
     dst,
     min_sill_m: float = 5.0,
     max_detour: float = 2.5,
     sill_dedup_tol_m: float = 2.0,
+    boundaries_csv: str | None = None,
 ) -> list[dict]:
     """Auto-detect thalwegs starting from wet segments on each domain edge.
 
@@ -758,6 +906,10 @@ def boundary_thalwegs(
         Coarse regridded bathymetry.
     min_sill_m : float
         Discard paths whose fine-resolution sill depth is below this value.
+    boundaries_csv : str or None
+        Optional path to a lon/lat CSV that defines open boundary cells.  When
+        given, :func:`boundary_starts_from_csv` is used instead of the default
+        physical-edge detection :func:`_boundary_starts`.
 
     Returns
     -------
@@ -789,7 +941,50 @@ def boundary_thalwegs(
     logger.info("      building max-bottleneck MST …")
     mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
 
-    starts = _boundary_starts(src_depth, src_mask, lon2d_f, lat2d_f)
+    def _snap_to_fine(lo: float, la: float) -> tuple[int, int] | None:
+        """Snap a geographic point to the nearest wet fine-grid cell."""
+        ci = int(np.argmin(np.abs(src_lon - lo)))
+        ri = int(np.argmin(np.abs(src_lat - la)))
+        r0 = max(0, ri - 8);  r1 = min(len(src_lat), ri + 9)
+        c0 = max(0, ci - 8);  c1 = min(len(src_lon), ci + 9)
+        sub = src_mask[r0:r1, c0:c1]
+        if not sub.any():
+            return None
+        sub_d = src_depth[r0:r1, c0:c1]
+        best = np.unravel_index(int(np.where(sub, sub_d, -np.inf).argmax()), sub.shape)
+        return (r0 + int(best[0]), c0 + int(best[1]))
+
+    if boundaries_csv:
+        logger.info("      reading boundary starts from CSV: %s", boundaries_csv)
+        starts = boundary_starts_from_csv(
+            boundaries_csv, src_depth, src_mask, lon2d_f, lat2d_f
+        )
+    else:
+        # Detect boundary segments on the coarse grid, then snap to fine.
+        # This correctly handles cases where the fine source extends beyond
+        # the coarse domain (the fine j=0 row may be all land at latitudes
+        # inside the coarse domain, so direct fine-edge detection would miss
+        # them; coarse-edge detection gives the right positions).
+        coarse_depth_for_bdy = np.where(dst_mask2d, dst_depth2d, 0.0)
+        raw_starts = _boundary_starts(coarse_depth_for_bdy, dst_mask2d,
+                                      dst_lon2d, dst_lat2d)
+        starts = []
+        for cs in raw_starts:
+            ij = _snap_to_fine(cs["lon"], cs["lat"])
+            if ij is None:
+                logger.debug("      boundary start %s (%.3f,%.3f) — no wet fine cell nearby, skipped",
+                             cs["edge"], cs["lon"], cs["lat"])
+                continue
+            ri, ci = ij
+            starts.append({
+                "edge":    cs["edge"],
+                "segment": cs["segment"],
+                "ij":      ij,
+                "lon":     float(lon2d_f[ri, ci]),
+                "lat":     float(lat2d_f[ri, ci]),
+                "depth":   float(src_depth[ri, ci]),
+            })
+
     logger.info("      %d boundary start(s) on %d edge(s)",
                 len(starts),
                 len({s["edge"] for s in starts}))
