@@ -160,13 +160,19 @@ def save_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
         writer.writerows(rows)
 
 
-def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
-    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT)."""
+def save_fixes_yaml(
+    records: list[dict],
+    path: str | Path,
+    bridge_records: list[dict] | None = None,
+) -> None:
+    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Build per-category lists in priority order
-    groups: dict[str, list[dict]] = {"BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": []}
+    groups: dict[str, list[dict]] = {
+        "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [], "LAND_BRIDGE": [],
+    }
     for r in records:
         cat = r["category"]
         if cat == "BLOCKED":
@@ -183,6 +189,17 @@ def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
                                            "value": round(r["sill_depth_fine"] * 0.9, 1),
                                            "_note": f"AREA_DEFICIT — area_ratio={r['area_ratio']}"})
 
+    for r in (bridge_records or []):
+        groups["LAND_BRIDGE"].append({
+            "lon": r["lon"], "lat": r["lat"],
+            "action": "open_cell", "depth": r["estimated_depth"],
+            "_note": (
+                f"LAND_BRIDGE — wet_fraction={r['wet_fraction']}, "
+                f"bridges {r['n_components']} basin(s), "
+                f"estimated depth {r['estimated_depth']} m"
+            ),
+        })
+
     def _write_fix(fh, fix: dict) -> None:
         fh.write(f"  - lon: {fix['lon']}\n")
         fh.write(f"    lat: {fix['lat']}\n")
@@ -197,6 +214,7 @@ def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
         "BLOCKED":      "No fine wet path — open_cell to reconnect",
         "SILL_DEFICIT": "Coarse sill too shallow — set_depth to fine-grid sill",
         "AREA_DEFICIT": "Cross-section under-represented — deepen to improve transport",
+        "LAND_BRIDGE":  "Land cell (wet_frac > 0) between disconnected basins — open_cell to reconnect",
     }
 
     with open(path, "w") as fh:
@@ -207,7 +225,8 @@ def save_fixes_yaml(records: list[dict], path: str | Path) -> None:
         for cat, fixes in groups.items():
             if not fixes:
                 continue
-            fh.write(f"\n  # --- {cat}: {category_desc[cat]} ({len(fixes)} interface(s)) ---\n")
+            item_word = "interface(s)" if cat != "LAND_BRIDGE" else "cell(s)"
+            fh.write(f"\n  # --- {cat}: {category_desc[cat]} ({len(fixes)} {item_word}) ---\n")
             for fix in fixes:
                 _write_fix(fh, fix)
 

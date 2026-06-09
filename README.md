@@ -253,16 +253,17 @@ output:
 | 1 | `grid` | Build target grid from parameters |
 | 2 | `reader` | Read and clip fine-resolution source bathymetry |
 | 3 | `interpolate` | xESMF conservative regrid; weight file cached for reuse |
-| 4a | `analysis` | Flag narrow / blocked interfaces (SILL_DEFICIT, AREA_DEFICIT, BLOCKED) |
-| 4b | `analysis` | Apply user fixes from `fixes:` (set_depth, open_cell, close_cell) |
-| 4c | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
-| 4d | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
+| 4a | `analysis` | Apply user fixes from `fixes:` (set_depth, open_cell, close_cell) |
+| 4b | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
+| 4c | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
+| 4c-ii | `analysis` | Detect LAND_BRIDGE cells (forced-land with wet_fraction > 0 between disconnected basins) |
+| 4d | `analysis` | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT) |
 | 5 | `smooth` | rx0 slope smoothing via linear programming (optional) |
 | 6 | — | Write output NetCDF + final plots for every depth variable |
 
-**Why 4c before 4d?**  
-Masking the mouth of a fjord or lagoon (4c) makes the interior cells
-disconnected from the main ocean.  Running isolation masking afterwards (4d)
+**Why 4b before 4c?**  
+Masking the mouth of a fjord or lagoon (4b) makes the interior cells
+disconnected from the main ocean.  Running isolation masking afterwards (4c)
 then removes those interior cells automatically without requiring them to be
 listed individually.
 
@@ -381,12 +382,13 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `{name}_03_wet_fraction.png` | Wet fraction per coarse cell (cmocean *amp*) |
 | `{name}_03b_source_comparison.png` | Side-by-side source comparison (if `source2:` given) |
 | `{name}_03b_depth_diff.png` | Depth difference `source − source2` on common cells |
-| `{name}_04a_straits.png/.html` | Strait analysis map (interactive) |
-| `{name}_04a_straits.csv` | Flagged interface table |
-| `{name}_04a_section_*.png` | Cross-section profiles with map inset |
-| `{name}_fixes_suggested.yaml` | Suggested strait fixes, grouped by cause (BLOCKED / SILL_DEFICIT / AREA_DEFICIT) |
-| `{name}_04c_mask_regions.png` | Depth after explicit masking (if used) |
-| `{name}_04d_basins.png` | Connected basin map (kept=blue, removed=red) |
+| `{name}_04b_mask_regions.png` | Depth after explicit masking (if used) |
+| `{name}_04c_basins.png` | Connected basin map (kept=blue, removed=red) |
+| `{name}_04c_land_bridges.csv` | Land-bridge cells (if any found) |
+| `{name}_04d_straits.png/.html` | Strait analysis map (interactive) |
+| `{name}_04d_straits.csv` | Flagged interface table |
+| `{name}_04d_section_*.png` | Cross-section profiles with map inset |
+| `fixes_suggested.yaml` | All suggested fixes grouped by cause (BLOCKED / SILL_DEFICIT / AREA_DEFICIT / LAND_BRIDGE) |
 | `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
 | `{name}_06_final_depth.png/.html` | Final unsmoothed bathymetry (interactive) |
 | `{name}_06_final_depth_rx0_*.png/.html` | Final smoothed bathymetry (interactive) |
@@ -408,18 +410,92 @@ lon,lat
 The report Markdown includes a segment table showing the start/stop `(i,j)`
 indices and cell count for each contiguous wet segment per side.
 
-## Strait categories
+## Strait categories and land bridges
 
-| Category | Meaning | Suggested fix |
-|----------|---------|--------------|
-| `SILL_DEFICIT` | Coarse sill shallower than fine-grid sill — dense overflow blocked | `set_depth` to fine-grid sill depth |
-| `AREA_DEFICIT` | Cross-sectional area under-represented — transport too weak | Widen or deepen at the interface |
-| `BLOCKED` | No wet fine-resolution path between two wet coarse cells | `open_cell` on the blocking point |
+The pipeline identifies four categories of connectivity problems and writes
+every suggested fix to `fixes_suggested.yaml` in the report directory.
 
-Suggested fixes are written to `fixes_suggested.yaml`, grouped by cause.
-On the next run, load them automatically with `--accept-fixes` (reads from the
-report directory) or `--fixes-file <path>` for an explicit path.  You can also
-paste selected entries into the `fixes:` section of your YAML config.
+| Category | Detected at step | Meaning | Suggested fix |
+|----------|-----------------|---------|--------------|
+| `BLOCKED` | 4d — strait detection | No wet fine-resolution path between two wet coarse cells | `open_cell` on the blocking point |
+| `SILL_DEFICIT` | 4d — strait detection | Coarse sill shallower than fine-grid sill — dense overflow blocked | `set_depth` to fine-grid sill depth |
+| `AREA_DEFICIT` | 4d — strait detection | Cross-sectional area under-represented — transport too weak | Widen or deepen at the interface |
+| `LAND_BRIDGE` | 4c-ii — bridge detection | Land cell (wet_fraction > 0, forced below `min_wet_fraction`) sits between two disconnected wet basins | `open_cell` on the bridge cell |
+
+`LAND_BRIDGE` cells appear only when `regridding.min_wet_fraction > 0`.  They
+are coarse-grid cells that contain some ocean in the fine-resolution source but
+were eliminated because the ocean fraction was below the threshold.  Raising the
+threshold to eliminate tidal flats may inadvertently block a narrow strait like
+the Little Belt.  Lowering `min_wet_fraction` on just those cells is not
+possible — instead, use `open_cell` fixes to reopen individual bridge cells
+after the run.
+
+## Fixing workflow
+
+The regridding step (step 3) is the most expensive part of the pipeline.
+After the first run the raw post-regrid result is cached as
+`{cache_dir}/{name}_raw_regrid.nc`.  The typical iteration loop is:
+
+```
+First run (full)
+  ↓  inspect  fixes_suggested.yaml  +  04d_straits.csv  +  04c_land_bridges.csv
+  ↓  choose which fixes to apply
+Re-run (fast, skip expensive regrid)
+  ↓  inspect result
+Re-run again (fast) until satisfied
+```
+
+### Option A — automatic: accept all suggestions
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes
+```
+
+Reads every entry in `fixes_suggested.yaml` (all categories, including
+LAND_BRIDGE) and applies them.
+
+### Option B — selective: paste chosen fixes into YAML
+
+Open `fixes_suggested.yaml` and copy the entries you want into the `fixes:`
+section of your config:
+
+```yaml
+fixes:
+  - lon: 9.75
+    lat: 55.56
+    action: open_cell
+    depth: 12.5
+    # LAND_BRIDGE — wet_fraction=0.18, bridges 2 basin(s)
+  - lon: 10.20
+    lat: 57.80
+    action: set_depth
+    value: 48.0
+    # SILL_DEFICIT — sill_ratio=0.52
+```
+
+Then re-run:
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid
+```
+
+### Option C — explicit file
+
+Point to any YAML file that has a top-level `fixes:` list:
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid --fixes-file my_fixes.yaml
+```
+
+### Fix actions
+
+| Action | Effect |
+|--------|--------|
+| `open_cell` | Force the cell ocean at the given depth (m); use for BLOCKED / LAND_BRIDGE |
+| `set_depth` | Force the cell ocean at the given depth (m); use for SILL_DEFICIT |
+| `close_cell` | Force the cell to land (depth=NaN, mask=0); removes a spurious wet cell |
+
+Both `open_cell` and `set_depth` accept `depth:` or `value:` as the depth key.
 
 ## Grid types
 
@@ -452,34 +528,6 @@ The smoothed field is saved as a separate NetCDF variable
 (`depth_rx0_0p20` for rx0=0.2) alongside the unsmoothed `depth`, allowing
 multiple bathymetry variants in a single file.
 
-## Incremental fixing workflow
-
-The regridding step (step 3) is the most expensive part of the pipeline.
-After the first run, the raw post-regrid result is cached as
-`{cache_dir}/{name}_raw_regrid.nc`.  Subsequent runs can load this cache and
-skip straight to the analysis and fixing steps:
-
-```bash
-# First run — regrids and caches the result
-bathymetry-regrid --config my_run.yaml
-
-# Inspect fixes_suggested.yaml, add selected entries to my_run.yaml, then:
-bathymetry-regrid --config my_run.yaml --skip-regrid
-
-# Apply another round of fixes without re-regridding
-bathymetry-regrid --config my_run.yaml --skip-regrid
-```
-
-`--skip-regrid` also pairs with `--accept-fixes`:
-
-```bash
-bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes
-```
-
-The output NetCDF (`{name}.nc`) is always regenerated at the end of each run
-(with the current fixes and smoothing applied), but the raw-regrid cache is
-never overwritten by `--skip-regrid`, so the base data is always recoverable.
-
 ## Mask region workflow
 
 To exclude a water body (fjord, lagoon, estuary) from the model domain:
@@ -487,10 +535,10 @@ To exclude a water body (fjord, lagoon, estuary) from the model domain:
 1. Add a `mask_regions:` entry that covers the **mouth** of the feature.
    Use geographic types (`rectangle`, `polygon`, `point`) when you know the
    coordinates, or index types (`ij_rectangle`, `ij_point`) when you have
-   identified specific cells in the output NetCDF (indices are 0-based row `i`,
-   column `j`).
-2. Rerun.  The masking step (4c) closes the mouth; the isolation step (4d)
-   then automatically removes the now-disconnected interior.
+   identified specific cells in the output NetCDF (0-based: `i` = lon column,
+   `j` = lat row, as shown in ncview).
+2. Rerun with `--skip-regrid`.  The masking step (4b) closes the mouth; the
+   isolation step (4c) then automatically removes the now-disconnected interior.
 
 This avoids having to enumerate every interior cell individually.
 

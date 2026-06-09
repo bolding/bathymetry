@@ -857,7 +857,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Runs AFTER explicit masking (fjord mouth closed → interior removed)
     # and BEFORE strait detection so that isolated basins do not generate
     # spurious interface flags.
+    # Save wet_fraction now: mask_isolated zeroes it for removed cells, but
+    # detect_land_bridges needs the pre-isolation values to find cells that
+    # were forced to land by min_wet_fraction.
     # ------------------------------------------------------------------
+    _pre_isolation_wf = dst["wet_fraction"].values.copy()
     print(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
     dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep))
     iso_sum = analysis.isolation_summary(basin_records)
@@ -887,15 +891,53 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     dst = dst_clean
 
     # ------------------------------------------------------------------
+    # Step 4c-ii – Land-bridge detection
+    # Find land cells (wet_fraction > 0, forced below min_wet_fraction) that
+    # sit between two disconnected wet basins → suggest open_cell fixes.
+    # ------------------------------------------------------------------
+    bridge_records = analysis.detect_land_bridges(
+        dst["mask"].values,
+        _pre_isolation_wf,
+        dst.lon.values,
+        dst.lat.values,
+        depth=np.where(dst["mask"].values, dst["depth"].values, np.nan),
+    )
+    bridge_sum = analysis.land_bridge_summary(bridge_records)
+    report.print_table(bridge_sum, title="Land-bridge detection")
+    if bridge_records:
+        print(f"      {len(bridge_records)} land-bridge cell(s) found")
+        report.save_csv(
+            [{k: v for k, v in r.items() if k != "adjacent_components"}
+             for r in bridge_records],
+            os.path.join(report_dir, pfx + "04c_land_bridges.csv"),
+        )
+        rpt.add_section(
+            "Land-bridge detection",
+            text=(
+                f"{len(bridge_records)} land cell(s) with non-zero wet_fraction "
+                "sit between two or more disconnected wet basins.  "
+                "These were forced to land by `regridding.min_wet_fraction`.  "
+                "Applying an `open_cell` fix restores the connection.  "
+                "Suggested fixes are included in `fixes_suggested.yaml`."
+            ),
+            table=bridge_sum,
+        )
+    else:
+        rpt.add_section("Land-bridge detection", text="No land bridges found.")
+
+    # ------------------------------------------------------------------
     # Step 4d – Strait detection
     # Runs on the basin-cleaned grid so only interfaces between genuinely
     # connected ocean cells are checked — no spurious flags from isolated
     # basins or enclosed seas.
     # ------------------------------------------------------------------
     print("\n[4d/6] Detecting narrow straits …")
+    fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
     if src is None:
         print("      Skipped (--skip-regrid: fine source not available; see previous report).")
         strait_records = []
+        if bridge_records:
+            report.save_fixes_yaml([], fixes_yaml_path, bridge_records=bridge_records)
         rpt.add_section(
             "Strait and connectivity analysis",
             text="Skipped (`--skip-regrid`): fine-resolution source not loaded. "
@@ -919,8 +961,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         csv_path = os.path.join(report_dir, pfx + "04d_straits.csv")
         report.save_csv(clean_records, csv_path)
 
-        fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
-        report.save_fixes_yaml(clean_records, fixes_yaml_path)
+        report.save_fixes_yaml(clean_records, fixes_yaml_path,
+                               bridge_records=bridge_records)
 
         straits_plot = pfx + "04d_straits.png"
         report.plot_straits(

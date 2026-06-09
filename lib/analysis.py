@@ -20,6 +20,10 @@ SILL_DEFICIT
     sill_ratio < sill_ratio_threshold (dense bottom-water inflow blocked)
 BLOCKED
     No continuous fine-resolution wet path exists between the two sub-tiles.
+LAND_BRIDGE
+    A land cell (wet_fraction > 0, forced below ``min_wet_fraction``) that
+    sits between two otherwise-disconnected wet basins.  Opening it would
+    reconnect them.
 
 Works for any grid type (SphericalGrid, RotatedPoleGrid, CartesianGrid).
 Cell extents are estimated from geographic centre-coordinate neighbour distances.
@@ -780,6 +784,90 @@ def apply_mask_regions(
         attrs=dst.attrs,
     )
     return dst_masked, applied
+
+
+def detect_land_bridges(
+    mask: np.ndarray,
+    wet_fraction: np.ndarray,
+    lon_2d: np.ndarray,
+    lat_2d: np.ndarray,
+    depth: Optional[np.ndarray] = None,
+) -> list[dict]:
+    """Find land cells that separate two or more disconnected wet basins.
+
+    After regridding, some cells with non-zero wet_fraction may have been
+    forced to land by the ``min_wet_fraction`` threshold.  If such a cell
+    sits between two otherwise-disconnected wet basins, opening it (via an
+    ``open_cell`` fix) would restore the connection.
+
+    Parameters
+    ----------
+    mask : ndarray [ny, nx]
+        Final ocean mask (1=ocean, 0=land) after isolation masking.
+    wet_fraction : ndarray [ny, nx]
+        Wet fraction from the raw conservative regrid, **before** isolation
+        masking zeroed it.  Non-zero values on land cells identify candidates.
+    lon_2d, lat_2d : ndarray [ny, nx]
+        T-point geographic coordinates.
+    depth : ndarray [ny, nx] or None
+        Final T-point depth (NaN for land).  Used to estimate a suggested
+        depth for the ``open_cell`` fix (mean of adjacent wet cells).
+
+    Returns
+    -------
+    list[dict]
+        One record per LAND_BRIDGE cell.  Fields: ``i``, ``j``, ``lon``,
+        ``lat``, ``wet_fraction``, ``n_components``, ``adjacent_components``,
+        ``estimated_depth``, ``category``, ``suggested_fix``.
+    """
+    from scipy.ndimage import label
+
+    ocean = mask.astype(bool)
+    labelled, _ = label(ocean)
+
+    land_with_wf = (~ocean) & (wet_fraction > 0.0)
+    js, is_ = np.where(land_with_wf)
+
+    ny, nx = mask.shape
+    records: list[dict] = []
+
+    for j, i in zip(js.tolist(), is_.tolist()):
+        adjacent: set[int] = set()
+        adj_depths: list[float] = []
+        for dj, di in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nj, ni = j + dj, i + di
+            if 0 <= nj < ny and 0 <= ni < nx:
+                comp = int(labelled[nj, ni])
+                if comp > 0:
+                    adjacent.add(comp)
+                    if depth is not None and np.isfinite(depth[nj, ni]):
+                        adj_depths.append(float(depth[nj, ni]))
+
+        if len(adjacent) < 2:
+            continue
+
+        est_depth = round(float(np.mean(adj_depths)), 1) if adj_depths else 5.0
+        records.append({
+            "i": int(i),
+            "j": int(j),
+            "lon": float(lon_2d[j, i]),
+            "lat": float(lat_2d[j, i]),
+            "wet_fraction": round(float(wet_fraction[j, i]), 4),
+            "n_components": len(adjacent),
+            "adjacent_components": sorted(adjacent),
+            "category": "LAND_BRIDGE",
+            "estimated_depth": est_depth,
+            "suggested_fix": f"open_cell — bridges {len(adjacent)} disconnected basin(s)",
+        })
+
+    return records
+
+
+def land_bridge_summary(records: list[dict]) -> dict:
+    return {
+        "land-bridge cells found": len(records),
+        "cells connecting ≥3 basins": sum(1 for r in records if r["n_components"] >= 3),
+    }
 
 
 def mask_regions_summary(applied: list[dict]) -> dict:
