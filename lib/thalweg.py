@@ -684,26 +684,31 @@ def _boundary_starts(
     mask: npt.NDArray,
     lon2d: npt.NDArray,
     lat2d: npt.NDArray,
+    max_inward: int = 50,
     max_perp_gap: int = 3,
 ) -> list[dict]:
     """Return the deepest wet cell in each connected wet segment on each domain edge.
 
-    For each column (south/north edges) or row (west/east edges), scans inward
-    from the physical edge to find the *first* wet cell.  This correctly handles
-    domains where mask_regions close off the outermost rows/columns so the
-    effective open boundary is at an interior row (e.g. a Kattegat mouth at
-    j≈15 after a mask_region closes j=0..14).
+    **West / East**: checks only the physical edge column (i=0 or i=nx-1).
+    Wet cells are grouped into contiguous row-segments; land cells are skipped.
+    This preserves the original behaviour for sides where the physical edge IS
+    the model boundary.
 
-    Two adjacent first-wet cells belong to the same segment when:
-    - their traversal index (column for S/N, row for W/E) is consecutive, AND
-    - their perpendicular index (row for S/N, column for W/E) differs by at
-      most *max_perp_gap*.  A larger jump means a different physical boundary.
+    **South / North**: scans inward from the physical edge up to *max_inward*
+    rows, taking the first wet cell per column.  This handles domains where a
+    mask_region closes off the outermost rows so the open boundary is at an
+    interior row (e.g. a Kattegat south opening at j≈15 after a mask_region
+    closes j=0..14).  Adjacent scanned cells belong to the same segment when
+    their column is consecutive AND their row differs by at most *max_perp_gap*;
+    a larger jump (j=0 → j=15) creates a new segment.
 
     Parameters
     ----------
     depth, mask, lon2d, lat2d : ndarray [ny, nx]
+    max_inward : int
+        Maximum rows to scan inward for south/north boundaries.
     max_perp_gap : int
-        Maximum row/col jump between adjacent scanned cells in the same segment.
+        Maximum row difference between adjacent cells in one south/north segment.
 
     Returns
     -------
@@ -712,55 +717,57 @@ def _boundary_starts(
     ny, nx = depth.shape
     starts: list[dict] = []
 
-    def _scan(direction: str) -> list[tuple[int, int]]:
-        """First wet cell per column/row scanning inward from *direction* edge."""
+    def _edge_cells(direction: str) -> list[tuple[int, int]]:
+        """Physical-edge wet cells for west / east."""
+        cells: list[tuple[int, int]] = []
+        if direction == "west":
+            for j in range(ny):
+                if mask[j, 0]:
+                    cells.append((j, 0))
+        else:  # east
+            for j in range(ny):
+                if mask[j, nx - 1]:
+                    cells.append((j, nx - 1))
+        return cells
+
+    def _inward_cells(direction: str) -> list[tuple[int, int]]:
+        """First wet cell per column scanning inward, for south / north."""
         cells: list[tuple[int, int]] = []
         if direction == "south":
             for i in range(nx):
-                for j in range(ny):
+                for j in range(min(ny, max_inward)):
                     if mask[j, i]:
                         cells.append((j, i))
                         break
-        elif direction == "north":
+        else:  # north
             for i in range(nx):
-                for j in range(ny - 1, -1, -1):
-                    if mask[j, i]:
-                        cells.append((j, i))
-                        break
-        elif direction == "west":
-            for j in range(ny):
-                for i in range(nx):
-                    if mask[j, i]:
-                        cells.append((j, i))
-                        break
-        else:  # east
-            for j in range(ny):
-                for i in range(nx - 1, -1, -1):
+                for j in range(ny - 1, max(ny - 1 - max_inward, -1), -1):
                     if mask[j, i]:
                         cells.append((j, i))
                         break
         return cells
 
     for direction in ("west", "east", "south", "north"):
-        cells = _scan(direction)
-        if not cells:
-            continue
-
-        # Group into segments: traversal index increments by 1 AND
-        # perpendicular index doesn't jump (different j for S/N, different i for W/E).
-        groups: list[list[tuple[int, int]]] = [[cells[0]]]
-        for cell in cells[1:]:
-            prev = groups[-1][-1]
-            if direction in ("south", "north"):
-                trav_ok = cell[1] == prev[1] + 1    # consecutive columns
-                perp_ok = abs(cell[0] - prev[0]) <= max_perp_gap
-            else:
-                trav_ok = cell[0] == prev[0] + 1    # consecutive rows
-                perp_ok = abs(cell[1] - prev[1]) <= max_perp_gap
-            if trav_ok and perp_ok:
-                groups[-1].append(cell)
-            else:
-                groups.append([cell])
+        if direction in ("west", "east"):
+            raw = _edge_cells(direction)
+            # Consecutive rows only (column fixed at edge → no perp check needed)
+            groups: list[list[tuple[int, int]]] = []
+            for cell in raw:
+                if groups and cell[0] == groups[-1][-1][0] + 1:
+                    groups[-1].append(cell)
+                else:
+                    groups.append([cell])
+        else:
+            raw = _inward_cells(direction)
+            # Consecutive columns, row must not jump more than max_perp_gap
+            groups = []
+            for cell in raw:
+                if (groups
+                        and cell[1] == groups[-1][-1][1] + 1
+                        and abs(cell[0] - groups[-1][-1][0]) <= max_perp_gap):
+                    groups[-1].append(cell)
+                else:
+                    groups.append([cell])
 
         for seg_idx, group in enumerate(groups):
             d_vals = np.array([depth[r, c] for r, c in group])
