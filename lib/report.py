@@ -1413,16 +1413,28 @@ def plot_thalweg_comparison(
     name  = record.get("name", "Thalweg")
 
     # ── coordinates from fine grid ──────────────────────────────────────────
-    def _get_2d(ds: Any, candidates: list[str]) -> Any:
+    def _get_coord(ds: Any, candidates: list[str]) -> Any:
         for c in candidates:
             if c in ds.coords or c in ds:
                 arr = ds[c].values if hasattr(ds[c], "values") else ds[c]
-                if arr.ndim == 2:
+                if arr.ndim >= 1:
                     return arr
         return None
 
-    fine_lon = _get_2d(fine_ds, ["lon", "longitude", "lont", "nav_lon"])
-    fine_lat = _get_2d(fine_ds, ["lat", "latitude", "latt", "nav_lat"])
+    def _get_2d(ds: Any, candidates: list[str]) -> Any:
+        """Return 2-D lon or lat array, promoting 1-D regular grids via meshgrid."""
+        arr = _get_coord(ds, candidates)
+        return arr if arr is not None and arr.ndim == 2 else arr  # returned as-is; caller meshgrids if 1D
+
+    _fine_lon_raw = _get_coord(fine_ds, ["lon", "longitude", "lont", "nav_lon"])
+    _fine_lat_raw = _get_coord(fine_ds, ["lat", "latitude", "latt", "nav_lat"])
+    if _fine_lon_raw is not None and _fine_lat_raw is not None:
+        if _fine_lon_raw.ndim == 1 and _fine_lat_raw.ndim == 1:
+            fine_lon, fine_lat = np.meshgrid(_fine_lon_raw, _fine_lat_raw)
+        else:
+            fine_lon, fine_lat = _fine_lon_raw, _fine_lat_raw
+    else:
+        fine_lon = fine_lat = None
     fine_depth = fine_ds["depth"].values if hasattr(fine_ds["depth"], "values") else fine_ds["depth"]
     _mask_key  = "mask" if "mask" in fine_ds else "land"
     fine_mask  = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]

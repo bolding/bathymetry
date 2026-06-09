@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 _R_EARTH_KM = 6371.0
 
 
+def _great_circle_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return 2.0 * _R_EARTH_KM * math.asin(math.sqrt(min(1.0, a)))
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -784,11 +793,13 @@ def boundary_thalwegs(
                 len({s["edge"] for s in starts}))
 
     # Try every ordered pair of starts on different edges.
-    # Two pairs whose paths share a sill depth within _SILL_DEDUP_TOL_M are
-    # the same physical channel — adjacent cells at the same depth, or paths
-    # that converge to the same bottleneck.  Keep only the first per edge pair.
-    _SILL_DEDUP_TOL_M = 2.0
-    seen_pairs: set[frozenset]                   = set()
+    # After clipping to the domain, deduplicate by sill depth (within tolerance)
+    # per edge-pair direction.  Also discard paths whose length is more than
+    # _MAX_DETOUR times the straight-line distance between the clipped endpoints
+    # (catches MST routes that go "around" rather than across).
+    _SILL_DEDUP_TOL_M  = 2.0
+    _MAX_DETOUR        = 2.5
+    seen_pairs: set[frozenset]                        = set()
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
 
@@ -805,23 +816,33 @@ def boundary_thalwegs(
             if path is None or len(path) < 5:
                 continue
 
-            # Deduplicate by sill depth (within tolerance) per edge-pair direction
-            edge_key: frozenset[str] = frozenset([s1["edge"], s2["edge"]])
-            path_depths = [src_depth[r, c] for r, c in path if src_depth[r, c] > 0]
-            if not path_depths:
-                continue
-            sill_depth_raw = float(np.min(path_depths))
-            prev_sills = seen_sill_depths.setdefault(edge_key, [])
-            if any(abs(sill_depth_raw - s) < _SILL_DEDUP_TOL_M for s in prev_sills):
-                continue
-            prev_sills.append(sill_depth_raw)
-
             fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
             fine = _clip_profile_to_domain(
                 fine,
                 float(dst_lon2d.min()), float(dst_lon2d.max()),
                 float(dst_lat2d.min()), float(dst_lat2d.max()),
             )
+
+            if fine["sill_depth"] < min_sill_m or len(fine["lon"]) < 2:
+                continue
+
+            # Reject paths that detour around the domain instead of crossing it
+            direct_km = _great_circle_km(
+                float(fine["lon"][0]),  float(fine["lat"][0]),
+                float(fine["lon"][-1]), float(fine["lat"][-1]),
+            )
+            if direct_km > 0 and float(fine["dist_km"][-1]) > _MAX_DETOUR * direct_km:
+                logger.debug("      skip %s→%s: detour %.1f km vs %.1f km direct",
+                             s1["edge"], s2["edge"],
+                             fine["dist_km"][-1], direct_km)
+                continue
+
+            # Deduplicate by clipped sill depth (within tolerance) per edge pair
+            edge_key: frozenset[str] = frozenset([s1["edge"], s2["edge"]])
+            prev_sills = seen_sill_depths.setdefault(edge_key, [])
+            if any(abs(fine["sill_depth"] - s) < _SILL_DEDUP_TOL_M for s in prev_sills):
+                continue
+            prev_sills.append(fine["sill_depth"])
 
             if fine["sill_depth"] < min_sill_m:
                 continue
@@ -838,6 +859,9 @@ def boundary_thalwegs(
             name = (f"{s1['edge']}[{seg1}]→{s2['edge']}[{seg2}]"
                     if seg1 > 0 or seg2 > 0
                     else f"{s1['edge']}→{s2['edge']}")
+            cs_str = f"{coarse_sill:.1f} m" if np.isfinite(coarse_sill) else "n/a"
+            logger.info("      + %s  fine_sill=%.1f m  coarse_sill=%s  L=%.0f km",
+                        name, fine["sill_depth"], cs_str, fine["dist_km"][-1])
             results.append({
                 "name": name,
                 "fine":  fine,
