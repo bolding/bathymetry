@@ -40,8 +40,11 @@ computation.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import numpy.typing as npt
@@ -140,7 +143,8 @@ def regrid(
     mask_out = ocean_mask.astype(np.int8)
     n_dropped = int((wetfrac_out > 0.0).sum()) - int(ocean_mask.sum())
     if min_wet_fraction > 0.0 and n_dropped:
-        print(f"  min_wet_fraction={min_wet_fraction}: {n_dropped} marginal cells forced to land")
+        logger.info("  min_wet_fraction=%s: %d marginal cells forced to land",
+                    min_wet_fraction, n_dropped)
 
     return xr.Dataset(
         {
@@ -292,7 +296,7 @@ def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: s
     weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
     cached = weight_file.exists()
     if cached:
-        print(f"    (weights cached: {weight_file.name})", end=" ", flush=True)
+        logger.debug("    (weights cached: %s)", weight_file.name)
     regridder = xe.Regridder(
         src_ds, dst_ds, "conservative",
         filename=str(weight_file),
@@ -341,7 +345,7 @@ def _regrid_single(
     })
 
     n_src = src.sizes["lat"] * src.sizes["lon"]
-    print(f"  Single-pass regridding ({n_src / 1e6:.1f} M source cells) …")
+    logger.info("  Single-pass regridding (%.1f M source cells) …", n_src / 1e6)
 
     regridder = _get_tile_regridder(xe, src_ds, dst_ds, cache_dir)
 
@@ -403,15 +407,13 @@ def _regrid_tiled(
     src_dlon = float(abs(np.diff(src.lon.values[:2]).mean()))
     dst_res  = _dst_resolution(dst_grid)
 
+    n_src = int((tile_cells * dst_res + 2 * buf_deg) / src_dlon) ** 2
     if n_total == 1:
-        n_src = int((tile_cells * dst_res + 2 * buf_deg) / src_dlon) ** 2
-        print(f"  Single tile  (≈ {n_src / 1e6:.1f} M source cells) …")
+        logger.info("  Single tile  (≈ %.1f M source cells) …", n_src / 1e6)
     else:
-        n_src = int((tile_cells * dst_res + 2 * buf_deg) / src_dlon) ** 2
-        print(
-            f"  Tiled regridding: {n_tlon}×{n_tlat} destination tiles "
-            f"(≈ {n_src / 1e6:.1f} M source cells per tile) …"
-        )
+        logger.info("  Tiled regridding: %d×%d destination tiles "
+                    "(≈ %.1f M source cells per tile) …",
+                    n_tlon, n_tlat, n_src / 1e6)
 
     depth_out   = np.full((ny, nx), np.nan)
     wetfrac_out = np.zeros((ny, nx))
@@ -433,7 +435,7 @@ def _regrid_tiled(
             k  = jt * n_tlon + it + 1
 
             if n_total > 1:
-                print(f"    Tile {k}/{n_total} …", end=" ", flush=True)
+                logger.debug("    Tile %d/%d …", k, n_total)
 
             # ---- Destination tile (2-D centre + corner coords) ----
             tile_center_lon = dst_grid.center_lon[j0:j1, i0:i1]
@@ -459,7 +461,7 @@ def _regrid_tiled(
 
             if len(lon_idx) < 2 or len(lat_idx) < 2:
                 if n_total > 1:
-                    print("(no source data)")
+                    logger.debug("      (no source data)")
                 continue
 
             tile_lon = src_lon[lon_idx]
@@ -503,6 +505,6 @@ def _regrid_tiled(
 
             if n_total > 1:
                 n_wet = int(np.sum(tile_w > 0))
-                print(f"({n_wet} wet cells)")
+                logger.debug("      (%d wet cells)", n_wet)
 
     return depth_out, wetfrac_out

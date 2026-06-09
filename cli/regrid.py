@@ -59,11 +59,14 @@ Or override individual options::
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Allow importing lib/ modules without installation
 _lib = os.path.join(os.path.dirname(__file__), "..", "lib")
@@ -183,7 +186,7 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
                 dlat = round(float(dlon) * cos_lat, 6)
             nx_eq = round((float(lon_max) - float(lon_min)) / float(dlon))
             ny_eq = round((float(lat_max) - float(lat_min)) / float(dlat))
-            print(f"      [equidistant] lat_center={lat_center:.2f}°  "
+            logger.info(f"      [equidistant] lat_center={lat_center:.2f}°  "
                   f"dlon={float(dlon):.6g}°  dlat={float(dlat):.6g}°  "
                   f"→ grid {nx_eq} × {ny_eq} (lon × lat)")
         else:
@@ -232,7 +235,7 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
                 )
             pole_lon, pole_lat = gridmod.pole_from_center(
                 float(lon_center), float(lat_center))
-            print(f"      [rotated_pole] auto pole: "
+            logger.info(f"      [rotated_pole] auto pole: "
                   f"pole_lat={pole_lat:.4f}°  pole_lon={pole_lon:.4f}°  "
                   f"(from centre {float(lat_center):.2f}°N, {float(lon_center):.2f}°E)")
 
@@ -244,7 +247,7 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
 
         nx_rp = round((float(rlon_max) - float(rlon_min)) / float(drot))
         ny_rp = round((float(rlat_max) - float(rlat_min)) / float(drot))
-        print(f"      [rotated_pole] drot={float(drot):.4g}°  "
+        logger.info(f"      [rotated_pole] drot={float(drot):.4g}°  "
               f"→ grid {nx_rp} × {ny_rp} (rlon × rlat)")
         return gridmod.RotatedPoleGrid(
             float(pole_lon), float(pole_lat),
@@ -259,7 +262,7 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
             raise ValueError("supergrid grid type requires 'grid.file' pointing to the supergrid NetCDF")
         x_var = _merge(None, cfg, "grid", "x_var", default="")
         y_var = _merge(None, cfg, "grid", "y_var", default="")
-        print(f"      [supergrid] reading {sg_file}")
+        logger.info(f"      [supergrid] reading {sg_file}")
         return gridmod.SuperGrid(sg_file, x_var=str(x_var), y_var=str(y_var))
 
     raise ValueError(f"Unknown grid type: {grid_type!r}")
@@ -468,7 +471,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                           "(one per contiguous wet segment on each side: "
                           "west, north, east, south) into the report directory.")
 
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (default: INFO).  Use DEBUG for internal progress "
+             "details, WARNING to suppress step banners.",
+    )
+
     args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(message)s",
+        stream=sys.stdout,
+    )
 
     # ------------------------------------------------------------------
     # Load YAML and resolve final parameter values
@@ -558,7 +575,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             parser.error(f"fixes file not found: {fixes_file}")
         extra = _load_yaml(fixes_file).get("fixes") or []
         fixes_list = fixes_list + extra
-        print(f"Loaded {len(extra)} fix(es) from {fixes_file}")
+        logger.info(f"Loaded {len(extra)} fix(es) from {fixes_file}")
 
     # Resolve key-only entries (e.g. - key: b001) against fixes_suggested.yaml
     try:
@@ -578,7 +595,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     pfx = name + "_"
 
     # ------------------------------------------------------------------
-    print(f"\n[1/6] Building target grid … (name='{name}')")
+    logger.info(f"\n[1/6] Building target grid … (name='{name}')")
     dst_grid = _build_grid(cfg, args)
     grid_summary = dst_grid.summary()
     report.print_table(grid_summary, title="Target grid")
@@ -625,7 +642,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 f"--skip-regrid: raw-regrid cache not found: {raw_regrid_cache}\n"
                 "Run without --skip-regrid first to create it."
             )
-        print(f"\n[2/6] Skipped (--skip-regrid)")
+        logger.info(f"\n[2/6] Skipped (--skip-regrid)")
         # Re-include any source plots produced by the previous full run.
         src_images = [
             f for f in (pfx + "02a_source_raw.png",
@@ -638,7 +655,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             images=src_images,
         )
 
-        print(f"\n[3/6] Loading cached raw-regrid result: {raw_regrid_cache}")
+        logger.info(f"\n[3/6] Loading cached raw-regrid result: {raw_regrid_cache}")
         dst = xr.open_dataset(raw_regrid_cache).load()
         # Validate cache shape against current grid spec.
         # A mismatch means the grid config changed since the cache was built
@@ -666,7 +683,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         # ------------------------------------------------------------------
         # Step 2 – Read source bathymetry
         # ------------------------------------------------------------------
-        print("\n[2/6] Reading source bathymetry …")
+        logger.info("\n[2/6] Reading source bathymetry …")
         t0 = time.time()
         src = reader.read_source(
             source, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
@@ -718,7 +735,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         src_sum = reader.source_summary(src)
         report.print_table(src_sum, title="Source bathymetry")
-        print(f"      done in {time.time()-t0:.1f} s")
+        logger.info(f"      done in {time.time()-t0:.1f} s")
 
         rpt.add_section(
             "Source bathymetry",
@@ -734,7 +751,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         # ------------------------------------------------------------------
         # Step 3 – ESMF conservative interpolation
         # ------------------------------------------------------------------
-        print("\n[3/6] Conservative regridding (xESMF) …  (may take a minute for large grids)")
+        logger.info("\n[3/6] Conservative regridding (xESMF) …  (may take a minute for large grids)")
         t0 = time.time()
         dst = interpolate.regrid(
             src, dst_grid,
@@ -747,11 +764,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         # Save raw post-regrid result for --skip-regrid on subsequent runs
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         dst.to_netcdf(raw_regrid_cache)
-        print(f"  Raw-regrid result cached: {raw_regrid_cache}")
+        logger.info(f"  Raw-regrid result cached: {raw_regrid_cache}")
 
         dst_sum = interpolate.regrid_summary(dst, dst_grid)
         report.print_table(dst_sum, title="Regridded destination")
-        print(f"      done in {time.time()-t0:.1f} s")
+        logger.info(f"      done in {time.time()-t0:.1f} s")
 
         regrid_plot = pfx + "03_regrid_result.png"
         wf_plot = pfx + "03_wet_fraction.png"
@@ -799,7 +816,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     src2_label: str = ""
     if source2 is not None:
         src2_label = _src_display_label(source2)
-        print(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
+        logger.info(f"\n[3b] Reading and regridding second source ({src2_label}) for comparison …")
         t0 = time.time()
         src2 = reader.read_source(
             source2, dst_grid.lon_bounds, dst_grid.lat_bounds, pad_deg=float(pad_deg),
@@ -814,7 +831,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             tile_cells=tile_cells,
             tile_buf_deg=tile_buf_deg,
         )
-        print(f"      done in {time.time()-t0:.1f} s")
+        logger.info(f"      done in {time.time()-t0:.1f} s")
 
         dst2_mask        = dst2["mask"].values
         dst2_depth_vals  = dst2["depth"].values
@@ -869,7 +886,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # which interfaces are checked by strait detection.
     # ------------------------------------------------------------------
     if fixes_list:
-        print(f"\n[4a] Applying {len(fixes_list)} fix(es) from config …")
+        logger.info(f"\n[4a] Applying {len(fixes_list)} fix(es) from config …")
         dst, applied_fixes = analysis.apply_fixes(dst, fixes_list)
         report.print_table({"fixes applied": len(applied_fixes)}, title="User fixes")
         report.save_csv(applied_fixes, os.path.join(report_dir, pfx + "04a_fixes_applied.csv"))
@@ -879,7 +896,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             table_rows=applied_fixes,
         )
     else:
-        print("\n[4a] No fixes configured — skipping.")
+        logger.info("\n[4a] No fixes configured — skipping.")
 
     # ------------------------------------------------------------------
     # Step 4b – Explicit mask regions (force areas to land)
@@ -888,7 +905,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     mask_regions_list = _nested_get(cfg, "mask_regions") or []
     if mask_regions_list:
-        print(f"\n[4b] Applying {len(mask_regions_list)} explicit mask region(s) …")
+        logger.info(f"\n[4b] Applying {len(mask_regions_list)} explicit mask region(s) …")
         dst, mr_applied = analysis.apply_mask_regions(dst, mask_regions_list)
         mr_sum = analysis.mask_regions_summary(mr_applied)
         report.print_table(mr_sum, title="Explicit mask regions")
@@ -915,7 +932,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             images=[mr_plot],
         )
     else:
-        print("\n[4b] No explicit mask regions configured — skipping.")
+        logger.info("\n[4b] No explicit mask regions configured — skipping.")
 
     # ------------------------------------------------------------------
     # Step 4c – Isolated-cell masking
@@ -927,7 +944,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # were forced to land by min_wet_fraction.
     # ------------------------------------------------------------------
     _pre_isolation_wf = dst["wet_fraction"].values.copy()
-    print(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
+    logger.info(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
     dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep))
     iso_sum = analysis.isolation_summary(basin_records)
     report.print_table(iso_sum, title="Isolated cells")
@@ -970,7 +987,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     bridge_sum = analysis.land_bridge_summary(bridge_records)
     report.print_table(bridge_sum, title="Land-bridge detection")
     if bridge_records:
-        print(f"      {len(bridge_records)} land-bridge cell(s) found")
+        logger.info(f"      {len(bridge_records)} land-bridge cell(s) found")
         report.save_csv(
             [{k: v for k, v in r.items() if k != "adjacent_components"}
              for r in bridge_records],
@@ -996,10 +1013,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # connected ocean cells are checked — no spurious flags from isolated
     # basins or enclosed seas.
     # ------------------------------------------------------------------
-    print("\n[4d/6] Detecting narrow straits …")
+    logger.info("\n[4d/6] Detecting narrow straits …")
     fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
     if src is None:
-        print("      Skipped (--skip-regrid: fine source not available; see previous report).")
+        logger.info("      Skipped (--skip-regrid: fine source not available; see previous report).")
         strait_records = []
         if bridge_records:
             report.save_fixes_yaml([], fixes_yaml_path, bridge_records=bridge_records)
@@ -1019,7 +1036,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         strait_sum = analysis.strait_summary(strait_records)
         report.print_table(strait_sum, title="Strait detection")
-        print(f"      {len(strait_records)} interfaces flagged in {time.time()-t0:.1f} s")
+        logger.info(f"      {len(strait_records)} interfaces flagged in {time.time()-t0:.1f} s")
 
         clean_records = [{k: v for k, v in r.items() if not k.startswith("_")}
                          for r in strait_records]
@@ -1072,7 +1089,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     n_total_straits = len(strait_records)
     shown_records   = strait_records[:max_sections]
     if n_total_straits > max_sections:
-        print(f"      (showing {max_sections} of {n_total_straits} section profiles; "
+        logger.info(f"      (showing {max_sections} of {n_total_straits} section profiles; "
               f"set analysis.max_section_profiles in YAML to show more)")
     _zoom_lon = getattr(dst_grid, "dlon", 0.1) * 10
     _zoom_lat = getattr(dst_grid, "dlat", 0.1) * 10
@@ -1131,30 +1148,34 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Step 4e – Thalweg comparison (fine vs coarse)  [--thalweg / --no-thalweg]
     # ------------------------------------------------------------------
     if run_thalweg:
-        print("\n[4e/6] Computing thalwegs …")
+        logger.info("\n[4e/6] Computing thalwegs …")
         t0 = time.time()
 
         thalweg_records: list[dict] = []
 
-        # Mode A: strait-based (top straits from step 4d)
-        if strait_records:
-            tw_a = thalwegmod.compute_strait_thalwegs(src, dst, strait_records,
-                                                       n_straits=max_sections)
-            thalweg_records.extend(tw_a)
-            print(f"      strait-based: {len(tw_a)} thalweg(s)")
+        if src is None:
+            logger.warning("      Skipped (--skip-regrid: fine source not available).")
+        else:
+            # Mode A: strait-based (top straits from step 4d)
+            if strait_records:
+                tw_a = thalwegmod.compute_strait_thalwegs(src, dst, strait_records,
+                                                           n_straits=max_sections)
+                thalweg_records.extend(tw_a)
+                logger.info("      strait-based: %d thalweg(s)", len(tw_a))
 
-        # Mode B: boundary auto-detection (one start per connected wet segment per edge)
-        tw_b = thalwegmod.boundary_thalwegs(src, dst, min_sill_m=5.0)
-        thalweg_records.extend(tw_b)
-        print(f"      boundary auto: {len(tw_b)} thalweg(s)")
+            # Mode B: boundary auto-detection (one start per wet segment per edge)
+            tw_b = thalwegmod.boundary_thalwegs(src, dst, min_sill_m=5.0)
+            thalweg_records.extend(tw_b)
+            logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
 
-        # Mode C: user waypoints (from `thalwegs:` in config)
-        if user_waypoints_cfg:
-            tw_c = thalwegmod.waypoint_thalwegs(src, dst, user_waypoints_cfg)
-            thalweg_records.extend(tw_c)
-            print(f"      waypoints:     {len(tw_c)} thalweg(s)")
+            # Mode C: user waypoints (from `thalwegs:` in config)
+            if user_waypoints_cfg:
+                tw_c = thalwegmod.waypoint_thalwegs(src, dst, user_waypoints_cfg)
+                thalweg_records.extend(tw_c)
+                logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
 
-        print(f"      total: {len(thalweg_records)} thalweg(s) in {time.time()-t0:.1f} s")
+        logger.info("      total: %d thalweg(s) in %.1f s",
+                    len(thalweg_records), time.time() - t0)
 
         thalwegmod.print_thalweg_table(thalweg_records)
         tw_sum = thalwegmod.thalweg_summary(thalweg_records)
@@ -1187,9 +1208,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             )
 
         if not thalweg_records:
-            print("      no thalwegs to plot")
+            logger.info("      no thalwegs to plot")
     else:
-        print("\n[4e/6] Thalweg analysis skipped (use --thalweg to enable).")
+        logger.info("\n[4e/6] Thalweg analysis skipped (use --thalweg to enable).")
 
     # ------------------------------------------------------------------
     # Step 5 – Optional rx0 smoothing (one pass per target value)
@@ -1207,7 +1228,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
         for rx0_val in sorted(rx0_list, reverse=True):   # coarsest first
             smooth_var = _smooth_var_name(rx0_val)
-            print(f"\n[5/6] rx0 smoothing (target={rx0_val}, variable → '{smooth_var}') …")
+            logger.info(f"\n[5/6] rx0 smoothing (target={rx0_val}, variable → '{smooth_var}') …")
             t0 = time.time()
             depth_smooth, corrections = smoothmod.smooth_rx0(depth_arr, mask_arr,
                                                               rx0=rx0_val)
@@ -1216,7 +1237,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 depth_arr, depth_smooth, mask_arr, corrections, rx0_val
             )
             report.print_table(smooth_sum, title=f"rx0 smoothing → {smooth_var}")
-            print(f"      done in {time.time()-t0:.1f} s")
+            logger.info(f"      done in {time.time()-t0:.1f} s")
 
             rx0_after = np.maximum(
                 np.pad(rx0_u_a, ((0, 0), (0, 1))),
@@ -1244,12 +1265,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             )
             smooth_variants.append((rx0_val, depth_smooth, corrections))
     else:
-        print("\n[5/6] Smoothing skipped.")
+        logger.info("\n[5/6] Smoothing skipped.")
 
     # ------------------------------------------------------------------
     # Step 6 – Build output dataset, final plots for every depth variant
     # ------------------------------------------------------------------
-    print("\n[6/6] Writing output …")
+    logger.info("\n[6/6] Writing output …")
 
     # C-grid staggered depths: U = east face, V = north face of each T-cell.
     # Both have the same shape [ny, nx] as the T-point depth.
@@ -1339,7 +1360,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             log_scale=log_depth_scale,
         )
         final_plots.append(fname)
-        print(f"  {fname}")
+        logger.info(f"  {fname}")
 
     # Depth difference plots between the two sources (one per depth variant)
     if dst2_mask is not None and dst2_depth_vals is not None:
@@ -1355,7 +1376,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 path=os.path.join(report_dir, diff_fname),
             )
             final_plots.append(diff_fname)
-            print(f"  {diff_fname}")
+            logger.info(f"  {diff_fname}")
 
     var_list = ", ".join(f"`{v}`" for v in out_vars if v not in ("wet_fraction", "mask", "basin_labels", "depth_corrections"))
     rpt.add_section(
@@ -1369,11 +1390,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     )
 
     if args.write_boundaries:
-        print("\nWriting boundary coordinate files …")
+        logger.info("\nWriting boundary coordinate files …")
         bdy_dir = os.path.dirname(os.path.abspath(output_file))
         bdy_files, bdy_segments = boundarymod.write_boundary_coords(dst, bdy_dir, name)
         for f in bdy_files:
-            print(f"  {os.path.join(bdy_dir, f)}")
+            logger.info(f"  {os.path.join(bdy_dir, f)}")
         # Build segment summary for the report
         seg_table: dict = {}
         for s in bdy_segments:
@@ -1398,10 +1419,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     report_md = os.path.join(report_dir, pfx + "report.md")
     rpt.write(report_md)
 
-    print(f"\nDone.")
-    print(f"  Output NetCDF : {output_file}")
-    print(f"  Markdown report: {report_md}")
-    print(f"  Report dir    : {report_dir}/")
+    logger.info(f"\nDone.")
+    logger.info(f"  Output NetCDF : {output_file}")
+    logger.info(f"  Markdown report: {report_md}")
+    logger.info(f"  Report dir    : {report_dir}/")
 
 
 # ---------------------------------------------------------------------------

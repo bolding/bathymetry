@@ -39,12 +39,15 @@ Requires *rasterio* (``pip install rasterio``).
 
 from __future__ import annotations
 
+import logging
 import re
 import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import xarray as xr
@@ -77,7 +80,7 @@ def _ensure_gebco(version: str = "2025") -> str:
     """
     nc_path = _GEBCO_CACHE_DIR / f"gebco_{version}.nc"
     if nc_path.exists():
-        print(f"  Using cached GEBCO {version}: {nc_path}")
+        logger.info("  Using cached GEBCO %s: %s", version, nc_path)
         return str(nc_path)
 
     if version not in _GEBCO_VERSIONS:
@@ -90,8 +93,8 @@ def _ensure_gebco(version: str = "2025") -> str:
     _GEBCO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = _GEBCO_CACHE_DIR / f"gebco_{version}.zip"
 
-    print(f"  Downloading GEBCO {version} (~10 GB) from CEDA …")
-    print(f"    → {zip_path}")
+    logger.info("  Downloading GEBCO %s (~10 GB) from CEDA …", version)
+    logger.info("    → %s", zip_path)
 
     def _progress(block_num: int, block_size: int, total_size: int) -> None:
         downloaded = block_num * block_size
@@ -109,9 +112,9 @@ def _ensure_gebco(version: str = "2025") -> str:
     except Exception:
         zip_path.unlink(missing_ok=True)
         raise
-    print()  # newline after progress line
+    print()  # newline after inline progress bar
 
-    print(f"  Extracting NetCDF from ZIP …")
+    logger.info("  Extracting NetCDF from ZIP …")
     try:
         with zipfile.ZipFile(str(zip_path)) as zf:
             nc_names = [n for n in zf.namelist() if n.lower().endswith(".nc")]
@@ -128,7 +131,7 @@ def _ensure_gebco(version: str = "2025") -> str:
     finally:
         zip_path.unlink(missing_ok=True)
 
-    print(f"  GEBCO {version} cached at: {nc_path}")
+    logger.info("  GEBCO %s cached at: %s", version, nc_path)
     return str(nc_path)
 
 
@@ -289,7 +292,7 @@ def _read_emodnet(
         cache_path = Path(cache_dir) / fname
 
     if cache_path is not None and cache_path.exists():
-        print(f"  Using cached EMODnet data: {cache_path}")
+        logger.info("  Using cached EMODnet data: %s", cache_path)
         return xr.open_dataset(str(cache_path))
 
     # 2-D tiling: the WCS server reads native-resolution source data internally
@@ -309,10 +312,10 @@ def _read_emodnet(
         # Guarantee tile area ≤ limit (rounding may overshoot)
         while (W / n_tlon) * (H / n_tlat) > _EMODNET_MAX_AREA_DEG2:
             n_tlat += 1
-        print(
-            f"  Domain ({W:.1f}°×{H:.1f}° = {area:.0f} deg²) exceeds WCS limit "
-            f"({_EMODNET_MAX_AREA_DEG2} deg²/tile); "
-            f"tiling {n_tlon}×{n_tlat} (lon×lat) = {n_tlon * n_tlat} tiles …"
+        logger.info(
+            "  Domain (%.1f°×%.1f°=%.0f deg²) exceeds WCS limit "
+            "(%s deg²/tile); tiling %d×%d = %d tiles …",
+            W, H, area, _EMODNET_MAX_AREA_DEG2, n_tlon, n_tlat, n_tlon * n_tlat,
         )
 
     tile_w = W / n_tlon
@@ -332,13 +335,12 @@ def _read_emodnet(
             tlat_max = lat_min + (j + 1) * tile_h
 
             if n_total > 1:
-                print(f"  Tile {k + 1}/{n_total}: "
-                      f"lon {tlon_min:.2f}°–{tlon_max:.2f}°, "
-                      f"lat {tlat_min:.2f}°–{tlat_max:.2f}°N …")
+                logger.info("  Tile %d/%d: lon %.2f°–%.2f°, lat %.2f°–%.2f°N …",
+                            k + 1, n_total, tlon_min, tlon_max, tlat_min, tlat_max)
             else:
                 tile_area = (tlon_max - tlon_min) * (tlat_max - tlat_min)
-                print(f"  Downloading EMODnet from WCS "
-                      f"({tile_area:.1f} deg² at {resolution:.6g}°/cell) …")
+                logger.info("  Downloading EMODnet from WCS (%.1f deg² at %.6g°/cell) …",
+                            tile_area, resolution)
 
             url = (
                 _EMODNET_BASE_URL
@@ -431,7 +433,7 @@ def _read_emodnet(
 
     if cache_path is not None:
         ds.to_netcdf(str(cache_path))
-        print(f"  Cached to: {cache_path}")
+        logger.info("  Cached to: %s", cache_path)
 
     return ds
 
@@ -497,15 +499,15 @@ def apply_coastline_mask(
     lat = ds.lat.values
     ny, nx = len(lat), len(lon)
 
-    print(f"  Loading Natural Earth land polygons ({resolution}) …", end=" ", flush=True)
+    logger.info("  Loading Natural Earth land polygons (%s) …", resolution)
     shp_path = shpreader.natural_earth(
         resolution=resolution, category="physical", name="land"
     )
     reader_ne = shpreader.Reader(shp_path)
     geoms = [rec.geometry for rec in reader_ne.records()]
-    print(f"{len(geoms)} polygon(s) loaded")
+    logger.debug("    %d polygon(s) loaded", len(geoms))
 
-    print(f"  Rasterizing onto {nx}×{ny} source grid …", end=" ", flush=True)
+    logger.info("  Rasterizing onto %d×%d source grid …", nx, ny)
     # rasterio rasterize expects row-0 = north (descending lat).
     # from_bounds(west, south, east, north, width, height) produces that.
     transform = from_bounds(lon[0], lat[0], lon[-1], lat[-1], nx, ny)
@@ -524,7 +526,7 @@ def apply_coastline_mask(
     old_ocean = ~ds["land"].values
     new_land = ds["land"].values | coast_land
     n_added = int((new_land & old_ocean).sum())
-    print(f"{n_added} additional land cells from coastline mask")
+    logger.info("  %d additional land cells from coastline mask", n_added)
 
     depth = ds["depth"].values.copy()
     depth[new_land] = np.nan

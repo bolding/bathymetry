@@ -30,10 +30,13 @@ Typical call
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
 import numpy.typing as npt
+
+logger = logging.getLogger(__name__)
 
 _R_EARTH_KM = 6371.0
 
@@ -834,12 +837,12 @@ def waypoint_thalwegs(
         ij_start = _nearest_ij(lo0, la0)
         ij_end   = _nearest_ij(lo1, la1)
         if ij_start is None or ij_end is None:
-            print(f"  thalweg '{name}': no wet cell near start or end — skipped")
+            logger.warning("thalweg '%s': no wet cell near start or end — skipped", name)
             continue
 
         path = _mst_path(mst, node_id_f, wet_rc_f, ij_start, ij_end)
         if path is None or len(path) < 3:
-            print(f"  thalweg '{name}': no wet path found — skipped")
+            logger.warning("thalweg '%s': no wet path found — skipped", name)
             continue
 
         fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
