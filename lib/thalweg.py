@@ -1111,7 +1111,6 @@ def boundary_thalwegs(
     # (catches MST routes that go "around" rather than across).
     _SILL_DEDUP_TOL_M  = sill_dedup_tol_m
     _MAX_DETOUR        = max_detour
-    seen_pairs: set[frozenset]                        = set()
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
 
@@ -1124,12 +1123,8 @@ def boundary_thalwegs(
 
     for i, s1 in enumerate(starts):
         for j, s2 in enumerate(starts):
-            if s1["edge"] == s2["edge"]:
+            if i >= j:
                 continue
-            pair_key = frozenset([i, j])
-            if pair_key in seen_pairs:
-                continue
-            seen_pairs.add(pair_key)
 
             path = _mst_path(mst, node_id_f, wet_rc_f, s1["ij"], s2["ij"])
             if path is None or len(path) < 5:
