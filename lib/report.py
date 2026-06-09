@@ -1406,6 +1406,7 @@ def plot_thalweg_comparison(
     import numpy as np
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
+    import cmocean
 
     fine  = record["fine"]
     coarse = record["coarse"]
@@ -1448,13 +1449,16 @@ def plot_thalweg_comparison(
         )
 
     # ── left panel: map ──────────────────────────────────────────────────────
+    depth_vmax = max(1.0, float(np.nanmax(fine["depth"])))
+
     if fine_lon is not None and fine_lat is not None:
         depth_plot = np.where(fine_mask.astype(bool), fine_depth, np.nan)
         pcm = ax_map.pcolormesh(  # type: ignore[union-attr]
             fine_lon, fine_lat, depth_plot,
-            cmap="Blues", shading="auto", transform=geo,
+            cmap=cmocean.cm.deep, shading="auto", transform=geo,
+            vmin=0, vmax=depth_vmax,
         )
-        plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.85)
+        plt.colorbar(pcm, ax=ax_map, label="Fine depth (m)", shrink=0.45, pad=0.02)
 
     ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
     ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
@@ -1462,24 +1466,36 @@ def plot_thalweg_comparison(
                      alpha=0.5, x_inline=False, y_inline=False)
 
     # fine thalweg path
-    ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.5,  # type: ignore[union-attr]
-                transform=geo, label="Fine thalweg", zorder=4)
+    ax_map.plot(fine["lon"], fine["lat"], color="white", lw=2.0,   # type: ignore[union-attr]
+                transform=geo, zorder=4)
+    ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.2,  # type: ignore[union-attr]
+                transform=geo, label="Fine thalweg", zorder=5)
 
     # coarse depth scatter — positions are fine path positions (coarse depths sampled there)
     sc = ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
-        c=coarse["depth"], cmap="Oranges_r",
-        s=18, zorder=5, label="Coarse depth",
+        c=coarse["depth"], cmap=cmocean.cm.thermal,
+        s=22, zorder=6, label="Coarse depth",
         transform=geo,
-        vmin=0, vmax=max(1, float(np.nanmax(fine["depth"]))),
+        vmin=0, vmax=depth_vmax,
     )
+    plt.colorbar(sc, ax=ax_map, label="Coarse depth (m)", shrink=0.45, pad=0.12)
 
-    # sill marker on map
+    # sill marker — derive position from fine profile (works for all modes)
     sill_lon = record.get("sill_lon")
     sill_lat = record.get("sill_lat")
+    if sill_lon is None or sill_lat is None:
+        sill_dist = fine.get("sill_dist_km", float("nan"))
+        if np.isfinite(sill_dist):
+            si = int(np.argmin(np.abs(fine["dist_km"] - sill_dist)))
+            sill_lon, sill_lat = float(fine["lon"][si]), float(fine["lat"][si])
     if sill_lon is not None and sill_lat is not None:
-        ax_map.plot(sill_lon, sill_lat, "rv", ms=8, zorder=6,   # type: ignore[union-attr]
-                    transform=geo, label="Sill")
+        ax_map.plot(  # type: ignore[union-attr]
+            sill_lon, sill_lat,
+            marker="o", linestyle="none", ms=11,
+            markerfacecolor="none", markeredgecolor="crimson", markeredgewidth=2,
+            transform=geo, label="Sill", zorder=7,
+        )
 
     ax_map.set_title(f"{name} — map")  # type: ignore[union-attr]
     ax_map.legend(fontsize=7, loc="upper left")  # type: ignore[union-attr]
