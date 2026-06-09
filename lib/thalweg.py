@@ -684,19 +684,26 @@ def _boundary_starts(
     mask: npt.NDArray,
     lon2d: npt.NDArray,
     lat2d: npt.NDArray,
+    max_perp_gap: int = 3,
 ) -> list[dict]:
     """Return the deepest wet cell in each connected wet segment on each domain edge.
 
-    An island touching the domain boundary splits the edge into multiple
-    disconnected wet segments — each segment yields its own start cell (the
-    deepest in that segment).  This ensures every isolated bay or channel
-    opening is captured.
+    For each column (south/north edges) or row (west/east edges), scans inward
+    from the physical edge to find the *first* wet cell.  This correctly handles
+    domains where mask_regions close off the outermost rows/columns so the
+    effective open boundary is at an interior row (e.g. a Kattegat mouth at
+    j≈15 after a mask_region closes j=0..14).
+
+    Two adjacent first-wet cells belong to the same segment when:
+    - their traversal index (column for S/N, row for W/E) is consecutive, AND
+    - their perpendicular index (row for S/N, column for W/E) differs by at
+      most *max_perp_gap*.  A larger jump means a different physical boundary.
 
     Parameters
     ----------
-    depth : ndarray [ny, nx]
-    mask  : ndarray [ny, nx] bool
-    lon2d, lat2d : ndarray [ny, nx]
+    depth, mask, lon2d, lat2d : ndarray [ny, nx]
+    max_perp_gap : int
+        Maximum row/col jump between adjacent scanned cells in the same segment.
 
     Returns
     -------
@@ -705,38 +712,62 @@ def _boundary_starts(
     ny, nx = depth.shape
     starts: list[dict] = []
 
-    def _contiguous_segments(m_1d: npt.NDArray) -> list[slice]:
-        """Find contiguous True runs in a 1-D boolean array."""
-        segs: list[slice] = []
-        in_seg = False
-        seg0 = 0
-        for k, wet in enumerate(m_1d):
-            if wet and not in_seg:
-                seg0 = k
-                in_seg = True
-            elif not wet and in_seg:
-                segs.append(slice(seg0, k))
-                in_seg = False
-        if in_seg:
-            segs.append(slice(seg0, len(m_1d)))
-        return segs
+    def _scan(direction: str) -> list[tuple[int, int]]:
+        """First wet cell per column/row scanning inward from *direction* edge."""
+        cells: list[tuple[int, int]] = []
+        if direction == "south":
+            for i in range(nx):
+                for j in range(ny):
+                    if mask[j, i]:
+                        cells.append((j, i))
+                        break
+        elif direction == "north":
+            for i in range(nx):
+                for j in range(ny - 1, -1, -1):
+                    if mask[j, i]:
+                        cells.append((j, i))
+                        break
+        elif direction == "west":
+            for j in range(ny):
+                for i in range(nx):
+                    if mask[j, i]:
+                        cells.append((j, i))
+                        break
+        else:  # east
+            for j in range(ny):
+                for i in range(nx - 1, -1, -1):
+                    if mask[j, i]:
+                        cells.append((j, i))
+                        break
+        return cells
 
-    edge_specs: list[tuple[str, npt.NDArray, npt.NDArray]] = [
-        ("west",  np.arange(ny, dtype=int), np.zeros(ny, dtype=int)),
-        ("east",  np.arange(ny, dtype=int), np.full(ny, nx - 1, dtype=int)),
-        ("south", np.zeros(nx, dtype=int),  np.arange(nx, dtype=int)),
-        ("north", np.full(nx, ny - 1, dtype=int), np.arange(nx, dtype=int)),
-    ]
-    for edge, rows, cols in edge_specs:
-        m_edge = mask [rows, cols]
-        d_edge = depth[rows, cols]
-        for seg_idx, sl in enumerate(_contiguous_segments(m_edge)):
-            seg_d = d_edge[sl]
-            best  = int(np.argmax(seg_d))
-            k     = sl.start + best
-            r, c  = int(rows[k]), int(cols[k])
+    for direction in ("west", "east", "south", "north"):
+        cells = _scan(direction)
+        if not cells:
+            continue
+
+        # Group into segments: traversal index increments by 1 AND
+        # perpendicular index doesn't jump (different j for S/N, different i for W/E).
+        groups: list[list[tuple[int, int]]] = [[cells[0]]]
+        for cell in cells[1:]:
+            prev = groups[-1][-1]
+            if direction in ("south", "north"):
+                trav_ok = cell[1] == prev[1] + 1    # consecutive columns
+                perp_ok = abs(cell[0] - prev[0]) <= max_perp_gap
+            else:
+                trav_ok = cell[0] == prev[0] + 1    # consecutive rows
+                perp_ok = abs(cell[1] - prev[1]) <= max_perp_gap
+            if trav_ok and perp_ok:
+                groups[-1].append(cell)
+            else:
+                groups.append([cell])
+
+        for seg_idx, group in enumerate(groups):
+            d_vals = np.array([depth[r, c] for r, c in group])
+            best   = int(np.argmax(d_vals))
+            r, c   = group[best]
             starts.append({
-                "edge":    edge,
+                "edge":    direction,
                 "segment": seg_idx,
                 "ij":      (r, c),
                 "lon":     float(lon2d[r, c]),

@@ -35,7 +35,7 @@ regridding:
   # pad_deg: 1.0            # extra source margin beyond grid extent (expert)
 
 analysis:
-  nkeep_basins: 2              # keep 2 largest basins: main North Sea + Kattegat
+  nkeep_basins: 1              # keep only the largest connected ocean basin
   wet_frac_threshold: 0.3      # inspect interfaces where wet_frac < this
   sill_ratio_threshold: 0.7    # flag if sill_depth_fine / sill_depth_coarse < this
   area_ratio_threshold: 0.5    # flag if section_area_fine / section_area_coarse < this
