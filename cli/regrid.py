@@ -1232,6 +1232,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 table={},
                 images=[img],
             )
+            csv_name = pfx + f"04e_thalweg_{k:03d}_{safe}.csv"
+            thalwegmod.write_thalweg_csv(
+                tw, csv_path=os.path.join(report_dir, csv_name)
+            )
+            logger.info("        wrote %s", csv_name)
 
         if not thalweg_records:
             logger.info("      no thalwegs to plot")

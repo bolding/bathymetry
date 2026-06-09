@@ -405,6 +405,49 @@ def thalweg_summary(records: list[dict]) -> dict:
     }
 
 
+def write_thalweg_csv(record: dict, csv_path: str | None = None) -> str:
+    """Write thalweg path coordinates to a CSV file and return the path used.
+
+    Columns: ``index``, ``lon``, ``lat``, ``dist_km``, ``fine_depth``,
+    ``coarse_depth``.  The sill row is marked with an extra ``is_sill``
+    column (1/0).  If *csv_path* is None the path is derived from the record's
+    ``name`` field (spaces → underscores, → → dash).
+    """
+    import csv
+    from pathlib import Path
+
+    fine   = record["fine"]
+    coarse = record["coarse"]
+    name   = record.get("name", "thalweg")
+
+    if csv_path is None:
+        safe = (name.replace(" ", "_").replace("→", "-")
+                .replace("[", "").replace("]", ""))
+        csv_path = f"{safe}.csv"
+
+    sill_dist = fine.get("sill_dist_km", float("nan"))
+    sill_idx  = int(np.argmin(np.abs(fine["dist_km"] - sill_dist))) if np.isfinite(sill_dist) else -1
+
+    n = len(fine["lon"])
+    coarse_depth = coarse["depth"] if len(coarse["depth"]) == n else np.full(n, float("nan"))
+
+    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["index", "lon", "lat", "dist_km", "fine_depth", "coarse_depth", "is_sill"])
+        for k in range(n):
+            writer.writerow([
+                k,
+                f"{fine['lon'][k]:.6f}",
+                f"{fine['lat'][k]:.6f}",
+                f"{fine['dist_km'][k]:.3f}",
+                f"{fine['depth'][k]:.2f}",
+                f"{coarse_depth[k]:.2f}" if np.isfinite(coarse_depth[k]) else "",
+                1 if k == sill_idx else 0,
+            ])
+    return csv_path
+
+
 # ---------------------------------------------------------------------------
 # Maximum spanning tree — max-bottleneck path (build once, query many)
 # ---------------------------------------------------------------------------
@@ -741,10 +784,12 @@ def boundary_thalwegs(
                 len({s["edge"] for s in starts}))
 
     # Try every ordered pair of starts on different edges.
-    # Two pairs that share the same sill cell (minimum-depth node on the MST
-    # path) represent the same physical channel — keep only the first.
-    seen_pairs: set[frozenset]                          = set()
-    seen_sills: dict[frozenset[str], set[tuple[int,int]]] = {}
+    # Two pairs whose paths share a sill depth within _SILL_DEDUP_TOL_M are
+    # the same physical channel — adjacent cells at the same depth, or paths
+    # that converge to the same bottleneck.  Keep only the first per edge pair.
+    _SILL_DEDUP_TOL_M = 2.0
+    seen_pairs: set[frozenset]                   = set()
+    seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
 
     for i, s1 in enumerate(starts):
@@ -760,13 +805,16 @@ def boundary_thalwegs(
             if path is None or len(path) < 5:
                 continue
 
-            # Deduplicate by sill cell per edge-pair direction
+            # Deduplicate by sill depth (within tolerance) per edge-pair direction
             edge_key: frozenset[str] = frozenset([s1["edge"], s2["edge"]])
-            path_depths = [src_depth[r, c] for r, c in path]
-            sill_cell   = path[int(np.argmin(path_depths))]
-            if sill_cell in seen_sills.setdefault(edge_key, set()):
+            path_depths = [src_depth[r, c] for r, c in path if src_depth[r, c] > 0]
+            if not path_depths:
                 continue
-            seen_sills[edge_key].add(sill_cell)
+            sill_depth_raw = float(np.min(path_depths))
+            prev_sills = seen_sill_depths.setdefault(edge_key, [])
+            if any(abs(sill_depth_raw - s) < _SILL_DEDUP_TOL_M for s in prev_sills):
+                continue
+            prev_sills.append(sill_depth_raw)
 
             fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
             fine = _clip_profile_to_domain(
