@@ -684,39 +684,43 @@ def _boundary_starts(
     mask: npt.NDArray,
     lon2d: npt.NDArray,
     lat2d: npt.NDArray,
-    max_perp_gap: int = 3,
-    min_segment_cells: int = 5,
+    max_inward: int = 20,
+    max_perp_gap: int = 8,
+    min_segment_cells: int = 10,
 ) -> list[dict]:
     """Return the deepest wet cell in each connected wet segment on each domain edge.
 
     The coarse mask — after all user operations (mask_regions, nkeep_basins,
-    fixes) have been applied — encodes the actual model wet/dry boundary.  For
-    each column (south/north) or row (west/east) the *outermost wet cell* in
-    the edge direction is the natural candidate for a boundary start: it is the
-    first wet cell you encounter when entering the domain from outside.
+    fixes) — encodes the model wet/dry boundary.  For each column (south/north)
+    or row (west/east) the algorithm scans inward from the physical edge and
+    takes the first wet cell found within *max_inward* steps.
 
-    Scanning is unbounded: no arbitrary ``max_inward`` depth limit.  This
-    handles both the standard case (boundary at the physical grid edge) and
-    domains where a mask_region shifts the effective boundary inward by any
-    number of cells.
+    **Why max_inward?**  A mask_region that closes N rows shifts the effective
+    boundary N rows inward (e.g. the skamix Kattegat south opening sits at j≈16
+    after a mask_region closes j=0..15).  Without a depth limit the scan follows
+    Norwegian fjords, Swedish inlets and other interior coastline features 50–200
+    rows inward, producing dozens of spurious boundary segments and hundreds of
+    unwanted thalwegs.  *max_inward* separates intentional closures (typically
+    ≤20 rows) from topographic interior features.  Increase it in the YAML
+    (``thalweg.boundary_max_inward``) when a mask_region is deeper, or supply a
+    ``boundaries_csv`` for full control.
 
-    **Segment grouping**: adjacent outermost-wet cells belong to the same
-    segment when their traversal index (column for S/N, row for W/E) is
-    consecutive AND their perpendicular index (row for S/N, column for W/E)
-    differs by at most *max_perp_gap*.  A larger jump (e.g. j=0 → j=15 between
-    neighbouring columns) starts a new segment.
+    **Segment grouping**: adjacent first-wet cells belong to the same segment
+    when their traversal index (column for S/N, row for W/E) is consecutive AND
+    their perpendicular index (row for S/N, column for W/E) differs by at most
+    *max_perp_gap*.  A larger jump (e.g. j=0 → j=16) creates a new segment.
 
     **Small-segment filter**: segments narrower than *min_segment_cells* are
-    discarded.  Coastal notches and minor irregularities produce 1–3-cell
-    segments; genuine open boundaries span many cells.  This prevents the
-    combinatorial explosion that arises when hundreds of tiny coastal artefacts
-    are cross-paired.
+    discarded — coastal notches produce 1–5-cell segments; real open boundaries
+    span many cells.
 
     Parameters
     ----------
     depth, mask, lon2d, lat2d : ndarray [ny, nx]
+    max_inward : int
+        Maximum rows/columns to scan inward from each physical edge.
     max_perp_gap : int
-        Maximum perpendicular-index jump within one segment.
+        Maximum perpendicular-index jump allowed within one segment.
     min_segment_cells : int
         Segments narrower than this are discarded.
 
@@ -728,29 +732,29 @@ def _boundary_starts(
     starts: list[dict] = []
 
     def _scan(direction: str) -> list[tuple[int, int]]:
-        """Outermost wet cell per column/row scanning inward from *direction*."""
+        """First wet cell within max_inward steps from *direction* edge."""
         cells: list[tuple[int, int]] = []
         if direction == "south":
             for i in range(nx):
-                for j in range(ny):
+                for j in range(min(ny, max_inward)):
                     if mask[j, i]:
                         cells.append((j, i))
                         break
         elif direction == "north":
             for i in range(nx):
-                for j in range(ny - 1, -1, -1):
+                for j in range(ny - 1, max(ny - 1 - max_inward, -1), -1):
                     if mask[j, i]:
                         cells.append((j, i))
                         break
         elif direction == "west":
             for j in range(ny):
-                for i in range(nx):
+                for i in range(min(nx, max_inward)):
                     if mask[j, i]:
                         cells.append((j, i))
                         break
         else:  # east
             for j in range(ny):
-                for i in range(nx - 1, -1, -1):
+                for i in range(nx - 1, max(nx - 1 - max_inward, -1), -1):
                     if mask[j, i]:
                         cells.append((j, i))
                         break

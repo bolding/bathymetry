@@ -556,6 +556,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         _thalweg_boundaries_csv = os.path.join(_cfg_dir, _thalweg_boundaries_csv)
     _thalweg_default = bool(_tw_cfg.get("enabled", bool(user_waypoints_cfg)))
     run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
+    # Mode B (boundary auto-detection) is off by default — it relies on
+    # _boundary_starts() which needs further tuning for complex domains.
+    # Enable with thalweg.boundary_thalwegs: true in the config.
+    run_boundary_thalweg = bool(_tw_cfg.get("boundary_thalwegs", False))
 
     if source is None:
         parser.error("--source (or 'source:' in YAML) is required")
@@ -1209,14 +1213,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 thalweg_records.extend(tw_a)
                 logger.info("      strait-based: %d thalweg(s)", len(tw_a))
 
-            # Mode B: boundary auto-detection.
-            # Always write the boundary CSV from the finalised mask so the user
-            # has the file for reference even without --write-boundaries.  When
-            # no explicit boundaries_csv is given, this auto-written file is
-            # also what boundary_thalwegs uses for start detection.
-            # NOTE: basins removed by nkeep_basins are absent from this file;
-            # set nkeep_basins: N in the config to keep N basins (and their
-            # open boundaries).
+            # Always write the boundary CSV from the finalised mask so the
+            # user has the file for reference.
             _auto_bdy_csv = os.path.join(report_dir, f"{name}_bdy.csv")
             if not _thalweg_boundaries_csv:
                 _bdy_files, _bdy_segs = boundarymod.write_boundary_coords(
@@ -1226,19 +1224,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                             _auto_bdy_csv,
                             sum(s["n_cells"] for s in _bdy_segs))
 
-            # boundary_thalwegs detects starts on the coarse grid edges and
-            # snaps them to the fine grid by default. Supply boundaries_csv
-            # when the open boundaries are not at the physical coarse grid
-            # edges (e.g. a custom skamix-style domain).
-            tw_b = thalwegmod.boundary_thalwegs(
-                _thalweg_src, dst,
-                min_sill_m=thalweg_min_sill,
-                max_detour=thalweg_bdy_detour,
-                sill_dedup_tol_m=thalweg_sill_dedup,
-                boundaries_csv=_thalweg_boundaries_csv,
-            )
-            thalweg_records.extend(tw_b)
-            logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
+            # Mode B: boundary auto-detection thalwegs.
+            # Disabled by default — enable with thalweg.boundary_thalwegs: true
+            if run_boundary_thalweg:
+                tw_b = thalwegmod.boundary_thalwegs(
+                    _thalweg_src, dst,
+                    min_sill_m=thalweg_min_sill,
+                    max_detour=thalweg_bdy_detour,
+                    sill_dedup_tol_m=thalweg_sill_dedup,
+                    boundaries_csv=_thalweg_boundaries_csv,
+                )
+                thalweg_records.extend(tw_b)
+                logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
+            else:
+                logger.info("      boundary auto: disabled "
+                            "(set thalweg.boundary_thalwegs: true to enable)")
 
             # Mode C: user waypoints
             if user_waypoints_cfg:
