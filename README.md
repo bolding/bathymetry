@@ -64,11 +64,12 @@ bathymetry/
 │   ├── example_northsea_rotated_pole.yaml
 │   └── example_supergrid.yaml
 ├── lib/                           ← flat library modules (on sys.path after install)
-│   ├── grid.py        SphericalGrid, CartesianGrid, CurvilinearGrid (stub)
-│   ├── reader.py      GEBCO and EMODnet readers
+│   ├── grid.py        SphericalGrid, CartesianGrid, RotatedPoleGrid, SuperGrid
+│   ├── reader.py      GEBCO (local + auto-download) and EMODnet readers
 │   ├── interpolate.py xESMF conservative regridding with weight-file caching
 │   ├── analysis.py    strait detection, mask regions, isolated-cell masking
 │   ├── smooth.py      rx0 slope-factor smoothing (LP, ported from GETM)
+│   ├── boundary.py    open-boundary T-grid coordinate CSV writer
 │   └── report.py      Markdown report, ASCII tables, cartopy + plotly plots
 └── cli/
     └── regrid.py      CLI entry point (bathymetry-regrid)
@@ -170,11 +171,16 @@ Fully annotated configs are provided in the `config/` directory.
 #                                   report/northsea_0p05deg/northsea_0p05deg_*.png
 name: northsea_0p05deg
 
-source: /server/data/GEBCO/GEBCO_2023.nc   # or "emodnet"
-pad_deg: 1.0                                # buffer added when reading source
+# "emodnet"   → download on-the-fly from EMODnet WCS
+# "gebco"     → download GEBCO 2025 ZIP from CEDA, cache at ~/.cache/gebco/gebco_2025.nc
+# "/path/..."  → local GEBCO-style NetCDF
+source: /server/data/GEBCO/GEBCO_2023.nc
+
+# Optional second source — produces a side-by-side comparison map and depth-diff plot
+# source2: /server/data/EMODnet/emodnet_2024.nc
 
 grid:
-  type: spherical        # spherical | cartesian
+  type: spherical        # spherical | cartesian | rotated_pole
   lon_min: 0.0
   lon_max: 15.0
   lat_min: 50.0
@@ -182,12 +188,17 @@ grid:
   dlon: 0.05
   dlat: 0.05
   rotation: 0.0          # degrees CCW (non-zero → rotated curvilinear grid)
+  # interfaces: false    # true → lon/lat bounds are cell corners (interfaces)
+  #                      # false (default) → T-point positions; lon_max/lat_max
+  #                      #   are the last T-points, so the grid includes them exactly.
+  equidistant: false     # true → dlon = dlat / cos(lat_center) for square cells
 
 regridding:
   cache_dir: ./regrid_weights   # xESMF weight files cached here
   min_depth: 2.0                # shallow-clamp after regridding (m)
   min_wet_fraction: 0.05
   coastline_mask: "10m"         # overlay NE land polygons on source; omit to skip
+  # pad_deg: 1.0                # extra source margin beyond grid extent (expert)
 
 analysis:
   nkeep_basins: 1
@@ -216,6 +227,7 @@ output:
 # Masking a fjord mouth causes its interior to be removed automatically
 # by the isolation step (4d).
 # Types: rectangle, polygon, point, ij_rectangle, ij_point.
+# Grid-index convention: i = x/longitude column, j = y/latitude row (as in ncview).
 # mask_regions:
 #   - type: rectangle       # geographic bounding box
 #     lon_min: 9.0  lon_max: 10.5  lat_min: 54.5  lat_max: 55.5
@@ -226,7 +238,7 @@ output:
 #   - type: point           # nearest cell to given lon/lat
 #     lon: 8.5  lat: 54.8
 #     name: Isolated pool
-#   - type: ij_rectangle    # 0-based grid indices (i=row, j=col)
+#   - type: ij_rectangle    # 0-based grid indices (i=lon-column, j=lat-row)
 #     i_min: 10  i_max: 20  j_min: 5  j_max: 15
 #     name: Index-based region
 #   - type: ij_point        # single cell by 0-based grid index
@@ -281,6 +293,48 @@ rasterio`).
 Omit the key (or set it to `null`) to skip coastline masking and rely solely
 on GEBCO's own land flag.
 
+## GEBCO auto-download
+
+Set `source: gebco` (or `source: gebco2025`) to have the tool download
+**GEBCO 2025** automatically from CEDA and cache it locally:
+
+```yaml
+source: gebco
+```
+
+On first use the ~10 GB ZIP is downloaded from:
+
+```
+https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2025/ice_surface_elevation/netcdf/gebco_2025.zip
+```
+
+The extracted NetCDF is cached at `~/.cache/gebco/gebco_2025.nc`.
+Subsequent runs use the cache directly and skip the download.  The ZIP is
+deleted after extraction to free disk space.
+
+To use a specific local GEBCO file (any year), supply the path directly:
+
+```yaml
+source: /server/data/GEBCO/GEBCO_2024.nc
+```
+
+## Grid coordinate convention (`interfaces`)
+
+By default (`interfaces: false`), `lon_min`/`lat_min`/`lon_max`/`lat_max` are
+**T-point (cell-centre) positions**.  The first T-point is at `lon_min`; the
+last T-point is at `lon_max`; cell corners are offset outward by ±½ cell on
+every side.  The number of cells is `round((lon_max − lon_min) / dlon) + 1`,
+so both endpoints are included exactly.
+
+When `interfaces: true` (or `--interfaces`), the four bounds are the
+**outermost corner (interface) positions**.  T-points are then inset by
+½ cell and the number of cells is `round((lon_max − lon_min) / dlon)`.
+
+| Mode | `lon_min` / `lon_max` | T-point range | nx |
+|------|----------------------|---------------|----|
+| T-points (default) | first / last T-point | `lon_min` … `lon_max` | `Δlon / dlon + 1` |
+| Interfaces (`--interfaces`) | west / east corner | `lon_min + dlon/2` … `lon_max − dlon/2` | `Δlon / dlon` |
+
 ## Wet-fraction thresholds
 
 There are two separate wet-fraction parameters with different roles:
@@ -321,9 +375,12 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | File | Contents |
 |------|----------|
 | `{name}_report.md` | Markdown report linking all tables and figures |
-| `{name}_02_source_depth.png` | Source bathymetry overview map |
+| `{name}_02a_source_raw.png` | Source bathymetry overview map |
+| `{name}_02b_source_coastline_masked.png` | Source after coastline masking (if used) |
 | `{name}_03_regrid_result.png` | Regridded depth (cmocean *deep_r*) |
 | `{name}_03_wet_fraction.png` | Wet fraction per coarse cell (cmocean *amp*) |
+| `{name}_03b_source_comparison.png` | Side-by-side source comparison (if `source2:` given) |
+| `{name}_03b_depth_diff.png` | Depth difference `source − source2` on common cells |
 | `{name}_04a_straits.png/.html` | Strait analysis map (interactive) |
 | `{name}_04a_straits.csv` | Flagged interface table |
 | `{name}_04a_section_*.png` | Cross-section profiles with map inset |
@@ -333,6 +390,23 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
 | `{name}_06_final_depth.png/.html` | Final unsmoothed bathymetry (interactive) |
 | `{name}_06_final_depth_rx0_*.png/.html` | Final smoothed bathymetry (interactive) |
+
+### Boundary coordinates (`{name}_bdy.csv`)
+
+Written alongside the output NetCDF when `--write-boundaries` is given.
+Contains all wet cells on the four outer edges in the order west (S→N),
+north (W→E), east (S→N), south (W→E).  Format:
+
+```
+T-grid
+lon,lat
+6.00000,56.25000
+6.00000,56.26000
+…
+```
+
+The report Markdown includes a segment table showing the start/stop `(i,j)`
+indices and cell count for each contiguous wet segment per side.
 
 ## Strait categories
 
@@ -349,15 +423,19 @@ paste selected entries into the `fixes:` section of your YAML config.
 
 ## Grid types
 
-| Type | Status | Key parameters |
-|------|--------|---------------|
-| `SphericalGrid` | Implemented | `lon_min/max`, `lat_min/max`, `dlon`, `dlat`, `rotation_deg` |
-| `CartesianGrid` | Implemented | `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation_deg` |
-| `CurvilinearGrid` | Planned (stub) | Pre-computed 2-D corner lon/lat arrays |
+| Type | YAML `type:` | Key parameters |
+|------|-------------|---------------|
+| `SphericalGrid` | `spherical` | `lon_min/max`, `lat_min/max`, `dlon`, `dlat`, `rotation`, `interfaces` |
+| `CartesianGrid` | `cartesian` | `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation` |
+| `RotatedPoleGrid` | `rotated_pole` | `pole_lon/lat`, `rlon/rlat_min/max`, `drot`, `axis_rotation` |
+| `SuperGrid` | `supergrid` | `file` path to MOM6/pyGETM ocean_hgrid.nc |
 
-A non-zero `rotation_deg` rotates the grid axes CCW around the grid centre
-using a local tangent-plane approximation.  The corner-coordinate arrays
-become 2-D so ESMF and plotly both handle them correctly.
+A non-zero `rotation` rotates the grid axes CCW around the grid centre using a
+local tangent-plane approximation.  The corner-coordinate arrays become 2-D so
+ESMF and plotly both handle them correctly.
+
+`SphericalGrid` supports the `interfaces` flag (see above).  `CartesianGrid`
+and `RotatedPoleGrid` always treat their bounds as corner positions.
 
 ## rx0 smoothing
 
@@ -426,6 +504,39 @@ with matplotlib fallbacks:
 | Depth | `deep_r` | Shallow = light, deep = dark |
 | Wet fraction | `amp` | 0 = white → 1 = dark orange |
 | Depth corrections | `balance` | Diverging around zero |
+
+## Open boundaries
+
+Pass `--write-boundaries` (or add nothing to the YAML — it is a CLI-only flag)
+to write an open-boundary T-grid coordinate CSV alongside the output NetCDF:
+
+```bash
+bathymetry-regrid --config my_run.yaml --write-boundaries
+```
+
+The file `{name}_bdy.csv` is written in the same directory as the output
+NetCDF.  It contains the T-point lon/lat of all wet cells on the four outer
+edges, traversed in the order:
+
+| Side | Direction | Corner ownership |
+|------|-----------|-----------------|
+| west | S → N (j increasing) | includes corners |
+| north | W → E (i increasing) | i = 1 … nx−2 |
+| east | S → N (j increasing) | includes corners |
+| south | W → E (i increasing) | i = 1 … nx−2 |
+
+Cells that are land on an edge are simply skipped.  A single wet segment per
+side is the common case; if the edge has land interruptions, each contiguous
+run is written in sequence.
+
+The Markdown report gains an **Open boundaries** section with a table showing
+the start/stop `(i, j)` indices and cell count for every contiguous segment:
+
+```
+west seg 1 │ i=0..0, j=5..62, n=58
+north seg 1 │ i=1..348, j=99..99, n=348
+east seg 1 │ i=349..349, j=8..99, n=92
+```
 
 ## References
 

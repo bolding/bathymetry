@@ -92,7 +92,9 @@ def _split_contiguous(cells, key_fn):
 # Public API
 # ---------------------------------------------------------------------------
 
-def write_boundary_coords(dst, report_dir: str, name_prefix: str) -> list[str]:
+def write_boundary_coords(
+    dst, report_dir: str, name_prefix: str
+) -> tuple[list[str], list[dict]]:
     """Write open-boundary T-grid coordinate CSV files.
 
     Parameters
@@ -107,8 +109,12 @@ def write_boundary_coords(dst, report_dir: str, name_prefix: str) -> list[str]:
 
     Returns
     -------
-    list[str]
+    files : list[str]
         Single-element list with the relative file name written.
+    segments : list[dict]
+        One dict per contiguous boundary segment with keys:
+        ``side``, ``segment``, ``i_start``, ``j_start``,
+        ``i_end``, ``j_end``, ``n_cells``.
     """
     mask = dst["mask"].values.astype(bool)   # shape (ny, nx)
 
@@ -135,13 +141,26 @@ def write_boundary_coords(dst, report_dir: str, name_prefix: str) -> list[str]:
 
     fname = f"{name_prefix}_bdy.csv"
     fpath = os.path.join(report_dir, fname)
+    segments: list[dict] = []
+
     with open(fpath, "w") as f:
         f.write("T-grid\nlon,lat\n")
         for side in ("west", "north", "east", "south"):
             cells = _find_boundary_cells(mask, side)
-            for (i, j) in cells:
-                f.write(f"{_lon(i, j):.5f},{_lat(i, j):.5f}\n")
+            groups = _split_contiguous(cells, key_fns[side])
+            for seg_idx, group in enumerate(groups):
+                for (i, j) in group:
+                    f.write(f"{_lon(i, j):.5f},{_lat(i, j):.5f}\n")
+                i0, j0 = group[0]
+                i1, j1 = group[-1]
+                segments.append({
+                    "side":    side,
+                    "segment": seg_idx + 1,
+                    "i_start": i0,
+                    "j_start": j0,
+                    "i_end":   i1,
+                    "j_end":   j1,
+                    "n_cells": len(group),
+                })
 
-    written = [fname]
-
-    return written
+    return [fname], segments

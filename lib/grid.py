@@ -99,15 +99,22 @@ class SphericalGrid(BaseGrid):
     Parameters
     ----------
     lon_min, lon_max : float
-        Western and eastern boundaries in degrees East.
+        Western/eastern boundary in degrees East.
     lat_min, lat_max : float
-        Southern and northern boundaries in degrees North.
+        Southern/northern boundary in degrees North.
     dlon, dlat : float
         Cell size in degrees.
     rotation_deg : float
         Rotation of the grid axes counter-clockwise around the grid centre, in
         degrees.  A non-zero value produces a curvilinear corner-coordinate
         array even though the underlying resolution is regular.
+    interfaces : bool
+        When *True*, lon_min/lat_min/lon_max/lat_max are the positions of the
+        outermost cell corners (interfaces).  T-points are offset inward by
+        half a cell.
+        When *False* (default), lon_min/lat_min/lon_max/lat_max are the
+        positions of the first and last T-points (cell centres).  Corner
+        arrays are offset outward by half a cell on every side.
     """
 
     def __init__(
@@ -119,6 +126,7 @@ class SphericalGrid(BaseGrid):
         dlon: float,
         dlat: float,
         rotation_deg: float = 0.0,
+        interfaces: bool = False,
     ) -> None:
         self.lon_min = lon_min
         self.lon_max = lon_max
@@ -127,15 +135,22 @@ class SphericalGrid(BaseGrid):
         self.dlon = dlon
         self.dlat = dlat
         self.rotation_deg = rotation_deg
+        self.interfaces = interfaces
         self._build()
 
     def _build(self) -> None:
-        nx = round((self.lon_max - self.lon_min) / self.dlon)
-        ny = round((self.lat_max - self.lat_min) / self.dlat)
-
-        # lon_min/lat_min are T-point positions; corners are offset by ±half cell
-        lon_c1d = (self.lon_min - 0.5 * self.dlon) + np.arange(nx + 1) * self.dlon
-        lat_c1d = (self.lat_min - 0.5 * self.dlat) + np.arange(ny + 1) * self.dlat
+        if self.interfaces:
+            # lon_min/lat_min are corner positions; T-points are offset inward
+            nx = round((self.lon_max - self.lon_min) / self.dlon)
+            ny = round((self.lat_max - self.lat_min) / self.dlat)
+            lon_c1d = self.lon_min + np.arange(nx + 1) * self.dlon
+            lat_c1d = self.lat_min + np.arange(ny + 1) * self.dlat
+        else:
+            # lon_min/lat_min are first T-point; lon_max/lat_max are last T-point
+            nx = round((self.lon_max - self.lon_min) / self.dlon) + 1
+            ny = round((self.lat_max - self.lat_min) / self.dlat) + 1
+            lon_c1d = (self.lon_min - 0.5 * self.dlon) + np.arange(nx + 1) * self.dlon
+            lat_c1d = (self.lat_min - 0.5 * self.dlat) + np.arange(ny + 1) * self.dlat
         lon_c, lat_c = np.meshgrid(lon_c1d, lat_c1d)  # [ny+1, nx+1]
 
         if self.rotation_deg != 0.0:
@@ -170,7 +185,12 @@ class SphericalGrid(BaseGrid):
 
     def summary(self) -> dict:
         d = super().summary()
-        d.update({"dlon": self.dlon, "dlat": self.dlat, "rotation_deg": self.rotation_deg})
+        d.update({
+            "dlon": self.dlon,
+            "dlat": self.dlat,
+            "rotation_deg": self.rotation_deg,
+            "coord_convention": "interfaces" if self.interfaces else "T-points",
+        })
         return d
 
 

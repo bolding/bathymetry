@@ -23,6 +23,7 @@ grid:
   #                     # so cells are approximately square in physical distance;
   #                     # this reduces the number of longitude grid points
   rotation: 0.0     # degrees CCW; non-zero produces a rotated curvilinear grid
+  # interfaces: false  # true → lon/lat bounds are cell corners; false (default) → T-points
 
 regridding:
   cache_dir: ./regrid_weights

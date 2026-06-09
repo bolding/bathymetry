@@ -17,6 +17,7 @@ Example YAML (``north_sea.yaml``)::
       dlat: 0.05        # to compute the missing spacing from the central latitude
       equidistant: false  # true → dlon = dlat / cos(lat_center) for square cells
       rotation: 0.0
+      interfaces: false   # true → lon/lat bounds are cell corners; false (default) → T-points
 
     regridding:
       cache_dir: ./regrid_weights
@@ -122,7 +123,8 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
         dlon    = _merge(args.dlon,    cfg, "grid", "dlon")
         dlat    = _merge(args.dlat,    cfg, "grid", "dlat")
         rot     = _merge(args.rotation, cfg, "grid", "rotation", default=0.0)
-        equidist = _merge(args.equidistant, cfg, "grid", "equidistant", default=False)
+        equidist   = _merge(args.equidistant, cfg, "grid", "equidistant", default=False)
+        interfaces = _merge(args.interfaces,  cfg, "grid", "interfaces",  default=False)
         for name, val in [("lon-min", lon_min), ("lon-max", lon_max),
                           ("lat-min", lat_min), ("lat-max", lat_max)]:
             if val is None:
@@ -148,7 +150,8 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
                 if val is None:
                     raise ValueError(f"Missing required grid parameter: {name}")
         return gridmod.SphericalGrid(lon_min, lon_max, lat_min, lat_max,
-                                     float(dlon), float(dlat), float(rot))
+                                     float(dlon), float(dlat), float(rot),
+                                     interfaces=bool(interfaces))
 
     elif grid_type == "cartesian":
         x_min = _merge(args.x_min, cfg, "grid", "x_min")
@@ -327,6 +330,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                      help="Compute the missing dlon (or dlat) from the other using the "
                           "central latitude so that grid cells are approximately square "
                           "in physical distance.  Specify exactly one of --dlon / --dlat.")
+    sph.add_argument("--interfaces", action="store_true", default=None,
+                     help="Treat lon_min/lat_min/lon_max/lat_max as cell-corner (interface) "
+                          "positions.  Default: they are T-point (cell-centre) positions, "
+                          "so lon_max/lat_max become the last T-point.")
 
     rtp = parser.add_argument_group("Rotated-pole grid")
     rtp.add_argument("--pole-lon", type=float, default=None, dest="pole_lon",
@@ -1159,15 +1166,35 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         images=final_plots,
     )
 
-    report_md = os.path.join(report_dir, pfx + "report.md")
-    rpt.write(report_md)
-
     if args.write_boundaries:
         print("\nWriting boundary coordinate files …")
         bdy_dir = os.path.dirname(os.path.abspath(output_file))
-        bdy_files = boundarymod.write_boundary_coords(dst, bdy_dir, name)
+        bdy_files, bdy_segments = boundarymod.write_boundary_coords(dst, bdy_dir, name)
         for f in bdy_files:
             print(f"  {os.path.join(bdy_dir, f)}")
+        # Build segment summary for the report
+        seg_table: dict = {}
+        for s in bdy_segments:
+            key = f"{s['side']} seg {s['segment']}"
+            seg_table[key] = (
+                f"i={s['i_start']}..{s['i_end']},  "
+                f"j={s['j_start']}..{s['j_end']},  "
+                f"n={s['n_cells']}"
+            )
+        rpt.add_section(
+            "Open boundaries",
+            text=(
+                f"T-grid coordinate file: `{bdy_files[0]}`  \n"
+                f"{sum(s['n_cells'] for s in bdy_segments)} boundary cells across "
+                f"{len(bdy_segments)} segment(s).  "
+                "Sides: west (S→N), north (W→E), east (S→N), south (W→E).  "
+                "Corner ownership: west/east include corners; north/south start at i=1."
+            ),
+            table=seg_table,
+        )
+
+    report_md = os.path.join(report_dir, pfx + "report.md")
+    rpt.write(report_md)
 
     print(f"\nDone.")
     print(f"  Output NetCDF : {output_file}")
