@@ -941,16 +941,38 @@ def boundary_thalwegs(
     logger.info("      building max-bottleneck MST …")
     mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
 
+    _dom_lon_min = float(dst_lon2d.min())
+    _dom_lon_max = float(dst_lon2d.max())
+    _dom_lat_min = float(dst_lat2d.min())
+    _dom_lat_max = float(dst_lat2d.max())
+
     def _snap_to_fine(lo: float, la: float) -> tuple[int, int] | None:
-        """Snap a geographic point to the nearest wet fine-grid cell."""
+        """Snap to the nearest wet fine-grid cell that lies inside the coarse domain.
+
+        Uses a ±20-cell search radius to handle coasts right at the domain edge.
+        Cells outside the domain are only accepted if nothing inside is found
+        (rare edge case for purely coastal boundaries).
+        """
         ci = int(np.argmin(np.abs(src_lon - lo)))
         ri = int(np.argmin(np.abs(src_lat - la)))
-        r0 = max(0, ri - 8);  r1 = min(len(src_lat), ri + 9)
-        c0 = max(0, ci - 8);  c1 = min(len(src_lon), ci + 9)
-        sub = src_mask[r0:r1, c0:c1]
+        radius = 20
+        r0 = max(0, ri - radius);  r1 = min(len(src_lat), ri + radius + 1)
+        c0 = max(0, ci - radius);  c1 = min(len(src_lon), ci + radius + 1)
+        sub_mask = src_mask[r0:r1, c0:c1]
+        sub_lon  = lon2d_f[r0:r1, c0:c1]
+        sub_lat  = lat2d_f[r0:r1, c0:c1]
+        sub_d    = src_depth[r0:r1, c0:c1]
+        in_dom   = (
+            (sub_lon >= _dom_lon_min) & (sub_lon <= _dom_lon_max) &
+            (sub_lat >= _dom_lat_min) & (sub_lat <= _dom_lat_max)
+        )
+        # Prefer wet cells inside the domain; only fall back to outside cells
+        # when the boundary position genuinely has no in-domain wet neighbors.
+        sub = sub_mask & in_dom
+        if not sub.any():
+            sub = sub_mask
         if not sub.any():
             return None
-        sub_d = src_depth[r0:r1, c0:c1]
         best = np.unravel_index(int(np.where(sub, sub_d, -np.inf).argmax()), sub.shape)
         return (r0 + int(best[0]), c0 + int(best[1]))
 
