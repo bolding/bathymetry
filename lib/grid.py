@@ -8,6 +8,7 @@ have shape [ny, nx] following the numpy/xarray [row, col] convention.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -185,9 +186,22 @@ class SphericalGrid(BaseGrid):
 
     def summary(self) -> dict:
         d = super().summary()
+        # Physical resolution in km at the domain centre
+        lat_min = float(self.center_lat.min())
+        lat_max = float(self.center_lat.max())
+        R = 6371.0
+        dy_km = self.dlat * math.pi / 180.0 * R
+        dx_km_s = self.dlon * math.pi / 180.0 * R * math.cos(math.radians(lat_max))
+        dx_km_n = self.dlon * math.pi / 180.0 * R * math.cos(math.radians(lat_min))
+        dx_lo, dx_hi = min(dx_km_s, dx_km_n), max(dx_km_s, dx_km_n)
+        if abs(dx_hi - dx_lo) < 0.05 * dy_km:
+            res_km = f"Δx≈Δy≈{dy_km:.2f} km"
+        else:
+            res_km = f"Δy≈{dy_km:.2f} km,  Δx {dx_lo:.2f}–{dx_hi:.2f} km"
         d.update({
             "dlon": self.dlon,
             "dlat": self.dlat,
+            "resolution_km": res_km,
             "rotation_deg": self.rotation_deg,
             "coord_convention": "interfaces" if self.interfaces else "T-points",
         })

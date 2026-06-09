@@ -53,7 +53,7 @@ Then run::
 
 Or override individual options::
 
-    bathymetry-regrid --config north_sea.yaml --smooth-rx0 0.15 --output bathy_v2.nc
+    bathymetry-regrid --config north_sea.yaml --smooth-rx0 0.15  # APPENDS 0.15; YAML rx0 kept
 """
 
 from __future__ import annotations
@@ -389,7 +389,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Smoothing
     sm = parser.add_argument_group("Smoothing")
     sm.add_argument("--smooth-rx0", type=float, default=None,
-                    help="Target rx0 (omit to skip smoothing).")
+                    help="Additional rx0 target to smooth to.  Appended to any "
+                         "rx0 value(s) already set via 'smooth.rx0' in the YAML; "
+                         "the YAML value is always kept.  Both produce separate "
+                         "output variables (depth_rx0_0p20, depth_rx0_0p15, …).")
 
     # Fixes
     fx = parser.add_argument_group("Fixes")
@@ -446,7 +449,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                            default=0.7)
     area_thr      = _merge(args.area_ratio_threshold, cfg, "analysis", "area_ratio_threshold",
                            default=0.5)
-    rx0           = _merge(args.smooth_rx0,   cfg, "smooth", "rx0")   # None = skip
+    # Collect all rx0 targets: YAML value(s) are always kept; CLI --smooth-rx0 appends.
+    _yaml_rx0 = _nested_get(cfg, "smooth", "rx0")
+    if _yaml_rx0 is None:
+        rx0_list: list[float] = []
+    elif isinstance(_yaml_rx0, list):
+        rx0_list = [float(v) for v in _yaml_rx0]
+    else:
+        rx0_list = [float(_yaml_rx0)]
+    if args.smooth_rx0 is not None:
+        _cli_rx0 = float(args.smooth_rx0)
+        if _cli_rx0 not in rx0_list:
+            rx0_list.append(_cli_rx0)
     fixes_list    = list(_nested_get(cfg, "fixes") or [])
 
     if source is None:
@@ -995,53 +1009,57 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
 
     # ------------------------------------------------------------------
-    # Step 5 – Optional rx0 smoothing
+    # Step 5 – Optional rx0 smoothing (one pass per target value)
     # ------------------------------------------------------------------
-    depth_smooth = None
-    corrections = None
-    if rx0 is not None:
-        smooth_var = _smooth_var_name(float(rx0))
-        print(f"\n[5/6] rx0 smoothing (target={rx0}, variable → '{smooth_var}') …")
-        t0 = time.time()
-        depth_arr  = np.where(dst["mask"].values, dst["depth"].values, 0.0)
-        mask_arr   = dst["mask"].values
-        rx0_u_b, rx0_v_b = smoothmod.compute_rx0(depth_arr, mask_arr)
-        depth_smooth, corrections = smoothmod.smooth_rx0(depth_arr, mask_arr, rx0=float(rx0))
-        rx0_u_a, rx0_v_a = smoothmod.compute_rx0(depth_smooth, mask_arr)
-        smooth_sum = smoothmod.smooth_summary(
-            depth_arr, depth_smooth, mask_arr, corrections, float(rx0)
-        )
-        report.print_table(smooth_sum, title=f"rx0 smoothing → {smooth_var}")
-        print(f"      done in {time.time()-t0:.1f} s")
+    # List of (rx0_value, depth_smooth, corrections) for all successful runs
+    smooth_variants: list[tuple[float, np.ndarray, np.ndarray]] = []
 
+    if rx0_list:
+        depth_arr = np.where(dst["mask"].values, dst["depth"].values, 0.0)
+        mask_arr  = dst["mask"].values
+        rx0_u_b, rx0_v_b = smoothmod.compute_rx0(depth_arr, mask_arr)
         rx0_before = np.maximum(
             np.pad(rx0_u_b, ((0, 0), (0, 1))),
             np.pad(rx0_v_b, ((0, 1), (0, 0))),
         )
-        rx0_after = np.maximum(
-            np.pad(rx0_u_a, ((0, 0), (0, 1))),
-            np.pad(rx0_v_a, ((0, 1), (0, 0))),
-        )
-        report.plot_rx0_diagnostics(
-            rx0_before, rx0_after, corrections,
-            dst.lon.values, dst.lat.values, mask_arr,
-            path_prefix=os.path.join(report_dir, pfx + "05_smooth"),
-        )
-        rpt.add_section(
-            f"rx0 smoothing (`{smooth_var}`)",
-            text=(
-                f"Linear-programming smoothing minimising depth corrections "
-                f"subject to rx0 ≤ {rx0} at every wet interface.  "
-                f"Smoothed field saved as NetCDF variable **`{smooth_var}`** "
-                f"alongside the unsmoothed `depth`, allowing multiple "
-                f"bathymetry variants in a single file."
-            ),
-            table=smooth_sum,
-            images=[
-                pfx + "05_smooth_rx0_histogram.png",
-                pfx + "05_smooth_corrections.png",
-            ],
-        )
+        for rx0_val in sorted(rx0_list, reverse=True):   # coarsest first
+            smooth_var = _smooth_var_name(rx0_val)
+            print(f"\n[5/6] rx0 smoothing (target={rx0_val}, variable → '{smooth_var}') …")
+            t0 = time.time()
+            depth_smooth, corrections = smoothmod.smooth_rx0(depth_arr, mask_arr,
+                                                              rx0=rx0_val)
+            rx0_u_a, rx0_v_a = smoothmod.compute_rx0(depth_smooth, mask_arr)
+            smooth_sum = smoothmod.smooth_summary(
+                depth_arr, depth_smooth, mask_arr, corrections, rx0_val
+            )
+            report.print_table(smooth_sum, title=f"rx0 smoothing → {smooth_var}")
+            print(f"      done in {time.time()-t0:.1f} s")
+
+            rx0_after = np.maximum(
+                np.pad(rx0_u_a, ((0, 0), (0, 1))),
+                np.pad(rx0_v_a, ((0, 1), (0, 0))),
+            )
+            report.plot_rx0_diagnostics(
+                rx0_before, rx0_after, corrections,
+                dst.lon.values, dst.lat.values, mask_arr,
+                path_prefix=os.path.join(report_dir, pfx + f"05_smooth_{smooth_var}"),
+            )
+            rpt.add_section(
+                f"rx0 smoothing (`{smooth_var}`)",
+                text=(
+                    f"Linear-programming smoothing minimising depth corrections "
+                    f"subject to rx0 ≤ {rx0_val} at every wet interface.  "
+                    f"Smoothed field saved as NetCDF variable **`{smooth_var}`** "
+                    f"alongside the unsmoothed `depth`, allowing multiple "
+                    f"bathymetry variants in a single file."
+                ),
+                table=smooth_sum,
+                images=[
+                    pfx + f"05_smooth_{smooth_var}_rx0_histogram.png",
+                    pfx + f"05_smooth_{smooth_var}_corrections.png",
+                ],
+            )
+            smooth_variants.append((rx0_val, depth_smooth, corrections))
     else:
         print("\n[5/6] Smoothing skipped.")
 
@@ -1094,17 +1112,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "source2": str(source2),
             },
         )
-    if depth_smooth is not None and rx0 is not None:
-        smooth_var = _smooth_var_name(float(rx0))
-        out_vars[smooth_var] = xr.DataArray(
-            np.where(dst["mask"].values, depth_smooth, np.nan),
+    for rx0_val, d_smooth, d_corr in smooth_variants:
+        sv = _smooth_var_name(rx0_val)
+        out_vars[sv] = xr.DataArray(
+            np.where(dst["mask"].values, d_smooth, np.nan),
             dims=["lat", "lon"], coords=dst.coords,
-            attrs={"long_name": f"Bathymetry smoothed to rx0≤{rx0}",
-                   "units": "m", "rx0_target": float(rx0)},
+            attrs={"long_name": f"Bathymetry smoothed to rx0≤{rx0_val}",
+                   "units": "m", "rx0_target": rx0_val},
         )
-        out_vars["depth_corrections"] = xr.DataArray(
-            corrections, dims=["lat", "lon"], coords=dst.coords,
-            attrs={"long_name": "Depth corrections from rx0 smoothing", "units": "m"},
+        out_vars[f"depth_corrections_{sv}"] = xr.DataArray(
+            d_corr, dims=["lat", "lon"], coords=dst.coords,
+            attrs={"long_name": f"Depth corrections from rx0 smoothing (rx0≤{rx0_val})",
+                   "units": "m"},
         )
 
     out_ds = xr.Dataset(out_vars, coords=dst.coords)
@@ -1117,10 +1136,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     depth_variants: list[tuple[str, np.ndarray, str]] = [
         ("depth", dst["depth"].values, "unsmoothed"),
     ]
-    if depth_smooth is not None and rx0 is not None:
+    for rx0_val, d_smooth, _ in smooth_variants:
+        sv = _smooth_var_name(rx0_val)
         depth_variants.append(
-            (smooth_var, np.where(dst["mask"].values, depth_smooth, np.nan),
-             f"rx0≤{rx0}")
+            (sv, np.where(dst["mask"].values, d_smooth, np.nan), f"rx0≤{rx0_val}")
         )
 
     subtitle = _plot_subtitle(dst_grid, dst)
