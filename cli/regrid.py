@@ -432,11 +432,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     # Smoothing
     sm = parser.add_argument_group("Smoothing")
-    sm.add_argument("--smooth-rx0", type=float, default=None,
-                    help="Additional rx0 target to smooth to.  Appended to any "
-                         "rx0 value(s) already set via 'smooth.rx0' in the YAML; "
-                         "the YAML value is always kept.  Both produce separate "
-                         "output variables (depth_rx0_0p20, depth_rx0_0p15, …).")
+    sm.add_argument("--smooth-rx0", type=float, nargs='+', default=None,
+                    metavar="RX0",
+                    help="One or more rx0 targets to smooth to (e.g. --smooth-rx0 0.1 0.15). "
+                         "Appended to any value(s) already set via 'smooth.rx0' in the YAML; "
+                         "the YAML value is always kept.  Each produces a separate "
+                         "output variable (depth_rx0_0p20, depth_rx0_0p15, …).")
 
     # Fixes
     fx = parser.add_argument_group("Fixes")
@@ -526,15 +527,24 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     else:
         rx0_list = [float(_yaml_rx0)]
     if args.smooth_rx0 is not None:
-        _cli_rx0 = float(args.smooth_rx0)
-        if _cli_rx0 not in rx0_list:
-            rx0_list.append(_cli_rx0)
+        for _cli_rx0 in args.smooth_rx0:
+            if _cli_rx0 not in rx0_list:
+                rx0_list.append(_cli_rx0)
     fixes_list    = list(_nested_get(cfg, "fixes") or [])
 
-    # Thalweg: enabled if --thalweg given, OR if config has a `thalwegs:` section,
-    # unless --no-thalweg explicitly disables it.
-    user_waypoints_cfg = list(_nested_get(cfg, "thalwegs") or [])
-    _thalweg_default = bool(user_waypoints_cfg)  # auto-enable when config has waypoints
+    # Thalweg: read from `thalweg:` section (new) or legacy `thalwegs:` list.
+    _tw_cfg = _nested_get(cfg, "thalweg") or {}
+    if not isinstance(_tw_cfg, dict):
+        _tw_cfg = {}
+    user_waypoints_cfg = list(
+        _tw_cfg.get("waypoints", None)
+        or _nested_get(cfg, "thalwegs")
+        or []
+    )
+    thalweg_min_sill    = float(_tw_cfg.get("min_sill_m",     5.0))
+    thalweg_max_detour  = float(_tw_cfg.get("max_detour",     2.5))
+    thalweg_sill_dedup  = float(_tw_cfg.get("sill_dedup_tol_m", 2.0))
+    _thalweg_default = bool(_tw_cfg.get("enabled", bool(user_waypoints_cfg)))
     run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
 
     if source is None:
@@ -1190,13 +1200,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 logger.info("      strait-based: %d thalweg(s)", len(tw_a))
 
             # Mode B: boundary auto-detection (one start per wet segment per edge)
-            tw_b = thalwegmod.boundary_thalwegs(src, dst, min_sill_m=5.0)
+            tw_b = thalwegmod.boundary_thalwegs(
+                _thalweg_src, dst,
+                min_sill_m=thalweg_min_sill,
+                max_detour=thalweg_max_detour,
+                sill_dedup_tol_m=thalweg_sill_dedup,
+            )
             thalweg_records.extend(tw_b)
             logger.info("      boundary auto: %d thalweg(s)", len(tw_b))
 
-            # Mode C: user waypoints (from `thalwegs:` in config)
+            # Mode C: user waypoints
             if user_waypoints_cfg:
-                tw_c = thalwegmod.waypoint_thalwegs(src, dst, user_waypoints_cfg)
+                tw_c = thalwegmod.waypoint_thalwegs(
+                    _thalweg_src, dst, user_waypoints_cfg,
+                    max_detour=thalweg_max_detour,
+                )
                 thalweg_records.extend(tw_c)
                 logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
 
@@ -1237,6 +1255,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 tw, csv_path=os.path.join(report_dir, csv_name)
             )
             logger.info("        wrote %s", csv_name)
+            if tw.get("zoomable", False):
+                html_name = pfx + f"04e_thalweg_{k:03d}_{safe}.html"
+                report.plot_thalweg_html(
+                    tw, html_path=os.path.join(report_dir, html_name)
+                )
+                logger.info("        wrote %s (zoomable)", html_name)
 
         if not thalweg_records:
             logger.info("      no thalwegs to plot")

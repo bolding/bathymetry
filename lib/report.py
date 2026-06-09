@@ -1437,7 +1437,10 @@ def plot_thalweg_comparison(
         fine_lon = fine_lat = None
     fine_depth = fine_ds["depth"].values if hasattr(fine_ds["depth"], "values") else fine_ds["depth"]
     _mask_key  = "mask" if "mask" in fine_ds else "land"
-    fine_mask  = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]
+    _fine_mask_raw = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]
+    # "land" → True = land (invert to get wet); "mask" → True = wet
+    fine_mask_wet = (~_fine_mask_raw.astype(bool) if _mask_key == "land"
+                     else _fine_mask_raw.astype(bool))
 
     # ── figure layout ────────────────────────────────────────────────────────
     geo = ccrs.PlateCarree()
@@ -1446,25 +1449,23 @@ def plot_thalweg_comparison(
     ax_map  = fig.add_subplot(gs[0], projection=geo)
     ax_prof = fig.add_subplot(gs[1])
 
-    # ── map extent — always use the coarse (target) domain ──────────────────
-    coarse_lon = _get_2d(coarse_ds, ["lon", "longitude", "lont", "nav_lon"])
-    coarse_lat = _get_2d(coarse_ds, ["lat", "latitude", "latt", "nav_lat"])
-    if coarse_lon is not None and coarse_lat is not None:
-        c_lon_min, c_lon_max = float(coarse_lon.min()), float(coarse_lon.max())
-        c_lat_min, c_lat_max = float(coarse_lat.min()), float(coarse_lat.max())
-        lon_margin = (c_lon_max - c_lon_min) * 0.03
-        lat_margin = (c_lat_max - c_lat_min) * 0.03
-        ax_map.set_extent(  # type: ignore[union-attr]
-            [c_lon_min - lon_margin, c_lon_max + lon_margin,
-             c_lat_min - lat_margin, c_lat_max + lat_margin],
-            crs=geo,
-        )
+    # ── map extent — zoom to thalweg path bounding box ──────────────────────
+    depth_vmax = max(1.0, float(np.nanmax(fine["depth"])))
+    p_lon_min  = float(np.nanmin(fine["lon"]))
+    p_lon_max  = float(np.nanmax(fine["lon"]))
+    p_lat_min  = float(np.nanmin(fine["lat"]))
+    p_lat_max  = float(np.nanmax(fine["lat"]))
+    span       = max(p_lon_max - p_lon_min, p_lat_max - p_lat_min, 0.5)
+    margin     = span * 0.30
+    ax_map.set_extent(  # type: ignore[union-attr]
+        [p_lon_min - margin, p_lon_max + margin,
+         p_lat_min - margin, p_lat_max + margin],
+        crs=geo,
+    )
 
     # ── left panel: map ──────────────────────────────────────────────────────
-    depth_vmax = max(1.0, float(np.nanmax(fine["depth"])))
-
     if fine_lon is not None and fine_lat is not None:
-        depth_plot = np.where(fine_mask.astype(bool), fine_depth, np.nan)
+        depth_plot = np.where(fine_mask_wet, fine_depth, np.nan)
         pcm = ax_map.pcolormesh(  # type: ignore[union-attr]
             fine_lon, fine_lat, depth_plot,
             cmap=cmocean.cm.deep, shading="auto", transform=geo,
@@ -1489,7 +1490,7 @@ def plot_thalweg_comparison(
     sc = ax_map.scatter(  # type: ignore[call-arg,union-attr]
         fine["lon"], fine["lat"],
         c=coarse["depth"], cmap=cmocean.cm.thermal,
-        s=22, zorder=6, label="Coarse depth",
+        s=6, zorder=6, label="Coarse depth",
         transform=geo,
         vmin=0, vmax=depth_vmax,
     )
@@ -1545,3 +1546,100 @@ def plot_thalweg_comparison(
     png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_thalweg_html(record: dict, html_path: str) -> None:
+    """Save a zoomable interactive plotly version of the thalweg comparison.
+
+    Two panels: left = geographic scatter (path + sill), right = depth profile.
+    Saved as a standalone HTML file.
+    """
+    import numpy as np
+    from pathlib import Path
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    fine   = record["fine"]
+    coarse = record["coarse"]
+    name   = record.get("name", "Thalweg")
+
+    sill_dist = fine.get("sill_dist_km", float("nan"))
+    sill_idx  = (int(np.argmin(np.abs(fine["dist_km"] - sill_dist)))
+                 if np.isfinite(sill_dist) else None)
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.5, 0.5],
+        specs=[[{"type": "scattergeo"}, {"type": "xy"}]],
+        subplot_titles=[f"{name} — map", f"{name} — depth profile"],
+    )
+
+    # Left: geographic path
+    fig.add_trace(go.Scattergeo(
+        lon=fine["lon"], lat=fine["lat"],
+        mode="lines",
+        line={"color": "steelblue", "width": 2},
+        name="Fine thalweg",
+    ), row=1, col=1)
+
+    # Coarse depth scatter on map
+    c_valid = np.isfinite(coarse["depth"])
+    if c_valid.any():
+        fig.add_trace(go.Scattergeo(
+            lon=fine["lon"][c_valid], lat=fine["lat"][c_valid],
+            mode="markers",
+            marker={"color": coarse["depth"][c_valid], "colorscale": "Oranges",
+                    "size": 5, "reversescale": True,
+                    "colorbar": {"title": "Coarse depth (m)", "x": 0.48}},
+            name="Coarse depth",
+        ), row=1, col=1)
+
+    # Sill marker
+    if sill_idx is not None:
+        fig.add_trace(go.Scattergeo(
+            lon=[float(fine["lon"][sill_idx])],
+            lat=[float(fine["lat"][sill_idx])],
+            mode="markers",
+            marker={"symbol": "circle-open", "size": 14,
+                    "color": "crimson", "line": {"width": 2}},
+            name="Sill",
+        ), row=1, col=1)
+
+    fig.update_geos(
+        lonaxis_range=[float(fine["lon"].min()) - 1, float(fine["lon"].max()) + 1],
+        lataxis_range=[float(fine["lat"].min()) - 0.5, float(fine["lat"].max()) + 0.5],
+        showcoastlines=True, coastlinecolor="black", coastlinewidth=0.8,
+        showland=True, landcolor="#e8dcc8",
+        showocean=True, oceancolor="#cde8f6",
+        resolution=50,
+        row=1, col=1,
+    )
+
+    # Right: depth profile
+    fig.add_trace(go.Scatter(
+        x=fine["dist_km"], y=fine["depth"],
+        mode="lines", line={"color": "steelblue", "width": 1.5},
+        name="Fine depth",
+    ), row=1, col=2)
+
+    c_valid2 = np.isfinite(coarse["depth"])
+    if c_valid2.any():
+        fig.add_trace(go.Scatter(
+            x=coarse["dist_km"][c_valid2], y=coarse["depth"][c_valid2],
+            mode="markers", marker={"color": "darkorange", "size": 3},
+            name="Coarse depth",
+        ), row=1, col=2)
+
+    if sill_idx is not None:
+        fig.add_hline(y=fine["depth"][sill_idx], line_dash="dash",
+                      line_color="crimson", annotation_text=f"Sill {fine['depth'][sill_idx]:.0f} m",
+                      row=1, col=2)
+        fig.add_vline(x=float(fine["dist_km"][sill_idx]), line_dash="dot",
+                      line_color="grey", row=1, col=2)
+
+    fig.update_yaxes(autorange="reversed", title_text="Depth (m)", row=1, col=2)
+    fig.update_xaxes(title_text="Along-path distance (km)", row=1, col=2)
+    fig.update_layout(title_text=name, height=500, width=1100)
+
+    Path(html_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(html_path, include_plotlyjs="cdn")

@@ -739,6 +739,8 @@ def boundary_thalwegs(
     src,
     dst,
     min_sill_m: float = 5.0,
+    max_detour: float = 2.5,
+    sill_dedup_tol_m: float = 2.0,
 ) -> list[dict]:
     """Auto-detect thalwegs starting from wet segments on each domain edge.
 
@@ -795,10 +797,10 @@ def boundary_thalwegs(
     # Try every ordered pair of starts on different edges.
     # After clipping to the domain, deduplicate by sill depth (within tolerance)
     # per edge-pair direction.  Also discard paths whose length is more than
-    # _MAX_DETOUR times the straight-line distance between the clipped endpoints
+    # max_detour times the straight-line distance between the clipped endpoints
     # (catches MST routes that go "around" rather than across).
-    _SILL_DEDUP_TOL_M  = 2.0
-    _MAX_DETOUR        = 2.5
+    _SILL_DEDUP_TOL_M  = sill_dedup_tol_m
+    _MAX_DETOUR        = max_detour
     seen_pairs: set[frozenset]                        = set()
     seen_sill_depths: dict[frozenset[str], list[float]] = {}
     results: list[dict] = []
@@ -889,6 +891,7 @@ def waypoint_thalwegs(
     src,
     dst,
     waypoints: list[dict],
+    max_detour: float = 2.5,
 ) -> list[dict]:
     """Compute thalwegs along user-specified start→end waypoints.
 
@@ -983,12 +986,25 @@ def waypoint_thalwegs(
             float(dst_lon2d.min()), float(dst_lon2d.max()),
             float(dst_lat2d.min()), float(dst_lat2d.max()),
         )
+        if len(fine["lon"]) >= 2 and max_detour > 0:
+            direct_km = _great_circle_km(
+                float(fine["lon"][0]),  float(fine["lat"][0]),
+                float(fine["lon"][-1]), float(fine["lat"][-1]),
+            )
+            if direct_km > 0 and float(fine["dist_km"][-1]) > max_detour * direct_km:
+                logger.warning("thalweg '%s': path %.0f km vs %.0f km direct — skipped "
+                               "(increase max_detour to keep)", name,
+                               fine["dist_km"][-1], direct_km)
+                continue
         coarse_dep = _sample_coarse(
             fine["lon"], fine["lat"], coarse_tree, coarse_dep_arr,  # type: ignore[arg-type]
             max_dist_deg=max_lookup,
         )
         c_valid = np.isfinite(coarse_dep)
         coarse_sill = float(np.nanmin(coarse_dep[c_valid])) if c_valid.any() else np.nan
+        cs_str = f"{coarse_sill:.1f} m" if np.isfinite(coarse_sill) else "n/a"
+        logger.info("      + %s  fine_sill=%.1f m  coarse_sill=%s  L=%.0f km",
+                    name, fine["sill_depth"], cs_str, fine["dist_km"][-1])
 
         results.append({
             "name": name,
@@ -1004,6 +1020,7 @@ def waypoint_thalwegs(
             "lat": float(0.5 * (la0 + la1)),
             "direction": "user",
             "category": "WAYPOINT",
+            "zoomable": bool(wp.get("zoomable", False)),
         })
 
     return results
