@@ -740,8 +740,11 @@ def boundary_thalwegs(
                 len(starts),
                 len({s["edge"] for s in starts}))
 
-    # Try every ordered pair of starts on different edges
-    seen: set[frozenset] = set()
+    # Try every ordered pair of starts on different edges.
+    # Two pairs that share the same sill cell (minimum-depth node on the MST
+    # path) represent the same physical channel — keep only the first.
+    seen_pairs: set[frozenset]                          = set()
+    seen_sills: dict[frozenset[str], set[tuple[int,int]]] = {}
     results: list[dict] = []
 
     for i, s1 in enumerate(starts):
@@ -749,13 +752,21 @@ def boundary_thalwegs(
             if s1["edge"] == s2["edge"]:
                 continue
             pair_key = frozenset([i, j])
-            if pair_key in seen:
+            if pair_key in seen_pairs:
                 continue
-            seen.add(pair_key)
+            seen_pairs.add(pair_key)
 
             path = _mst_path(mst, node_id_f, wet_rc_f, s1["ij"], s2["ij"])
             if path is None or len(path) < 5:
                 continue
+
+            # Deduplicate by sill cell per edge-pair direction
+            edge_key: frozenset[str] = frozenset([s1["edge"], s2["edge"]])
+            path_depths = [src_depth[r, c] for r, c in path]
+            sill_cell   = path[int(np.argmin(path_depths))]
+            if sill_cell in seen_sills.setdefault(edge_key, set()):
+                continue
+            seen_sills[edge_key].add(sill_cell)
 
             fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
             fine = _clip_profile_to_domain(
