@@ -1474,8 +1474,10 @@ def plot_thalweg_comparison(
 
     ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
     ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
-    ax_map.gridlines(draw_labels=True, linewidth=0.3, color="grey",          # type: ignore[union-attr]
-                     alpha=0.5, x_inline=False, y_inline=False)
+    _gl = ax_map.gridlines(draw_labels=True, linewidth=0.3, color="grey",   # type: ignore[union-attr]
+                           alpha=0.5, x_inline=False, y_inline=False)
+    _gl.top_labels   = False
+    _gl.right_labels = False
 
     # fine thalweg path
     ax_map.plot(fine["lon"], fine["lat"], color="white", lw=2.0,   # type: ignore[union-attr]
