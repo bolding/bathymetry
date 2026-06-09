@@ -70,6 +70,7 @@ bathymetry/
 │   ├── analysis.py    strait detection, mask regions, isolated-cell masking
 │   ├── smooth.py      rx0 slope-factor smoothing (LP, ported from GETM)
 │   ├── boundary.py    open-boundary T-grid coordinate CSV writer
+│   ├── thalweg.py     fine-vs-coarse thalweg extraction and comparison
 │   └── report.py      Markdown report, ASCII tables, cartopy + plotly plots
 └── cli/
     └── regrid.py      CLI entry point (bathymetry-regrid)
@@ -258,6 +259,7 @@ output:
 | 4c | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
 | 4c-ii | `analysis` | Detect LAND_BRIDGE cells (forced-land with wet_fraction > 0 between disconnected basins) |
 | 4d | `analysis` | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT) |
+| 4e | `thalweg` | Compare fine-vs-coarse thalweg depth profiles (optional; `--thalweg`) |
 | 5 | `smooth` | rx0 slope smoothing via linear programming (optional) |
 | 6 | — | Write output NetCDF + final plots for every depth variable |
 
@@ -389,6 +391,7 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `{name}_04d_straits.csv` | Flagged interface table |
 | `{name}_04d_section_*.png` | Cross-section profiles with map inset |
 | `fixes_suggested.yaml` | All suggested fixes grouped by cause (BLOCKED / SILL_DEFICIT / AREA_DEFICIT / LAND_BRIDGE) |
+| `{name}_04e_thalweg_NNN_*.png` | Thalweg comparison panels (one per thalweg; step 4e) |
 | `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
 | `{name}_06_final_depth.png/.html` | Final unsmoothed bathymetry (interactive) |
 | `{name}_06_final_depth_rx0_*.png/.html` | Final smoothed bathymetry (interactive) |
@@ -409,6 +412,96 @@ lon,lat
 
 The report Markdown includes a segment table showing the start/stop `(i,j)`
 indices and cell count for each contiguous wet segment per side.
+
+## Thalweg analysis
+
+A *thalweg* is the line connecting the deepest points along a channel.
+Comparing fine-resolution and coarse-resolution thalwegs reveals how much
+depth information is lost after regridding — in particular how much the sill
+depth (the shallowest point along the deepest route) is under-represented.
+
+Thalweg analysis runs as step 4e after strait detection.  It is **off by
+default** and is enabled with `--thalweg` on the command line.  If your
+config file contains a `thalwegs:` section the step is enabled automatically.
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid --thalweg
+bathymetry-regrid --config my_run.yaml --skip-regrid --no-thalweg   # force off
+```
+
+### Three detection modes
+
+All three modes run in the same pass and their results are combined.
+
+#### Mode A — Strait-based
+
+For every strait interface flagged in step 4d, the fine-resolution thalweg is
+extracted through the strait window (along-channel depth profile, deepest wet
+cell per cross-section) and the coarse-resolution depth is sampled at the same
+geographic positions via a KD-tree nearest-neighbour lookup.  Up to
+`analysis.max_section_profiles` straits are processed (default 10).
+
+#### Mode B — Boundary auto-detection
+
+The deepest wet cell on each domain edge provides a natural start point.  If
+an island intersects a boundary, the edge is split into several disconnected
+wet segments — **each segment produces its own independent start cell**.  The
+max-bottleneck Dijkstra algorithm then finds the route between every cross-edge
+pair of starts that keeps the minimum depth along the path as large as
+possible.  This is the true deepest route through the domain, not simply the
+shortest path.
+
+Paths whose fine-resolution sill is shallower than 5 m are discarded.
+
+#### Mode C — User waypoints
+
+Specify one or more named start→end pairs in your config file:
+
+```yaml
+thalwegs:
+  - name: "Great Belt"
+    lon_start: 10.2
+    lat_start: 55.3
+    lon_end:   11.0
+    lat_end:   55.9
+  - name: "Little Belt"
+    lon_start:  9.5
+    lat_start: 55.0
+    lon_end:   10.5
+    lat_end:   56.5
+  - name: "Öresund"
+    lon_start: 12.6
+    lat_start: 55.4
+    lon_end:   12.9
+    lat_end:   56.1
+```
+
+Each waypoint is snapped to the nearest wet fine-grid cell.  The
+max-bottleneck Dijkstra algorithm then finds the deepest route between the two
+endpoints.  The presence of any `thalwegs:` entry in the config is sufficient
+to enable step 4e automatically.
+
+### Output
+
+Each thalweg produces a two-panel figure (`04e_thalweg_NNN_<name>.png`):
+
+- **Left panel — map**: fine-resolution depth as a background pcolormesh,
+  the thalweg path overlaid in blue, coarse-resolution depths as a coloured
+  scatter, and a triangle marker at the sill position.
+- **Right panel — depth profile**: fine-resolution depth (solid blue line) and
+  coarse-resolution depth (orange dots) plotted against along-path distance
+  (km), with dashed horizontal lines at the fine and coarse sill depths and an
+  inverted y-axis.
+
+The thalweg name in the figure title and report section encodes the detection
+mode:
+
+| Example name | Origin |
+|---|---|
+| `west→east` | Mode B, simple edge pair |
+| `south[1]→north[0]` | Mode B, island on boundary (segment indices shown) |
+| `Little Belt` | Mode C, user-specified waypoint |
+| Strait category + lat/lon | Mode A, derived from strait record |
 
 ## Strait categories and land bridges
 

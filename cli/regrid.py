@@ -80,6 +80,7 @@ import interpolate
 import reader
 import report
 import smooth as smoothmod
+import thalweg as thalwegmod
 
 # ---------------------------------------------------------------------------
 # YAML config loading and merge
@@ -445,6 +446,15 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                          "report directory (equivalent to "
                          "--fixes-file <report_dir>/fixes_suggested.yaml).")
 
+    tw = parser.add_argument_group("Thalweg analysis")
+    tw.add_argument("--thalweg", action="store_true", default=None,
+                    help="Enable thalweg analysis (fine-vs-coarse depth profiles). "
+                         "Default: enabled when thalweg section present in config, "
+                         "or use --thalweg to force on.")
+    tw.add_argument("--no-thalweg", action="store_true",
+                    help="Disable thalweg analysis even if config contains a "
+                         "`thalwegs:` section.")
+
     # Output
     out = parser.add_argument_group("Output")
     out.add_argument("--name", default=None,
@@ -502,6 +512,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         if _cli_rx0 not in rx0_list:
             rx0_list.append(_cli_rx0)
     fixes_list    = list(_nested_get(cfg, "fixes") or [])
+
+    # Thalweg: enabled if --thalweg given, OR if config has a `thalwegs:` section,
+    # unless --no-thalweg explicitly disables it.
+    user_waypoints_cfg = list(_nested_get(cfg, "thalwegs") or [])
+    _thalweg_default = bool(user_waypoints_cfg)  # auto-enable when config has waypoints
+    run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
 
     if source is None:
         parser.error("--source (or 'source:' in YAML) is required")
@@ -1110,6 +1126,69 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "All interfaces are listed in the straits CSV and `fixes_suggested.yaml`."
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Step 4e – Thalweg comparison (fine vs coarse)  [--thalweg / --no-thalweg]
+    # ------------------------------------------------------------------
+    if run_thalweg:
+        print("\n[4e/6] Computing thalwegs …")
+        t0 = time.time()
+
+        thalweg_records: list[dict] = []
+
+        # Mode A: strait-based (top straits from step 4d)
+        if strait_records:
+            tw_a = thalwegmod.compute_strait_thalwegs(src, dst, strait_records,
+                                                       n_straits=max_sections)
+            thalweg_records.extend(tw_a)
+            print(f"      strait-based: {len(tw_a)} thalweg(s)")
+
+        # Mode B: boundary auto-detection (one start per connected wet segment per edge)
+        tw_b = thalwegmod.boundary_thalwegs(src, dst, min_sill_m=5.0)
+        thalweg_records.extend(tw_b)
+        print(f"      boundary auto: {len(tw_b)} thalweg(s)")
+
+        # Mode C: user waypoints (from `thalwegs:` in config)
+        if user_waypoints_cfg:
+            tw_c = thalwegmod.waypoint_thalwegs(src, dst, user_waypoints_cfg)
+            thalweg_records.extend(tw_c)
+            print(f"      waypoints:     {len(tw_c)} thalweg(s)")
+
+        print(f"      total: {len(thalweg_records)} thalweg(s) in {time.time()-t0:.1f} s")
+
+        tw_sum = thalwegmod.thalweg_summary(thalweg_records)
+        report.print_table(tw_sum, title="Thalweg comparison")
+
+        for k, tw in enumerate(thalweg_records):
+            cat = tw.get("category", "tw")
+            tw_name = tw.get("name", f"thalweg_{k:03d}")
+            safe = (tw_name.replace(" ", "_").replace("→", "-")
+                    .replace("[", "").replace("]", ""))
+            img = pfx + f"04e_thalweg_{k:03d}_{safe}.png"
+            report.plot_thalweg_comparison(
+                tw, src, dst,
+                png_path=os.path.join(report_dir, img),
+            )
+            deficit = tw.get("sill_deficit_m", float("nan"))
+            coarse_sill = tw["coarse"]["sill_depth"]
+            rpt.add_section(
+                f"Thalweg: {tw_name}",
+                text=(
+                    f"Category: **{cat}**.  "
+                    f"Fine sill depth: **{tw['fine']['sill_depth']:.1f} m**.  "
+                    f"Coarse sill depth: **{coarse_sill:.1f} m**.  "
+                    f"Deficit: **{deficit:.1f} m**."
+                    if np.isfinite(deficit) else
+                    f"Category: **{cat}**.  Fine sill: {tw['fine']['sill_depth']:.1f} m."
+                ),
+                table={},
+                images=[img],
+            )
+
+        if not thalweg_records:
+            print("      no thalwegs to plot")
+    else:
+        print("\n[4e/6] Thalweg analysis skipped (use --thalweg to enable).")
 
     # ------------------------------------------------------------------
     # Step 5 – Optional rx0 smoothing (one pass per target value)

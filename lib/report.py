@@ -1378,3 +1378,117 @@ def _save_straits_html(
         margin=dict(l=60, r=20, t=50, b=80),
     )
     fig.write_html(str(png_path.with_suffix(".html")))
+
+
+def plot_thalweg_comparison(
+    record: dict[str, Any],
+    fine_ds: Any,
+    coarse_ds: Any,
+    png_path: str | Path,
+) -> None:
+    """Two-panel thalweg comparison: map (left) + depth profile (right).
+
+    Parameters
+    ----------
+    record:
+        One entry from the list returned by thalweg.compute_strait_thalwegs /
+        boundary_thalwegs / waypoint_thalwegs.  Must contain keys
+        ``fine`` and ``coarse`` (each a dict with arrays lon/lat/dist_km/depth)
+        and optionally ``name``, ``sill_depth_m``, ``sill_lon``, ``sill_lat``.
+    fine_ds, coarse_ds:
+        xarray Datasets with variables ``depth`` and ``mask``; must have 2-D
+        lon/lat coordinate arrays accessible as ``lon`` / ``lat``.
+    png_path:
+        Output PNG path (saved at 150 dpi).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    import numpy as np
+
+    fine  = record["fine"]
+    coarse = record["coarse"]
+    name  = record.get("name", "Thalweg")
+
+    # ── coordinates from fine grid ──────────────────────────────────────────
+    def _get_2d(ds: Any, candidates: list[str]) -> Any:
+        for c in candidates:
+            if c in ds.coords or c in ds:
+                arr = ds[c].values if hasattr(ds[c], "values") else ds[c]
+                if arr.ndim == 2:
+                    return arr
+        return None
+
+    fine_lon = _get_2d(fine_ds, ["lon", "longitude", "lont", "nav_lon"])
+    fine_lat = _get_2d(fine_ds, ["lat", "latitude", "latt", "nav_lat"])
+    fine_depth = fine_ds["depth"].values if hasattr(fine_ds["depth"], "values") else fine_ds["depth"]
+    fine_mask  = fine_ds["mask"].values  if hasattr(fine_ds["mask"],  "values") else fine_ds["mask"]
+
+    # ── figure layout ────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(13, 5))
+    gs  = gridspec.GridSpec(1, 2, width_ratios=[1.35, 1], wspace=0.35)
+    ax_map  = fig.add_subplot(gs[0])
+    ax_prof = fig.add_subplot(gs[1])
+
+    # ── left panel: map ──────────────────────────────────────────────────────
+    if fine_lon is not None and fine_lat is not None:
+        depth_plot = np.where(fine_mask.astype(bool), fine_depth, np.nan)
+        pcm = ax_map.pcolormesh(
+            fine_lon, fine_lat, depth_plot,
+            cmap="Blues", shading="auto",
+        )
+        plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.85)
+
+    # fine thalweg path
+    ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.5,
+                label="Fine thalweg")
+
+    # coarse depth scatter
+    sc = ax_map.scatter(  # type: ignore[call-arg]
+        coarse["lon"], coarse["lat"],
+        c=coarse["depth"], cmap="Oranges_r",
+        s=18, zorder=4, label="Coarse depth",
+        vmin=0, vmax=max(1, float(np.nanmax(fine["depth"]))),
+    )
+
+    # sill marker on map
+    sill_lon = record.get("sill_lon")
+    sill_lat = record.get("sill_lat")
+    if sill_lon is not None and sill_lat is not None:
+        ax_map.plot(sill_lon, sill_lat, "rv", ms=8, zorder=5, label="Sill")
+
+    ax_map.set_xlabel("Longitude")
+    ax_map.set_ylabel("Latitude")
+    ax_map.set_title(f"{name} — map")
+    ax_map.legend(fontsize=7, loc="upper left")
+
+    # ── right panel: depth profile ───────────────────────────────────────────
+    ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
+                 lw=1.5, label="Fine")
+    ax_prof.scatter(coarse["dist_km"], coarse["depth"], color="darkorange",
+                    s=20, zorder=4, label="Coarse")
+
+    sill_d = record.get("sill_depth_m")
+    if sill_d is not None:
+        ax_prof.axhline(sill_d, color="red", ls="--", lw=1,
+                        label=f"Fine sill {sill_d:.0f} m")
+
+    sill_d_coarse = record.get("coarse_sill_depth_m")
+    if sill_d_coarse is not None:
+        ax_prof.axhline(sill_d_coarse, color="darkorange", ls="--", lw=1,
+                        label=f"Coarse sill {sill_d_coarse:.0f} m")
+
+    sill_dist = record.get("sill_dist_km")
+    if sill_dist is not None:
+        ax_prof.axvline(sill_dist, color="grey", ls=":", lw=1)
+
+    ax_prof.invert_yaxis()
+    ax_prof.set_xlabel("Along-path distance (km)")
+    ax_prof.set_ylabel("Depth (m)")
+    ax_prof.set_title(f"{name} — depth profile")
+    ax_prof.legend(fontsize=7)
+
+    fig.suptitle(name, fontsize=11, y=1.01)
+    png_path = Path(png_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
