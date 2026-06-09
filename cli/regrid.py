@@ -1153,8 +1153,33 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         thalweg_records: list[dict] = []
 
-        if src is None:
-            logger.warning("      Skipped (--skip-regrid: fine source not available).")
+        # With --skip-regrid the fine source was not loaded; load it now.
+        # This is cheap relative to the MST build that follows.
+        _thalweg_src = src
+        if _thalweg_src is None and source is not None:
+            logger.info("      Loading fine source for thalweg …")
+            _t_src = time.time()
+            try:
+                _thalweg_src = reader.read_source(
+                    source, dst_grid.lon_bounds, dst_grid.lat_bounds,
+                    pad_deg=float(pad_deg),
+                    emodnet_cache_dir=str(emodnet_cache),
+                    emodnet_resolution=(float(emodnet_res)
+                                        if emodnet_res is not None else None),
+                )
+                if coastline_res is not None:
+                    _thalweg_src = reader.apply_coastline_mask(
+                        _thalweg_src, resolution=str(coastline_res)
+                    )
+                logger.info("      Fine source loaded in %.1f s",
+                            time.time() - _t_src)
+            except Exception as exc:
+                logger.warning("      Could not load fine source (%s) — "
+                               "thalweg skipped.", exc)
+                _thalweg_src = None
+
+        if _thalweg_src is None:
+            logger.warning("      Thalweg skipped: fine source unavailable.")
         else:
             # Mode A: strait-based (top straits from step 4d)
             if strait_records:

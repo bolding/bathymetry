@@ -1396,7 +1396,7 @@ def plot_thalweg_comparison(
         ``fine`` and ``coarse`` (each a dict with arrays lon/lat/dist_km/depth)
         and optionally ``name``, ``sill_depth_m``, ``sill_lon``, ``sill_lat``.
     fine_ds, coarse_ds:
-        xarray Datasets with variables ``depth`` and ``mask``; must have 2-D
+        xarray Datasets with variables ``depth`` and ``mask`` (or ``land``); must have 2-D
         lon/lat coordinate arrays accessible as ``lon`` / ``lat``.
     png_path:
         Output PNG path (saved at 150 dpi).
@@ -1421,7 +1421,8 @@ def plot_thalweg_comparison(
     fine_lon = _get_2d(fine_ds, ["lon", "longitude", "lont", "nav_lon"])
     fine_lat = _get_2d(fine_ds, ["lat", "latitude", "latt", "nav_lat"])
     fine_depth = fine_ds["depth"].values if hasattr(fine_ds["depth"], "values") else fine_ds["depth"]
-    fine_mask  = fine_ds["mask"].values  if hasattr(fine_ds["mask"],  "values") else fine_ds["mask"]
+    _mask_key  = "mask" if "mask" in fine_ds else "land"
+    fine_mask  = fine_ds[_mask_key].values if hasattr(fine_ds[_mask_key], "values") else fine_ds[_mask_key]
 
     # ── figure layout ────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(13, 5))
