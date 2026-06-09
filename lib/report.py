@@ -1504,7 +1504,7 @@ def plot_thalweg_comparison(
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
                  lw=1.5, label="Fine")
     ax_prof.scatter(coarse["dist_km"], coarse["depth"], color="darkorange",
-                    s=20, zorder=4, label="Coarse")
+                    s=4, zorder=4, label="Coarse")
 
     sill_d = record.get("sill_depth_m")
     if sill_d is not None:
