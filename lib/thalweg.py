@@ -345,72 +345,134 @@ def thalweg_summary(records: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Dijkstra max-bottleneck path
+# Maximum spanning tree — max-bottleneck path (build once, query many)
 # ---------------------------------------------------------------------------
 
-def _dijkstra_max_bottleneck(
+def _build_bottleneck_mst(
     depth: npt.NDArray,
     mask: npt.NDArray,
-    start: tuple[int, int],
-    end: tuple[int, int],
-) -> list[tuple[int, int]] | None:
-    """Find the path that maximises the minimum depth (max-bottleneck / widest path).
+) -> tuple:
+    """Build a maximum spanning tree for bottleneck path queries.
 
-    This is the thalweg: the route through the grid that keeps as deep as possible
-    at its shallowest point.  Uses a max-heap priority queue — at each step the
-    cell with the highest *minimum-depth-so-far* is expanded.
+    The edge weight between two adjacent wet cells is min(depth_u, depth_v) —
+    the shallowest point you must pass through.  The maximum spanning tree
+    (MST of negated weights) connects every wet cell such that the path
+    between any two nodes in the tree is the max-bottleneck path: the route
+    that maximises the minimum depth along it.
+
+    This is O(E log E) in C via scipy and is built once per dataset, after
+    which each path query is a cheap BFS on the sparse tree.
 
     Parameters
     ----------
     depth : ndarray [ny, nx]
-        Ocean depth (0 or NaN for land).
+        Ocean depth; 0 for land cells.
     mask : ndarray [ny, nx] bool
-        Ocean mask; only masked-True cells are traversable.
-    start, end : (row, col)
-        Grid-index endpoints.
+        Ocean mask; only True cells are included as nodes.
+
+    Returns
+    -------
+    mst : scipy.sparse.csr_matrix
+        Symmetric undirected MST with positive bottleneck edge weights.
+    node_id : ndarray [ny, nx] int32
+        Maps (row, col) → node index; -1 for land cells.
+    wet_rc : ndarray [n_nodes, 2]
+        Maps node index → (row, col).
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import minimum_spanning_tree
+
+    wet = mask.astype(bool)
+    wet_rc = np.argwhere(wet)                                   # (n_nodes, 2)
+    n_nodes = len(wet_rc)
+
+    node_id = np.full(depth.shape, -1, dtype=np.int32)
+    node_id[wet_rc[:, 0], wet_rc[:, 1]] = np.arange(n_nodes, dtype=np.int32)
+
+    # Vectorised edge construction for 4-connected grid
+    row_lists: list[npt.NDArray] = []
+    col_lists: list[npt.NDArray] = []
+    w_lists:   list[npt.NDArray] = []
+
+    # Horizontal edges: (r, c) ↔ (r, c+1)
+    r, c = np.where(wet[:, :-1] & wet[:, 1:])
+    if len(r):
+        u = node_id[r, c]
+        v = node_id[r, c + 1]
+        w = np.minimum(depth[r, c], depth[r, c + 1])
+        row_lists += [u, v];  col_lists += [v, u];  w_lists += [w, w]
+
+    # Vertical edges: (r, c) ↔ (r+1, c)
+    r, c = np.where(wet[:-1, :] & wet[1:, :])
+    if len(r):
+        u = node_id[r, c]
+        v = node_id[r + 1, c]
+        w = np.minimum(depth[r, c], depth[r + 1, c])
+        row_lists += [u, v];  col_lists += [v, u];  w_lists += [w, w]
+
+    if not row_lists:
+        from scipy.sparse import csr_matrix as _csr
+        return _csr((n_nodes, n_nodes), dtype=float), node_id, wet_rc
+
+    rows_arr = np.concatenate(row_lists)
+    cols_arr = np.concatenate(col_lists)
+    data_arr = np.concatenate(w_lists)
+
+    # Negate weights so minimum_spanning_tree gives the maximum spanning tree
+    adj = csr_matrix((-data_arr, (rows_arr, cols_arr)), shape=(n_nodes, n_nodes))
+    mst_neg = minimum_spanning_tree(adj)        # lower-triangular CSR, weights = -w
+    mst_sym = -(mst_neg + mst_neg.T)            # symmetric, weights = +w
+    return mst_sym, node_id, wet_rc
+
+
+def _mst_path(
+    mst,
+    node_id: npt.NDArray,
+    wet_rc: npt.NDArray,
+    start_ij: tuple[int, int],
+    end_ij: tuple[int, int],
+) -> list[tuple[int, int]] | None:
+    """Return the max-bottleneck path between two cells using a prebuilt MST.
+
+    The path is found by a single BFS from *start_ij* in the sparse MST,
+    which is O(n_nodes) worst case but typically much cheaper.
+
+    Parameters
+    ----------
+    mst : scipy.sparse.csr_matrix
+        Symmetric MST from :func:`_build_bottleneck_mst`.
+    node_id : ndarray [ny, nx] int32
+    wet_rc  : ndarray [n_nodes, 2]
+    start_ij, end_ij : (row, col)
 
     Returns
     -------
     list of (row, col) or None
-        Path from start to end, inclusive.  None if no wet path exists.
     """
-    import heapq
+    from scipy.sparse.csgraph import breadth_first_order
 
-    ny, nx = depth.shape
-    depth = np.where(mask, np.nan_to_num(depth, nan=0.0), 0.0)
+    s = int(node_id[start_ij])
+    e = int(node_id[end_ij])
+    if s < 0 or e < 0:
+        return None
+    if s == e:
+        return [start_ij]
 
-    best = np.full((ny, nx), -np.inf)
-    best[start] = depth[start]
-    prev: dict[tuple, tuple | None] = {start: None}
+    _, predecessors = breadth_first_order(
+        mst, i_start=s, directed=False, return_predecessors=True,
+    )
 
-    heap = [(-depth[start], start)]
-
-    while heap:
-        neg_d, (r, c) = heapq.heappop(heap)
-        d = -neg_d
-
-        if d < best[r, c]:
-            continue
-        if (r, c) == end:
-            break
-
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < ny and 0 <= nc < nx and mask[nr, nc]:
-                new_d = min(d, depth[nr, nc])
-                if new_d > best[nr, nc]:
-                    best[nr, nc] = new_d
-                    prev[(nr, nc)] = (r, c)
-                    heapq.heappush(heap, (-new_d, (nr, nc)))
-
-    if end not in prev:
+    if predecessors[e] < 0:    # -9999 sentinel: e not reachable from s
         return None
 
     path: list[tuple[int, int]] = []
-    cur: tuple[int, int] | None = end
-    while cur is not None:
-        path.append(cur)
-        cur = prev.get(cur)
+    cur = e
+    while cur != s:
+        path.append((int(wet_rc[cur, 0]), int(wet_rc[cur, 1])))
+        cur = int(predecessors[cur])
+        if cur < 0:
+            return None
+    path.append((int(wet_rc[s, 0]), int(wet_rc[s, 1])))
     path.reverse()
     return path
 
@@ -570,6 +632,9 @@ def boundary_thalwegs(
     max_lookup = float(max(abs(np.diff(src_lon)).mean(),
                           abs(np.diff(src_lat)).mean()) * 25)
 
+    # Build MST once — all pair queries share it
+    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
+
     starts = _boundary_starts(src_depth, src_mask, lon2d_f, lat2d_f)
 
     # Try every ordered pair of starts on different edges
@@ -585,9 +650,7 @@ def boundary_thalwegs(
                 continue
             seen.add(pair_key)
 
-            path = _dijkstra_max_bottleneck(
-                src_depth, src_mask, s1["ij"], s2["ij"]
-            )
+            path = _mst_path(mst, node_id_f, wet_rc_f, s1["ij"], s2["ij"])
             if path is None or len(path) < 5:
                 continue
 
@@ -688,26 +751,27 @@ def waypoint_thalwegs(
     max_lookup = float(max(abs(np.diff(src_lon)).mean(),
                           abs(np.diff(src_lat)).mean()) * 25)
 
+    # Build MST once — shared across all waypoint queries
+    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
+
+    def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
+        i_lo = int(np.argmin(np.abs(src_lon - lo)))
+        i_la = int(np.argmin(np.abs(src_lat - la)))
+        r0 = max(0, i_la - 5);  r1 = min(len(src_lat), i_la + 6)
+        c0 = max(0, i_lo - 5);  c1 = min(len(src_lon), i_lo + 6)
+        sub = src_mask[r0:r1, c0:c1]
+        if not sub.any():
+            return None
+        sub_d = src_depth[r0:r1, c0:c1]
+        best = np.unravel_index(int(np.where(sub, sub_d, -np.inf).argmax()),
+                                sub.shape)
+        return (r0 + int(best[0]), c0 + int(best[1]))
+
     results: list[dict] = []
     for wp in waypoints:
         name  = str(wp.get("name", "thalweg"))
         lo0, la0 = float(wp["lon_start"]), float(wp["lat_start"])
         lo1, la1 = float(wp["lon_end"]),   float(wp["lat_end"])
-
-        # Map geographic coords to nearest fine-grid cell indices
-        def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
-            i_lo = int(np.argmin(np.abs(src_lon - lo)))
-            i_la = int(np.argmin(np.abs(src_lat - la)))
-            # If land, search a small neighbourhood
-            r0 = max(0, i_la - 5);  r1 = min(len(src_lat), i_la + 6)
-            c0 = max(0, i_lo - 5);  c1 = min(len(src_lon), i_lo + 6)
-            sub = src_mask[r0:r1, c0:c1]
-            if not sub.any():
-                return None
-            sub_d = src_depth[r0:r1, c0:c1]
-            best = np.unravel_index(int(np.where(sub, sub_d, -np.inf).argmax()),
-                                    sub.shape)
-            return (r0 + best[0], c0 + best[1])
 
         ij_start = _nearest_ij(lo0, la0)
         ij_end   = _nearest_ij(lo1, la1)
@@ -715,7 +779,7 @@ def waypoint_thalwegs(
             print(f"  thalweg '{name}': no wet cell near start or end — skipped")
             continue
 
-        path = _dijkstra_max_bottleneck(src_depth, src_mask, ij_start, ij_end)
+        path = _mst_path(mst, node_id_f, wet_rc_f, ij_start, ij_end)
         if path is None or len(path) < 3:
             print(f"  thalweg '{name}': no wet path found — skipped")
             continue
