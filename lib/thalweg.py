@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import defaultdict
 
 import numpy as np
 import numpy.typing as npt
@@ -685,44 +686,43 @@ def _boundary_starts(
     lon2d: npt.NDArray,
     lat2d: npt.NDArray,
     max_inward: int = 20,
-    max_perp_gap: int = 8,
     min_segment_cells: int = 10,
 ) -> list[dict]:
-    """Return the deepest wet cell in each connected wet segment on each domain edge.
+    """Return the deepest wet cell in each open-boundary segment on each domain edge.
 
-    The coarse mask — after all user operations (mask_regions, nkeep_basins,
-    fixes) — encodes the model wet/dry boundary.  For each column (south/north)
-    or row (west/east) the algorithm scans inward from the physical edge and
-    takes the first wet cell found within *max_inward* steps.
+    Every open boundary in a structured grid is a straight line: constant *j*
+    for south/north edges, constant *i* for west/east edges.  The algorithm
+    exploits this constraint via a histogram:
 
-    **Why max_inward?**  A mask_region that closes N rows shifts the effective
-    boundary N rows inward (e.g. the skamix Kattegat south opening sits at j≈16
-    after a mask_region closes j=0..15).  Without a depth limit the scan follows
-    Norwegian fjords, Swedish inlets and other interior coastline features 50–200
-    rows inward, producing dozens of spurious boundary segments and hundreds of
-    unwanted thalwegs.  *max_inward* separates intentional closures (typically
-    ≤20 rows) from topographic interior features.  Increase it in the YAML
-    (``thalweg.boundary_max_inward``) when a mask_region is deeper, or supply a
-    ``boundaries_csv`` for full control.
+    1. For each column *i* (south/north) or row *j* (west/east) scan inward
+       from the physical edge up to *max_inward* steps and record the index of
+       the first wet cell — this is the *perpendicular index* (row for S/N,
+       column for W/E).
 
-    **Segment grouping**: adjacent first-wet cells belong to the same segment
-    when their traversal index (column for S/N, row for W/E) is consecutive AND
-    their perpendicular index (row for S/N, column for W/E) differs by at most
-    *max_perp_gap*.  A larger jump (e.g. j=0 → j=16) creates a new segment.
+    2. Build a histogram of those perpendicular indices.  A genuine open
+       boundary produces a tall bar: many columns/rows share the same
+       perpendicular index.  Fjords, inlets and coastal notches scatter across
+       many low-count bins.
 
-    **Small-segment filter**: segments narrower than *min_segment_cells* are
-    discarded — coastal notches produce 1–5-cell segments; real open boundaries
-    span many cells.
+    3. Any bin with count ≥ *min_segment_cells* is a candidate boundary line.
+       Within that line collect the contributing traversal indices and split
+       into contiguous runs (gaps > 1 start a new segment).
+
+    4. For each contiguous segment return the deepest wet cell as the start.
+
+    *max_inward* limits how far inward the scan goes: mask_region closures of
+    N rows shift the effective boundary by N (e.g. skamix Kattegat south sits
+    at j≈16 after j=0–15 are closed), while Norwegian fjords and other interior
+    features extend 50–200 rows inward and are automatically excluded.
 
     Parameters
     ----------
     depth, mask, lon2d, lat2d : ndarray [ny, nx]
     max_inward : int
         Maximum rows/columns to scan inward from each physical edge.
-    max_perp_gap : int
-        Maximum perpendicular-index jump allowed within one segment.
     min_segment_cells : int
-        Segments narrower than this are discarded.
+        Minimum number of columns/rows sharing the same perpendicular index
+        for a boundary line to be accepted.
 
     Returns
     -------
@@ -731,65 +731,88 @@ def _boundary_starts(
     ny, nx = depth.shape
     starts: list[dict] = []
 
-    def _scan(direction: str) -> list[tuple[int, int]]:
-        """First wet cell within max_inward steps from *direction* edge."""
-        cells: list[tuple[int, int]] = []
+    # For each direction: scan inward and record (traversal_idx, perp_idx) pairs.
+    # south/north: traversal = i (column), perp = j (row)
+    # west/east:   traversal = j (row),    perp = i (column)
+    for direction in ("west", "east", "south", "north"):
+        # Build list of (traversal_idx, perp_idx) for every column/row that
+        # has a wet cell within max_inward.
+        hits: list[tuple[int, int]] = []   # (traversal, perp)
         if direction == "south":
             for i in range(nx):
                 for j in range(min(ny, max_inward)):
                     if mask[j, i]:
-                        cells.append((j, i))
+                        hits.append((i, j))
                         break
         elif direction == "north":
             for i in range(nx):
                 for j in range(ny - 1, max(ny - 1 - max_inward, -1), -1):
                     if mask[j, i]:
-                        cells.append((j, i))
+                        hits.append((i, j))
                         break
         elif direction == "west":
             for j in range(ny):
                 for i in range(min(nx, max_inward)):
                     if mask[j, i]:
-                        cells.append((j, i))
+                        hits.append((j, i))
                         break
         else:  # east
             for j in range(ny):
                 for i in range(nx - 1, max(nx - 1 - max_inward, -1), -1):
                     if mask[j, i]:
-                        cells.append((j, i))
+                        hits.append((j, i))
                         break
-        return cells
 
-    for direction in ("west", "east", "south", "north"):
-        raw = _scan(direction)
-        sn  = direction in ("south", "north")
-        ti, pi = (1, 0) if sn else (0, 1)  # traversal / perpendicular indices
+        if not hits:
+            continue
 
-        groups: list[list[tuple[int, int]]] = []
-        for cell in raw:
-            if (groups
-                    and cell[ti] == groups[-1][-1][ti] + 1
-                    and abs(cell[pi] - groups[-1][-1][pi]) <= max_perp_gap):
-                groups[-1].append(cell)
-            else:
-                groups.append([cell])
+        # Histogram over perpendicular index — each bin is a candidate boundary line.
+        perp_to_trav: dict[int, list[int]] = defaultdict(list)
+        for trav, perp in hits:
+            perp_to_trav[perp].append(trav)
 
         seg_idx = 0
-        for group in groups:
-            if len(group) < min_segment_cells:
-                continue   # discard narrow coastal artefacts
-            d_vals = np.array([depth[r, c] for r, c in group])
-            best   = int(np.argmax(d_vals))
-            r, c   = group[best]
-            starts.append({
-                "edge":    direction,
-                "segment": seg_idx,
-                "ij":      (r, c),
-                "lon":     float(lon2d[r, c]),
-                "lat":     float(lat2d[r, c]),
-                "depth":   float(depth[r, c]),
-            })
-            seg_idx += 1
+        for perp, trav_list in sorted(perp_to_trav.items()):
+            if len(trav_list) < min_segment_cells:
+                continue   # too few columns/rows — not a real boundary
+
+            # Split into contiguous traversal runs (gaps > 1 → new segment).
+            trav_sorted = sorted(trav_list)
+            runs: list[list[int]] = [[trav_sorted[0]]]
+            for t in trav_sorted[1:]:
+                if t == runs[-1][-1] + 1:
+                    runs[-1].append(t)
+                else:
+                    runs.append([t])
+
+            for run in runs:
+                if len(run) < min_segment_cells:
+                    continue
+                # Pick the deepest cell in this segment.
+                if direction in ("south", "north"):
+                    # perp=j, trav=i → cell is (j, i)
+                    cells_rc = [(perp, i) for i in run]
+                else:
+                    # perp=i, trav=j → cell is (j, i)
+                    cells_rc = [(j, perp) for j in run]
+                d_vals = np.array([depth[r, c] for r, c in cells_rc])
+                best   = int(np.argmax(d_vals))
+                r, c   = cells_rc[best]
+                starts.append({
+                    "edge":    direction,
+                    "segment": seg_idx,
+                    "ij":      (r, c),
+                    "lon":     float(lon2d[r, c]),
+                    "lat":     float(lat2d[r, c]),
+                    "depth":   float(depth[r, c]),
+                })
+                logger.debug(
+                    "      boundary_starts: %s seg%d perp=%d trav=%d..%d "
+                    "n=%d depth=%.1f m",
+                    direction, seg_idx, perp, run[0], run[-1], len(run),
+                    float(depth[r, c]),
+                )
+                seg_idx += 1
     return starts
 
 
