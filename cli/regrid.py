@@ -1156,8 +1156,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         print(f"      total: {len(thalweg_records)} thalweg(s) in {time.time()-t0:.1f} s")
 
+        thalwegmod.print_thalweg_table(thalweg_records)
         tw_sum = thalwegmod.thalweg_summary(thalweg_records)
-        report.print_table(tw_sum, title="Thalweg comparison")
+        report.print_table(tw_sum, title="Thalweg summary")
 
         for k, tw in enumerate(thalweg_records):
             cat = tw.get("category", "tw")

@@ -331,11 +331,69 @@ def compute_strait_thalwegs(
     return results
 
 
+_MODE_LABEL = {
+    "AUTO":     "boundary",
+    "WAYPOINT": "waypoint",
+}
+
+
+def _mode_label(record: dict) -> str:
+    cat = record.get("category", "")
+    if cat in _MODE_LABEL:
+        return _MODE_LABEL[cat]
+    direction = record.get("direction", "")
+    if direction in ("U", "V"):
+        return "strait"
+    return cat.lower() or "?"
+
+
+def print_thalweg_table(records: list[dict], title: str = "Thalweg analysis") -> None:
+    """Print a per-thalweg ASCII table to stdout.
+
+    Columns: index, mode, name, fine sill (m), coarse sill (m), deficit (m).
+    """
+    if not records:
+        print(f"\n{title}\n" + "-" * max(len(title), 40))
+        print("  no thalwegs computed")
+        print()
+        return
+
+    # Column widths
+    names   = [r.get("name", f"#{i}") for i, r in enumerate(records)]
+    modes   = [_mode_label(r) for r in records]
+    w_name  = max(len(n) for n in names)
+    w_mode  = max(len(m) for m in modes)
+    w_name  = max(w_name, 4)
+    w_mode  = max(w_mode, 4)
+
+    hdr = (f"  {'#':>3}  {'mode':<{w_mode}}  {'name':<{w_name}}"
+           f"  {'fine sill':>10}  {'coarse sill':>11}  {'deficit':>8}")
+    sep = "  " + "-" * (len(hdr) - 2)
+
+    print(f"\n{title}")
+    print("-" * max(len(title), len(hdr)))
+    print(hdr)
+    print(sep)
+
+    for i, (rec, name, mode) in enumerate(zip(records, names, modes)):
+        fine_sill   = rec["fine"]["sill_depth"]
+        coarse_sill = rec["coarse"]["sill_depth"]
+        deficit     = rec.get("sill_deficit_m", float("nan"))
+
+        fs  = f"{fine_sill:10.1f}" if np.isfinite(fine_sill)   else f"{'n/a':>10}"
+        cs  = f"{coarse_sill:11.1f}" if np.isfinite(coarse_sill) else f"{'n/a':>11}"
+        dft = f"{deficit:8.1f}"    if np.isfinite(deficit)     else f"{'n/a':>8}"
+
+        print(f"  {i:>3}  {mode:<{w_mode}}  {name:<{w_name}}  {fs}  {cs}  {dft}")
+
+    print()
+
+
 def thalweg_summary(records: list[dict]) -> dict:
-    """Return a summary dict for a list of thalweg records."""
+    """Return an aggregate summary dict for a list of thalweg records."""
     if not records:
         return {"thalwegs computed": 0}
-    deficits = [r["sill_deficit_m"] for r in records if np.isfinite(r["sill_deficit_m"])]
+    deficits = [r["sill_deficit_m"] for r in records if np.isfinite(r.get("sill_deficit_m", float("nan")))]
     return {
         "thalwegs computed":       len(records),
         "max sill deficit (m)":    f"{max(deficits):.1f}" if deficits else "n/a",
