@@ -454,24 +454,20 @@ bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes
 Reads every entry in `fixes_suggested.yaml` (all categories, including
 LAND_BRIDGE) and applies them.
 
-### Option B — selective: paste chosen fixes into YAML
+### Option B — selective: reference chosen keys in your config
 
-Open `fixes_suggested.yaml` and copy the entries you want into the `fixes:`
-section of your config:
+Every entry in `fixes_suggested.yaml` carries a short `key:` label
+(`b001`, `s001`, `a001`, `lb001`, …).  Open the file, pick the keys you
+want, and paste just those keys into the `fixes:` section of your config:
 
 ```yaml
 fixes:
-  - lon: 9.75
-    lat: 55.56
-    action: open_cell
-    depth: 12.5
-    # LAND_BRIDGE — wet_fraction=0.18, bridges 2 basin(s)
-  - lon: 10.20
-    lat: 57.80
-    action: set_depth
-    value: 48.0
-    # SILL_DEFICIT — sill_ratio=0.52
+  - key: lb001   # LAND_BRIDGE — wet_fraction=0.18, bridges 2 basin(s)
+  - key: s001    # SILL_DEFICIT — sill_ratio=0.52
 ```
+
+The full fix (lon, lat, action, depth) is resolved automatically from
+`fixes_suggested.yaml` at run time — no need to copy coordinates.
 
 Then re-run:
 

@@ -91,6 +91,46 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(fh) or {}
 
 
+def _resolve_fix_keys(fixes: list[dict], suggested_yaml: str) -> list[dict]:
+    """Expand key-only fix references against fixes_suggested.yaml.
+
+    A fix entry with only a ``key:`` field (no ``lon``/``lat``) is looked up
+    in *suggested_yaml* and replaced with the full fix dict from that file.
+    Entries that already have ``lon``/``lat`` are passed through unchanged —
+    the ``key`` field, if present, is kept as a label but has no effect.
+
+    Raises ``KeyError`` if a referenced key is not found in the suggested file.
+    """
+    # Short-circuit: no key-only entries
+    if not any("key" in f and "lon" not in f for f in fixes):
+        return fixes
+
+    if not os.path.exists(suggested_yaml):
+        raise FileNotFoundError(
+            f"Fix key resolution requires '{suggested_yaml}' but the file does not exist.\n"
+            "Run without --skip-regrid first to generate it."
+        )
+
+    all_suggested = _load_yaml(suggested_yaml).get("fixes") or []
+    key_db: dict[str, dict] = {
+        f["key"]: f for f in all_suggested if "key" in f
+    }
+
+    resolved = []
+    for fix in fixes:
+        if "key" in fix and "lon" not in fix:
+            k = fix["key"]
+            if k not in key_db:
+                raise KeyError(
+                    f"Fix key '{k}' not found in '{suggested_yaml}'.\n"
+                    f"Available keys: {sorted(key_db)}"
+                )
+            resolved.append(dict(key_db[k]))   # copy so original is untouched
+        else:
+            resolved.append(fix)
+    return resolved
+
+
 def _nested_get(cfg: dict, *keys, default=None):
     """Traverse nested dicts, returning *default* if any key is missing."""
     val = cfg
@@ -490,16 +530,25 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     os.makedirs(report_dir, exist_ok=True)
 
+    # Path to the auto-generated suggestions file (needed for key resolution)
+    _suggested_yaml = os.path.join(report_dir, "fixes_suggested.yaml")
+
     # Load extra fixes from --fixes-file or --accept-fixes
     fixes_file = args.fixes_file
     if not fixes_file and args.accept_fixes:
-        fixes_file = os.path.join(report_dir, "fixes_suggested.yaml")
+        fixes_file = _suggested_yaml
     if fixes_file:
         if not os.path.exists(fixes_file):
             parser.error(f"fixes file not found: {fixes_file}")
         extra = _load_yaml(fixes_file).get("fixes") or []
         fixes_list = fixes_list + extra
         print(f"Loaded {len(extra)} fix(es) from {fixes_file}")
+
+    # Resolve key-only entries (e.g. - key: b001) against fixes_suggested.yaml
+    try:
+        fixes_list = _resolve_fix_keys(fixes_list, _suggested_yaml)
+    except (FileNotFoundError, KeyError) as exc:
+        parser.error(str(exc))
 
     # Title for the Markdown report
     rpt_title = (

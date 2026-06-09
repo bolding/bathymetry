@@ -165,11 +165,28 @@ def save_fixes_yaml(
     path: str | Path,
     bridge_records: list[dict] | None = None,
 ) -> None:
-    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE)."""
+    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE).
+
+    Each entry gets a short ``key:`` field (e.g. ``b001``, ``s001``, ``a001``,
+    ``lb001``).  Keys can be referenced directly from the ``fixes:`` section of
+    your config YAML — the full fix is resolved automatically at run time:
+
+    .. code-block:: yaml
+
+        fixes:
+          - key: b001    # resolved from fixes_suggested.yaml at run time
+          - key: lb001
+
+    ``_note`` lines are prefixed with ``#`` so they are treated as YAML
+    comments and are ignored by the loader.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build per-category lists in priority order
+    # Key prefix per category
+    _key_prefix = {"BLOCKED": "b", "SILL_DEFICIT": "s", "AREA_DEFICIT": "a", "LAND_BRIDGE": "lb"}
+
+    # Build per-category lists in priority order (each entry gets a key)
     groups: dict[str, list[dict]] = {
         "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [], "LAND_BRIDGE": [],
     }
@@ -200,8 +217,9 @@ def save_fixes_yaml(
             ),
         })
 
-    def _write_fix(fh, fix: dict) -> None:
-        fh.write(f"  - lon: {fix['lon']}\n")
+    def _write_fix(fh, key: str, fix: dict) -> None:
+        fh.write(f"  - key: {key}\n")
+        fh.write(f"    lon: {fix['lon']}\n")
         fh.write(f"    lat: {fix['lat']}\n")
         fh.write(f"    action: {fix['action']}\n")
         if "value" in fix:
@@ -218,17 +236,25 @@ def save_fixes_yaml(
     }
 
     with open(path, "w") as fh:
-        fh.write("# Suggested fixes — re-run with --accept-fixes to apply all,\n")
-        fh.write("# or paste selected entries into the 'fixes:' section of your config.\n")
-        fh.write("# '_note' lines are ignored by the loader; no need to remove them.\n\n")
+        fh.write("# Suggested fixes — generated automatically; do not edit keys.\n")
+        fh.write("# Option A: apply all at once:\n")
+        fh.write("#   bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes\n")
+        fh.write("# Option B: paste selected keys into your config 'fixes:' section:\n")
+        fh.write("#   fixes:\n")
+        fh.write("#     - key: b001\n")
+        fh.write("#     - key: lb001\n")
+        fh.write("# Keys are resolved from this file at run time.\n")
+        fh.write("# '_note' lines are comments and are ignored by the loader.\n\n")
         fh.write("fixes:\n")
         for cat, fixes in groups.items():
             if not fixes:
                 continue
+            pfx = _key_prefix[cat]
             item_word = "interface(s)" if cat != "LAND_BRIDGE" else "cell(s)"
             fh.write(f"\n  # --- {cat}: {category_desc[cat]} ({len(fixes)} {item_word}) ---\n")
-            for fix in fixes:
-                _write_fix(fh, fix)
+            for idx, fix in enumerate(fixes, start=1):
+                key = f"{pfx}{idx:03d}"
+                _write_fix(fh, key, fix)
 
 
 # ---------------------------------------------------------------------------
