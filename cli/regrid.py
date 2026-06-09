@@ -575,6 +575,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         print(f"\n[3/6] Loading cached raw-regrid result: {raw_regrid_cache}")
         dst = xr.open_dataset(raw_regrid_cache).load()
+        # Validate cache shape against current grid spec.
+        # A mismatch means the grid config changed since the cache was built
+        # (e.g. the T-point convention fix that adds +1 to nx/ny).
+        _cached_ny = dst.sizes.get("lat", dst.sizes.get("y", -1))
+        _cached_nx = dst.sizes.get("lon", dst.sizes.get("x", -1))
+        if (_cached_ny, _cached_nx) != (dst_grid.ny, dst_grid.nx):
+            parser.error(
+                f"--skip-regrid: cached grid shape ({_cached_ny}×{_cached_nx}) "
+                f"does not match the current config ({dst_grid.ny}×{dst_grid.nx}).\n"
+                f"The cache is stale — delete it and re-run without --skip-regrid:\n"
+                f"  rm {raw_regrid_cache}"
+            )
         dst_sum = interpolate.regrid_summary(dst, dst_grid)
         report.print_table(dst_sum, title="Regridded destination (cached)")
         rpt.add_section(
