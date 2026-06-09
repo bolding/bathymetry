@@ -694,9 +694,13 @@ def boundary_thalwegs(
                           abs(np.diff(src_lat)).mean()) * 25)
 
     # Build MST once — all pair queries share it
+    logger.info("      building max-bottleneck MST …")
     mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
 
     starts = _boundary_starts(src_depth, src_mask, lon2d_f, lat2d_f)
+    logger.info("      %d boundary start(s) on %d edge(s)",
+                len(starts),
+                len({s["edge"] for s in starts}))
 
     # Try every ordered pair of starts on different edges
     seen: set[frozenset] = set()
@@ -813,7 +817,9 @@ def waypoint_thalwegs(
                           abs(np.diff(src_lat)).mean()) * 25)
 
     # Build MST once — shared across all waypoint queries
+    logger.info("      building max-bottleneck MST …")
     mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
+    logger.info("      %d waypoint(s) to process", len(waypoints))
 
     def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
         i_lo = int(np.argmin(np.abs(src_lon - lo)))

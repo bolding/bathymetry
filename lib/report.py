@@ -1443,9 +1443,9 @@ def plot_thalweg_comparison(
     ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.5,
                 label="Fine thalweg")
 
-    # coarse depth scatter
+    # coarse depth scatter — positions are fine path positions (coarse depths sampled there)
     sc = ax_map.scatter(  # type: ignore[call-arg]
-        coarse["lon"], coarse["lat"],
+        fine["lon"], fine["lat"],
         c=coarse["depth"], cmap="Oranges_r",
         s=18, zorder=4, label="Coarse depth",
         vmin=0, vmax=max(1, float(np.nanmax(fine["depth"]))),

@@ -1213,7 +1213,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     .replace("[", "").replace("]", ""))
             img = pfx + f"04e_thalweg_{k:03d}_{safe}.png"
             report.plot_thalweg_comparison(
-                tw, src, dst,
+                tw, _thalweg_src, dst,
                 png_path=os.path.join(report_dir, img),
             )
             deficit = tw.get("sill_deficit_m", float("nan"))
