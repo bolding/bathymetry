@@ -177,18 +177,20 @@ def save_fixes_yaml(
     records: list[dict],
     path: str | Path,
     bridge_records: list[dict] | None = None,
+    thalweg_fixes: list[dict] | None = None,
 ) -> None:
-    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE).
+    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE → THALWEG).
 
     Each entry gets a short ``key:`` field (e.g. ``b001``, ``s001``, ``a001``,
-    ``lb001``).  Keys can be referenced directly from the ``fixes:`` section of
-    your config YAML — the full fix is resolved automatically at run time:
+    ``lb001``, ``tw001``).  Keys can be referenced directly from the ``fixes:``
+    section of your config YAML — the full fix is resolved automatically at run
+    time:
 
     .. code-block:: yaml
 
         fixes:
           - key: b001    # resolved from fixes_suggested.yaml at run time
-          - key: lb001
+          - key: tw001
 
     ``_note`` lines are prefixed with ``#`` so they are treated as YAML
     comments and are ignored by the loader.
@@ -197,11 +199,13 @@ def save_fixes_yaml(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Key prefix per category
-    _key_prefix = {"BLOCKED": "b", "SILL_DEFICIT": "s", "AREA_DEFICIT": "a", "LAND_BRIDGE": "lb"}
+    _key_prefix = {"BLOCKED": "b", "SILL_DEFICIT": "s", "AREA_DEFICIT": "a",
+                   "LAND_BRIDGE": "lb", "THALWEG": "tw"}
 
     # Build per-category lists in priority order (each entry gets a key)
     groups: dict[str, list[dict]] = {
-        "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [], "LAND_BRIDGE": [],
+        "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [],
+        "LAND_BRIDGE": [], "THALWEG": [],
     }
     for r in records:
         cat = r["category"]
@@ -230,6 +234,15 @@ def save_fixes_yaml(
             ),
         })
 
+    for r in (thalweg_fixes or []):
+        groups["THALWEG"].append({
+            "lon":    r["lon"],
+            "lat":    r["lat"],
+            "action": r["action"],
+            "value":  r["value"],
+            "_note":  r.get("comment", "THALWEG — coarse cell too shallow along thalweg path"),
+        })
+
     def _write_fix(fh, key: str, fix: dict) -> None:
         fh.write(f"  - key: {key}\n")
         fh.write(f"    lon: {fix['lon']}\n")
@@ -246,6 +259,7 @@ def save_fixes_yaml(
         "SILL_DEFICIT": "Coarse sill too shallow — set_depth to fine-grid sill",
         "AREA_DEFICIT": "Cross-section under-represented — deepen to improve transport",
         "LAND_BRIDGE":  "Land cell (wet_frac > 0) between disconnected basins — open_cell to reconnect",
+        "THALWEG":      "Coarse cell too shallow along thalweg path — set_depth to fine-grid max",
     }
 
     with open(path, "w") as fh:
@@ -256,6 +270,7 @@ def save_fixes_yaml(
         fh.write("#   fixes:\n")
         fh.write("#     - key: b001\n")
         fh.write("#     - key: lb001\n")
+        fh.write("#     - key: tw001\n")
         fh.write("# Keys are resolved from this file at run time.\n")
         fh.write("# '_note' lines are comments and are ignored by the loader.\n\n")
         fh.write("fixes:\n")

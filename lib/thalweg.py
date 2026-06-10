@@ -1375,25 +1375,6 @@ def suggest_depth_fixes(
     return fixes
 
 
-def write_fixes_yaml(fixes: list[dict], path: str) -> None:
-    """Write a list of fix dicts to a YAML file ready to paste into the config."""
-    import os
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    lines = [
-        "# Suggested set_depth fixes from thalweg analysis.",
-        "# Review, select relevant entries, and paste into your config's fixes: block.",
-        "fixes:",
-    ]
-    for fx in fixes:
-        lines.append(f"  - lon: {fx['lon']}")
-        lines.append(f"    lat: {fx['lat']}")
-        lines.append(f"    action: {fx['action']}")
-        lines.append(f"    value: {fx['value']}")
-        lines.append(f"    # {fx['comment']}")
-    with open(path, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-
-
 # ---------------------------------------------------------------------------
 # Mode C: user-specified waypoints
 # ---------------------------------------------------------------------------

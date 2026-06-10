@@ -1319,23 +1319,26 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         thalwegmod.print_thalweg_table(thalweg_records)
 
-        # Suggest set_depth fixes for coarse cells that are too shallow
+        # Suggest set_depth fixes; merge into fixes_suggested.yaml with tw### keys
         _depth_fixes = thalwegmod.suggest_depth_fixes(thalweg_records, dst)
-        _fixes_yaml  = pfx + "05e_thalweg_fixes.yaml"
         if _depth_fixes:
-            thalwegmod.write_fixes_yaml(
-                _depth_fixes,
-                path=os.path.join(report_dir, _fixes_yaml),
+            _clean = [{k: v for k, v in r.items() if not k.startswith("_")}
+                      for r in strait_records]
+            report.save_fixes_yaml(
+                _clean,
+                fixes_yaml_path,
+                bridge_records=bridge_records,
+                thalweg_fixes=_depth_fixes,
             )
-            logger.info("      wrote %d fix suggestion(s) → %s", len(_depth_fixes), _fixes_yaml)
+            logger.info("      %d thalweg fix suggestion(s) added to %s",
+                        len(_depth_fixes), fixes_yaml_path)
 
         def _fmt(v: float) -> str:
             return f"{v:.1f}" if np.isfinite(v) else "n/a"
 
         _fixes_note = (
-            f"  {len(_depth_fixes)} set_depth fix suggestion(s) written to "
-            f"``{_fixes_yaml}`` — review and paste selected entries into the "
-            f"config ``fixes:`` block."
+            f"  {len(_depth_fixes)} set_depth suggestion(s) (keys ``tw001``…) "
+            f"appended to ``fixes_suggested.yaml``."
             if _depth_fixes else ""
         )
         rpt.add_section(
@@ -1347,7 +1350,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "the path minimum; deficit = fine − coarse (positive = coarse is shallower). "
                 f"Total: {len(thalweg_records)} thalweg(s)." + _fixes_note
             ),
-            images=[_fixes_yaml] if _depth_fixes else [],
+            images=[],
         )
 
         for k, tw in enumerate(thalweg_records):
