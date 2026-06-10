@@ -1457,22 +1457,39 @@ def waypoint_thalwegs(
     max_lookup = float(max(abs(np.diff(src_lon)).mean(),
                           abs(np.diff(src_lat)).mean()) * 25)
 
+    # Restrict MST to the coarse domain — same as boundary_thalwegs — so that
+    # the max-bottleneck path cannot detour through deep open ocean outside the
+    # model domain, which would produce unrealistically long paths.
+    _dom_lon_min = float(dst_lon2d.min())
+    _dom_lon_max = float(dst_lon2d.max())
+    _dom_lat_min = float(dst_lat2d.min())
+    _dom_lat_max = float(dst_lat2d.max())
+    _in_domain_f = (
+        (lon2d_f >= _dom_lon_min) & (lon2d_f <= _dom_lon_max) &
+        (lat2d_f >= _dom_lat_min) & (lat2d_f <= _dom_lat_max)
+    )
+    src_mask_mst = src_mask & _in_domain_f
+
     # Build MST once — shared across all waypoint queries
     logger.info("      building max-bottleneck MST …")
-    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask)
+    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask_mst)
     logger.info("      %d waypoint(s) to process", len(waypoints))
 
     def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
+        """Snap to the nearest wet fine-grid cell within a generous search radius."""
         i_lo = int(np.argmin(np.abs(src_lon - lo)))
         i_la = int(np.argmin(np.abs(src_lat - la)))
-        r0 = max(0, i_la - 5);  r1 = min(len(src_lat), i_la + 6)
-        c0 = max(0, i_lo - 5);  c1 = min(len(src_lon), i_lo + 6)
+        radius = 50
+        r0 = max(0, i_la - radius);  r1 = min(len(src_lat), i_la + radius + 1)
+        c0 = max(0, i_lo - radius);  c1 = min(len(src_lon), i_lo + radius + 1)
         sub = src_mask[r0:r1, c0:c1]
         if not sub.any():
             return None
-        sub_d = src_depth[r0:r1, c0:c1]
-        best = np.unravel_index(int(np.where(sub, sub_d, -np.inf).argmax()),
-                                sub.shape)
+        # Pick nearest wet cell (not deepest) to honour user intent
+        rr = np.arange(r0, r1) - i_la
+        cc = np.arange(c0, c1) - i_lo
+        dist2 = (rr[:, None] ** 2 + cc[None, :] ** 2).astype(float)
+        best = np.unravel_index(int(np.where(sub, dist2, np.inf).argmin()), sub.shape)
         return (r0 + int(best[0]), c0 + int(best[1]))
 
     results: list[dict] = []
