@@ -95,17 +95,15 @@ thalweg:
   boundary_thalwegs: false   # set to true to enable boundary auto-detection
   waypoints:
     - name: "Great Belt"
-      lon_start: 11.4
-      lat_start: 54.5
-      lon_end:   11.0
-      lat_end:   55.9
+      start: [11.4, 54.5]
+      end:   [11.0, 55.9]
     - name: "Little Belt"
-      lon_start:  9.5
-      lat_start: 55.0
-      lon_end:   10.5
-      lat_end:   56.5
+      start: [9.5, 55.0]
+      via:
+        - [9.8, 55.5]
+      end: [10.5, 56.5]
     - name: "Öresund"
-      lon_start: 12.6
-      lat_start: 55.4
-      lon_end:   12.9
-      lat_end:   56.1
+      start: [12.6, 55.4]
+      via:
+        - [12.65, 55.9]
+      end: [12.9, 56.1]

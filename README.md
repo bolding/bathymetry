@@ -460,26 +460,24 @@ Specify one or more named start→end pairs in your config file:
 ```yaml
 thalwegs:
   - name: "Great Belt"
-    lon_start: 10.2
-    lat_start: 55.3
-    lon_end:   11.0
-    lat_end:   55.9
+    start: [10.2, 55.3]
+    end:   [11.0, 55.9]
   - name: "Little Belt"
-    lon_start:  9.5
-    lat_start: 55.0
-    lon_end:   10.5
-    lat_end:   56.5
+    start: [9.5, 55.0]
+    via:
+      - [9.8, 55.5]   # force path through the narrow strait
+    end: [10.5, 56.5]
   - name: "Öresund"
-    lon_start: 12.6
-    lat_start: 55.4
-    lon_end:   12.9
-    lat_end:   56.1
+    start: [12.6, 55.4]
+    end:   [12.9, 56.1]
 ```
 
-Each waypoint is snapped to the nearest wet fine-grid cell.  The
-max-bottleneck Dijkstra algorithm then finds the deepest route between the two
-endpoints.  The presence of any `thalwegs:` entry in the config is sufficient
-to enable step 4e automatically.
+Each endpoint is snapped to the nearest wet fine-grid cell.  The
+max-bottleneck Dijkstra algorithm then finds the deepest route between the
+points.  Optional `via` points force the path through a specific location,
+useful when the deepest detour would bypass a narrow strait entirely.
+The presence of any `thalwegs:` entry in the config is sufficient to enable
+step 4e automatically.
 
 ### Output
 

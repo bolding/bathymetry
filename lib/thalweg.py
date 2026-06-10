@@ -1407,24 +1407,24 @@ def waypoint_thalwegs(
 ) -> list[dict]:
     """Compute thalwegs along user-specified start→end waypoints.
 
-    Each waypoint dict must have ``lon_start``, ``lat_start``, ``lon_end``,
-    ``lat_end`` (geographic degrees) and optionally ``name``.  The path is
+    Each waypoint dict must have ``start: [lon, lat]``, ``end: [lon, lat]``
+    and optionally ``name`` and ``via: [[lon, lat], ...]``.  The path is
     computed on the fine-resolution grid using the max-bottleneck algorithm
-    (deepest possible route between the two points).
+    (deepest possible route between the points).  Via points force the path
+    through a specific location, which is useful for narrow straits where the
+    deepest detour would otherwise exit the passage.
 
     YAML config example::
 
         thalwegs:
-          - name: "Main channel"
-            lon_start: 3.0
-            lat_start: 58.0
-            lon_end: 12.0
-            lat_end: 56.5
+          - name: "Great Belt"
+            start: [11.4, 54.5]
+            end:   [11.0, 55.9]
           - name: "Little Belt"
-            lon_start: 9.5
-            lat_start: 55.0
-            lon_end: 10.5
-            lat_end: 56.5
+            start: [9.5, 55.0]
+            via:
+              - [9.75, 55.5]
+            end: [10.5, 56.5]
 
     Parameters
     ----------
@@ -1433,7 +1433,7 @@ def waypoint_thalwegs(
     dst : xr.Dataset
         Coarse regridded bathymetry.
     waypoints : list[dict]
-        Each dict: lon_start, lat_start, lon_end, lat_end[, name].
+        Each dict: start, end [, name, via].
 
     Returns
     -------
@@ -1495,10 +1495,10 @@ def waypoint_thalwegs(
     results: list[dict] = []
     for wp in waypoints:
         name  = str(wp.get("name", "thalweg"))
-        _s = wp.get("start")
-        lo0, la0 = (float(_s[0]), float(_s[1])) if _s else (float(wp["lon_start"]), float(wp["lat_start"]))
-        _e = wp.get("end")
-        lo1, la1 = (float(_e[0]), float(_e[1])) if _e else (float(wp["lon_end"]),   float(wp["lat_end"]))
+        _s = wp["start"]
+        lo0, la0 = float(_s[0]), float(_s[1])
+        _e = wp["end"]
+        lo1, la1 = float(_e[0]), float(_e[1])
 
         # Build ordered list of (lon, lat) stops: start, optional via points, end
         via_raw = wp.get("via") or []
