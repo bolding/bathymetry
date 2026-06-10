@@ -1417,8 +1417,21 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # C-grid staggered depths: U = east face, V = north face of each T-cell.
     # Both have the same shape [ny, nx] as the T-point depth.
     # NaN propagates: a face is land if either bordering T-cell is land.
-    depth_t = np.where(dst["mask"].values, dst["depth"].values, np.nan)
+    # C-grid face depths derived from the final (smoothed if available) depth
+    depth_t = (_depth_final_arr if smooth_variants
+               else np.where(dst["mask"].values, dst["depth"].values, np.nan))
     depth_u_vals, depth_v_vals = interpolate.compute_cgrid_depth(depth_t)
+
+    # depth_fixes = after user fixes, before smoothing
+    _depth_fixes_arr = np.where(dst["mask"].values, dst["depth"].values, np.nan)
+    # depth = smoothed result (last step); falls back to depth_fixes if no smoothing
+    if smooth_variants:
+        _rx0_final, _d_final, _ = smooth_variants[-1]   # lowest rx0 = most smoothed
+        _depth_final_arr = np.where(dst["mask"].values, _d_final, np.nan)
+        _depth_final_lname = f"Sea floor depth (smoothed, rx0≤{_rx0_final})"
+    else:
+        _depth_final_arr = _depth_fixes_arr
+        _depth_final_lname = "Sea floor depth after fixes"
 
     out_vars: dict = {
         "depth_raw": xr.DataArray(
@@ -1427,7 +1440,17 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             attrs={"long_name": "Sea floor depth after regridding, before fixes",
                    "units": "m"},
         ),
-        "depth": dst["depth"],
+        "depth_fixes": xr.DataArray(
+            _depth_fixes_arr,
+            dims=dst["depth"].dims, coords=dst.coords,
+            attrs={"long_name": "Sea floor depth after fixes, before smoothing",
+                   "units": "m"},
+        ),
+        "depth": xr.DataArray(
+            _depth_final_arr,
+            dims=dst["depth"].dims, coords=dst.coords,
+            attrs={"long_name": _depth_final_lname, "units": "m"},
+        ),
         "depth_u": xr.DataArray(
             depth_u_vals, dims=["lat", "lon"], coords=dst.coords,
             attrs={"long_name": "Sea floor depth at eastern U-face", "units": "m",
@@ -1479,22 +1502,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
 
     out_ds = xr.Dataset(out_vars, coords=dst.coords)
-    out_ds["depth"].attrs.update(
-        {"long_name": "Sea floor depth after fixes (pre-smoothing)", "units": "m"})
     out_ds["mask"].attrs.update({"long_name": "Ocean mask (1=ocean, 0=land)"})
     out_ds.to_netcdf(output_file)
 
-    # Produce one final plot per depth variable (raw → fixes → each smoothed version).
-    # Shared colour scale so panels are visually comparable when diffed later.
+    # Final plots: depth_raw → depth_fixes → each smooth variant → depth (=last smooth)
+    _mask = dst["mask"].values
     depth_variants: list[tuple[str, np.ndarray, str]] = [
-        ("depth_raw", np.where(dst["mask"].values, depth_raw_arr, np.nan), "raw regrid"),
-        ("depth",     dst["depth"].values, "after fixes"),
+        ("depth_raw",   np.where(_mask, depth_raw_arr,         np.nan), "raw regrid"),
+        ("depth_fixes", np.where(_mask, dst["depth"].values,   np.nan), "after fixes"),
     ]
     for rx0_val, d_smooth, _ in smooth_variants:
         sv = _smooth_var_name(rx0_val)
-        depth_variants.append(
-            (sv, np.where(dst["mask"].values, d_smooth, np.nan), f"rx0≤{rx0_val}")
-        )
+        depth_variants.append((sv, np.where(_mask, d_smooth, np.nan), f"rx0≤{rx0_val}"))
 
     subtitle = _plot_subtitle(dst_grid, dst)
     final_plots: list[str] = []

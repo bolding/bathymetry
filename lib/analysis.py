@@ -635,6 +635,11 @@ def apply_fixes(
             depth[iy, ix] = new_depth
             mask[iy, ix] = 1
             wf[iy, ix] = max(float(wf[iy, ix]), 0.01)
+        elif action == "deepen_by":
+            delta = float(fix.get("value", 0.0))
+            depth[iy, ix] = max(float(depth[iy, ix]) + delta, 0.0)
+            mask[iy, ix] = 1
+            wf[iy, ix] = max(float(wf[iy, ix]), 0.01)
         elif action == "close_cell":
             depth[iy, ix] = np.nan
             mask[iy, ix] = 0

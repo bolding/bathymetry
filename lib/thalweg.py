@@ -1363,11 +1363,9 @@ def suggest_depth_fixes(
         fixes.append({
             "lon":     round(float(lon2d[row, col]), 6),
             "lat":     round(float(lat2d[row, col]), 6),
-            "action":  "set_depth",
-            "value":   round(fine_max, 1),
-            "comment": f"thalweg: {', '.join(cell_names[uidx])}; "
-                       f"fine_max={fine_max:.1f} m, coarse={coarse_val:.1f} m, "
-                       f"deficit={deficit:.1f} m",
+            "action":  "deepen_by",
+            "value":   round(deficit, 1),
+            "comment": f"thalweg: {', '.join(cell_names[uidx])}; deficit={deficit:.1f} m",
         })
 
     logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.1f m",
