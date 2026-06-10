@@ -1451,16 +1451,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             dims=dst["depth"].dims, coords=dst.coords,
             attrs={"long_name": _depth_final_lname, "units": "m"},
         ),
-        "depth_u": xr.DataArray(
-            depth_u_vals, dims=["lat", "lon"], coords=dst.coords,
-            attrs={"long_name": "Sea floor depth at eastern U-face", "units": "m",
-                   "comment": "min(depth_t[i,j], depth_t[i,j+1]); boundary = depth_t"},
-        ),
-        "depth_v": xr.DataArray(
-            depth_v_vals, dims=["lat", "lon"], coords=dst.coords,
-            attrs={"long_name": "Sea floor depth at northern V-face", "units": "m",
-                   "comment": "min(depth_t[i,j], depth_t[i+1,j]); boundary = depth_t"},
-        ),
         "wet_fraction": dst["wet_fraction"],
         "mask": dst["mask"],
     }
