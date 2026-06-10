@@ -905,6 +905,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             images=[cmp_plot, diff_plot_3b],
         )
 
+    # Snapshot raw regridded depth before any fixes or mask modifications.
+    # Written to output NC as depth_raw so the full history is recoverable.
+    depth_raw_arr = dst["depth"].values.copy()
+
     # ------------------------------------------------------------------
     # Step 4a – Apply user fixes (if any)
     # Run first so fixes affect which cells are kept by basin removal and
@@ -1417,6 +1421,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     depth_u_vals, depth_v_vals = interpolate.compute_cgrid_depth(depth_t)
 
     out_vars: dict = {
+        "depth_raw": xr.DataArray(
+            np.where(dst["mask"].values, depth_raw_arr, np.nan),
+            dims=dst["depth"].dims, coords=dst.coords,
+            attrs={"long_name": "Sea floor depth after regridding, before fixes",
+                   "units": "m"},
+        ),
         "depth": dst["depth"],
         "depth_u": xr.DataArray(
             depth_u_vals, dims=["lat", "lon"], coords=dst.coords,
@@ -1469,14 +1479,16 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
 
     out_ds = xr.Dataset(out_vars, coords=dst.coords)
-    out_ds["depth"].attrs.update({"long_name": "Sea floor depth", "units": "m"})
+    out_ds["depth"].attrs.update(
+        {"long_name": "Sea floor depth after fixes (pre-smoothing)", "units": "m"})
     out_ds["mask"].attrs.update({"long_name": "Ocean mask (1=ocean, 0=land)"})
     out_ds.to_netcdf(output_file)
 
-    # Produce one final plot per depth variable (raw + each smoothed version).
+    # Produce one final plot per depth variable (raw → fixes → each smoothed version).
     # Shared colour scale so panels are visually comparable when diffed later.
     depth_variants: list[tuple[str, np.ndarray, str]] = [
-        ("depth", dst["depth"].values, "unsmoothed"),
+        ("depth_raw", np.where(dst["mask"].values, depth_raw_arr, np.nan), "raw regrid"),
+        ("depth",     dst["depth"].values, "after fixes"),
     ]
     for rx0_val, d_smooth, _ in smooth_variants:
         sv = _smooth_var_name(rx0_val)
