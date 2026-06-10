@@ -460,15 +460,15 @@ Specify one or more named start→end pairs in your config file:
 ```yaml
 thalwegs:
   - name: "Great Belt"
-    start: [10.2, 55.3]
+    begin: [10.2, 55.3]
     end:   [11.0, 55.9]
   - name: "Little Belt"
-    start: [9.5, 55.0]
+    begin: [9.5, 55.0]
     via:
       - [9.8, 55.5]   # force path through the narrow strait
     end: [10.5, 56.5]
   - name: "Öresund"
-    start: [12.6, 55.4]
+    begin: [12.6, 55.4]
     end:   [12.9, 56.1]
 ```
 

@@ -1407,7 +1407,7 @@ def waypoint_thalwegs(
 ) -> list[dict]:
     """Compute thalwegs along user-specified start→end waypoints.
 
-    Each waypoint dict must have ``start: [lon, lat]``, ``end: [lon, lat]``
+    Each waypoint dict must have ``begin: [lon, lat]``, ``end: [lon, lat]``
     and optionally ``name`` and ``via: [[lon, lat], ...]``.  The path is
     computed on the fine-resolution grid using the max-bottleneck algorithm
     (deepest possible route between the points).  Via points force the path
@@ -1418,10 +1418,10 @@ def waypoint_thalwegs(
 
         thalwegs:
           - name: "Great Belt"
-            start: [11.4, 54.5]
+            begin: [11.4, 54.5]
             end:   [11.0, 55.9]
           - name: "Little Belt"
-            start: [9.5, 55.0]
+            begin: [9.5, 55.0]
             via:
               - [9.75, 55.5]
             end: [10.5, 56.5]
@@ -1433,7 +1433,7 @@ def waypoint_thalwegs(
     dst : xr.Dataset
         Coarse regridded bathymetry.
     waypoints : list[dict]
-        Each dict: start, end [, name, via].
+        Each dict: begin, end [, name, via].
 
     Returns
     -------
@@ -1495,7 +1495,7 @@ def waypoint_thalwegs(
     results: list[dict] = []
     for wp in waypoints:
         name  = str(wp.get("name", "thalweg"))
-        _s = wp["start"]
+        _s = wp["begin"]
         lo0, la0 = float(_s[0]), float(_s[1])
         _e = wp["end"]
         lo1, la1 = float(_e[0]), float(_e[1])
