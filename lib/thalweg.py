@@ -1094,11 +1094,13 @@ def boundary_thalwegs(
             starts.append({
                 "edge":      cs["edge"],
                 "segment":   cs["segment"],
-                "coarse_ij": cs["ij"],   # (row, col) in coarse grid
-                "ij":        ij,         # (row, col) in fine grid
+                "coarse_ij": cs["ij"],      # (row, col) in coarse grid
+                "ij":        ij,            # (row, col) in fine grid — used for MST
                 "lon":       float(lon2d_f[ri, ci]),
                 "lat":       float(lat2d_f[ri, ci]),
                 "depth":     float(src_depth[ri, ci]),
+                "bdy_lon":   cs["lon"],     # coarse boundary cell centre — used for marker
+                "bdy_lat":   cs["lat"],
             })
 
     logger.info("      %d boundary start(s) on %d edge(s)",
@@ -1196,10 +1198,10 @@ def boundary_thalwegs(
                                    if np.isfinite(coarse_sill) else np.nan),
                 "path_mae_m":  path_mae,
                 "path_rmse_m": path_rmse,
-                "start_lon": s1["lon"],
-                "start_lat": s1["lat"],
-                "end_lon":   s2["lon"],
-                "end_lat":   s2["lat"],
+                "start_lon": s1.get("bdy_lon", s1["lon"]),
+                "start_lat": s1.get("bdy_lat", s1["lat"]),
+                "end_lon":   s2.get("bdy_lon", s2["lon"]),
+                "end_lat":   s2.get("bdy_lat", s2["lat"]),
                 "lon": float(0.5 * (s1["lon"] + s2["lon"])),
                 "lat": float(0.5 * (s1["lat"] + s2["lat"])),
                 "direction": "auto",

@@ -1319,35 +1319,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         thalwegmod.print_thalweg_table(thalweg_records)
 
-        # Overview table: one row per (thalweg × variant) — keeps fixed width
-        # regardless of how many smooth variants exist.
-        _tw_rows = []
-        for k, tw in enumerate(thalweg_records):
-            def _fmt(v: float) -> str:
-                return f"{v:.1f}" if np.isfinite(v) else "n/a"
-            _tw_name = tw.get("name", f"#{k}")
-            _fine_sill = _fmt(tw["fine"]["sill_depth"])
-            # raw row
-            _tw_rows.append({
-                "name":           _tw_name,
-                "variant":        "raw",
-                "fine sill (m)":  _fine_sill,
-                "coarse sill (m)": _fmt(tw["coarse"]["sill_depth"]),
-                "deficit (m)":    _fmt(tw.get("sill_deficit_m", float("nan"))),
-                "MAE (m)":        _fmt(tw.get("path_mae_m",  float("nan"))),
-                "RMSE (m)":       _fmt(tw.get("path_rmse_m", float("nan"))),
-            })
-            # one row per smooth variant
-            for lbl, sc in tw.get("smooth_coarse", {}).items():
-                _tw_rows.append({
-                    "name":           _tw_name,
-                    "variant":        lbl,
-                    "fine sill (m)":  _fine_sill,
-                    "coarse sill (m)": _fmt(sc["sill_depth"]),
-                    "deficit (m)":    _fmt(sc["deficit_m"]),
-                    "MAE (m)":        _fmt(sc["path_mae_m"]),
-                    "RMSE (m)":       _fmt(sc["path_rmse_m"]),
-                })
+        def _fmt(v: float) -> str:
+            return f"{v:.1f}" if np.isfinite(v) else "n/a"
 
         rpt.add_section(
             "Thalweg analysis",
@@ -1355,9 +1328,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "Each thalweg is the maximum-bottleneck path between two open-boundary "
                 "segments, extracted on the fine source grid.  Depths are sampled on "
                 "the raw (pre-smoothing) and each smoothed coarse grid.  Sill depth is "
-                "the path minimum; deficit = fine − coarse (positive = coarse is shallower)."
+                "the path minimum; deficit = fine − coarse (positive = coarse is shallower). "
+                f"Total: {len(thalweg_records)} thalweg(s)."
             ),
-            table_rows=_tw_rows,
             images=[],
         )
 
