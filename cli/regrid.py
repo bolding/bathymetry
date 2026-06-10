@@ -1414,14 +1414,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     logger.info("\n[6/6] Writing output …")
 
-    # C-grid staggered depths: U = east face, V = north face of each T-cell.
-    # Both have the same shape [ny, nx] as the T-point depth.
-    # NaN propagates: a face is land if either bordering T-cell is land.
-    # C-grid face depths derived from the final (smoothed if available) depth
-    depth_t = (_depth_final_arr if smooth_variants
-               else np.where(dst["mask"].values, dst["depth"].values, np.nan))
-    depth_u_vals, depth_v_vals = interpolate.compute_cgrid_depth(depth_t)
-
     # depth_fixes = after user fixes, before smoothing
     _depth_fixes_arr = np.where(dst["mask"].values, dst["depth"].values, np.nan)
     # depth = smoothed result (last step); falls back to depth_fixes if no smoothing
@@ -1432,6 +1424,13 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     else:
         _depth_final_arr = _depth_fixes_arr
         _depth_final_lname = "Sea floor depth after fixes"
+
+    # C-grid staggered depths: U = east face, V = north face of each T-cell.
+    # Both have the same shape [ny, nx] as the T-point depth.
+    # NaN propagates: a face is land if either bordering T-cell is land.
+    # C-grid face depths derived from the final (smoothed if available) depth
+    depth_t = _depth_final_arr
+    depth_u_vals, depth_v_vals = interpolate.compute_cgrid_depth(depth_t)
 
     out_vars: dict = {
         "depth_raw": xr.DataArray(

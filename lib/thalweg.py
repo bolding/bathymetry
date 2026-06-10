@@ -1290,13 +1290,14 @@ def suggest_depth_fixes(
     records: list[dict],
     dst,
     min_deficit_m: float = 2.0,
+    min_rel_deficit: float = 0.05,
 ) -> list[dict]:
-    """Suggest set_depth fixes for coarse cells that are too shallow along thalwegs.
+    """Suggest deepen_by fixes for coarse cells that are too shallow along thalwegs.
 
     For every unique coarse cell the thalweg path visits, the maximum fine-grid
     depth among the fine path points that fall in that cell is compared to the
-    current coarse depth.  When the deficit exceeds *min_deficit_m* a fix entry
-    is produced.
+    current coarse depth.  A fix is emitted only when BOTH thresholds are met:
+    the absolute deficit and the relative deficit (fraction of fine_max).
 
     Parameters
     ----------
@@ -1305,7 +1306,11 @@ def suggest_depth_fixes(
     dst:
         Coarse-grid xarray Dataset (``depth``, ``mask``, ``lon``/``lat``).
     min_deficit_m:
-        Only emit a fix when ``fine_max − coarse_depth >= min_deficit_m``.
+        Minimum absolute deficit in metres (default 2 m).
+    min_rel_deficit:
+        Minimum relative deficit as a fraction of fine_max (default 0.05 = 5 %).
+        Prevents suggesting fixes for deep cells where a small absolute deficit
+        is oceanographically negligible (e.g. 2.9 m on a 286 m cell = 1 %).
 
     Returns
     -------
@@ -1356,16 +1361,18 @@ def suggest_depth_fixes(
         row, col   = divmod(int(uidx), nx)
         if row >= ny or col >= nx:
             continue
-        coarse_val = float(depth2d[row, col])
-        deficit    = fine_max - coarse_val
-        if deficit < min_deficit_m:
+        coarse_val  = float(depth2d[row, col])
+        deficit     = fine_max - coarse_val
+        rel_deficit = deficit / fine_max if fine_max > 0 else 0.0
+        if deficit < min_deficit_m or rel_deficit < min_rel_deficit:
             continue
         fixes.append({
             "lon":     round(float(lon2d[row, col]), 6),
             "lat":     round(float(lat2d[row, col]), 6),
             "action":  "deepen_by",
             "value":   round(deficit, 1),
-            "comment": f"thalweg: {', '.join(cell_names[uidx])}; deficit={deficit:.1f} m",
+            "comment": (f"thalweg: {', '.join(cell_names[uidx])}; "
+                        f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)"),
         })
 
     logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.1f m",
