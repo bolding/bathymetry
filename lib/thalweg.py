@@ -1375,8 +1375,8 @@ def suggest_depth_fixes(
                         f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)"),
         })
 
-    logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.1f m",
-                len(fixes), min_deficit_m)
+    logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.0f%%",
+                len(fixes), min_rel_deficit * 100)
     return fixes
 
 
