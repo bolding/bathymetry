@@ -1403,7 +1403,6 @@ def waypoint_thalwegs(
     src,
     dst,
     waypoints: list[dict],
-    max_detour: float = 2.5,
 ) -> list[dict]:
     """Compute thalwegs along user-specified start→end waypoints.
 
@@ -1504,7 +1503,6 @@ def waypoint_thalwegs(
         # Build ordered list of (lon, lat) stops: start, optional via points, end
         via_raw = wp.get("via") or []
         stops_lonlat = [(lo0, la0)] + [(float(v[0]), float(v[1])) for v in via_raw] + [(lo1, la1)]
-        has_via = bool(via_raw)
 
         stop_ijs = []
         ok = True

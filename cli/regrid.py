@@ -1309,7 +1309,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             if user_waypoints_cfg:
                 tw_c = thalwegmod.waypoint_thalwegs(
                     _thalweg_src, dst, user_waypoints_cfg,
-                    max_detour=thalweg_max_detour,
                 )
                 thalweg_records.extend(tw_c)
                 logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
