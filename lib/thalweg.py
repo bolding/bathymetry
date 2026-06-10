@@ -1495,8 +1495,10 @@ def waypoint_thalwegs(
     results: list[dict] = []
     for wp in waypoints:
         name  = str(wp.get("name", "thalweg"))
-        lo0, la0 = float(wp["lon_start"]), float(wp["lat_start"])
-        lo1, la1 = float(wp["lon_end"]),   float(wp["lat_end"])
+        _s = wp.get("start")
+        lo0, la0 = (float(_s[0]), float(_s[1])) if _s else (float(wp["lon_start"]), float(wp["lat_start"]))
+        _e = wp.get("end")
+        lo1, la1 = (float(_e[0]), float(_e[1])) if _e else (float(wp["lon_end"]),   float(wp["lat_end"]))
 
         # Build ordered list of (lon, lat) stops: start, optional via points, end
         via_raw = wp.get("via") or []
