@@ -1455,18 +1455,26 @@ def plot_thalweg_comparison(
     ax_map  = fig.add_subplot(gs[0], projection=geo)
     ax_prof = fig.add_subplot(gs[1])
 
-    # ── map extent — zoom to thalweg path bounding box ──────────────────────
+    # ── map extent — zoom to path bbox, clipped to coarse domain ────────────
     p_lon_min  = float(np.nanmin(fine["lon"]))
     p_lon_max  = float(np.nanmax(fine["lon"]))
     p_lat_min  = float(np.nanmin(fine["lat"]))
     p_lat_max  = float(np.nanmax(fine["lat"]))
     span       = max(p_lon_max - p_lon_min, p_lat_max - p_lat_min, 0.5)
     margin     = span * 0.30
-    ax_map.set_extent(  # type: ignore[union-attr]
-        [p_lon_min - margin, p_lon_max + margin,
-         p_lat_min - margin, p_lat_max + margin],
-        crs=geo,
-    )
+    if coarse_lon2d is not None:
+        c_lon_min = float(np.nanmin(coarse_lon2d))
+        c_lon_max = float(np.nanmax(coarse_lon2d))
+        c_lat_min = float(np.nanmin(coarse_lat2d))
+        c_lat_max = float(np.nanmax(coarse_lat2d))
+        ext = [max(p_lon_min - margin, c_lon_min),
+               min(p_lon_max + margin, c_lon_max),
+               max(p_lat_min - margin, c_lat_min),
+               min(p_lat_max + margin, c_lat_max)]
+    else:
+        ext = [p_lon_min - margin, p_lon_max + margin,
+               p_lat_min - margin, p_lat_max + margin]
+    ax_map.set_extent(ext, crs=geo)  # type: ignore[union-attr]
 
     # ── shared depth colormap — coarse background and coarse path dots share scale
     depth_vmax = max(
@@ -1498,17 +1506,22 @@ def plot_thalweg_comparison(
     ax_map.plot(fine["lon"], fine["lat"], color="steelblue", lw=1.2,  # type: ignore[union-attr]
                 transform=geo, label="Fine thalweg", zorder=5)
 
-    # coarse depth scatter — same colormap as background; black centre dot
-    # makes the path easy to follow against the coloured background.
-    ax_map.scatter(  # type: ignore[call-arg,union-attr]
-        fine["lon"], fine["lat"],
-        c=coarse["depth"], cmap=cmap, norm=norm,
-        s=8, zorder=6, label="Coarse depth", transform=geo,
-    )
-    ax_map.scatter(  # type: ignore[call-arg,union-attr]
-        fine["lon"], fine["lat"],
-        c="black", s=1, zorder=7, transform=geo,
-    )
+    # tiny white dot at each unique coarse cell centre the path visits —
+    # shows grid resolution without covering the pcolormesh background.
+    if coarse_lon2d is not None:
+        try:
+            from scipy.spatial import cKDTree as _KDTree  # type: ignore[import-untyped]
+            _c_pts = np.column_stack([coarse_lon2d.ravel(), coarse_lat2d.ravel()])
+            _p_pts = np.column_stack([np.asarray(fine["lon"]),
+                                      np.asarray(fine["lat"])])
+            _, _cidx = _KDTree(_c_pts).query(_p_pts)
+            _cidx_u  = np.unique(_cidx)
+            ax_map.scatter(  # type: ignore[call-arg,union-attr]
+                _c_pts[_cidx_u, 0], _c_pts[_cidx_u, 1],
+                c="white", s=1.5, zorder=8, alpha=0.7, transform=geo,
+            )
+        except ImportError:
+            pass
 
     # start / end markers — prefer stored boundary detection coordinates so
     # markers land at the actual domain edge even when the path is clipped.
@@ -1546,11 +1559,7 @@ def plot_thalweg_comparison(
         )
 
     ax_map.set_title(f"{name} — map")  # type: ignore[union-attr]
-    # legend below the map so it does not obscure bathymetric features
-    ax_map.legend(  # type: ignore[union-attr]
-        fontsize=7, loc="upper left",
-        bbox_to_anchor=(0.0, -0.06), ncol=5, borderaxespad=0, framealpha=0.9,
-    )
+    ax_map.legend(fontsize=7, loc="best", ncol=2, framealpha=0.85)  # type: ignore[union-attr]
 
     # ── right panel: depth profile ───────────────────────────────────────────
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",

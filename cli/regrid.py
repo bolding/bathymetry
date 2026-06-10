@@ -1321,24 +1321,33 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         tw_sum = thalwegmod.thalweg_summary(thalweg_records)
         report.print_table(tw_sum, title="Thalweg summary")
 
-        # Overview table: one row per thalweg, columns for each depth variant
+        # Overview table: one row per (thalweg × variant) — keeps fixed width
+        # regardless of how many smooth variants exist.
         _tw_rows = []
         for k, tw in enumerate(thalweg_records):
             def _fmt(v: float) -> str:
                 return f"{v:.1f}" if np.isfinite(v) else "n/a"
-            row: dict = {
-                "name":         tw.get("name", f"#{k}"),
-                "category":     tw.get("category", "?"),
-                "fine sill (m)": _fmt(tw["fine"]["sill_depth"]),
-                "raw sill (m)":  _fmt(tw["coarse"]["sill_depth"]),
-                "raw deficit (m)": _fmt(tw.get("sill_deficit_m", float("nan"))),
-                "raw MAE (m)":   _fmt(tw.get("path_mae_m", float("nan"))),
-            }
+            _tw_name = tw.get("name", f"#{k}")
+            _fine_sill = _fmt(tw["fine"]["sill_depth"])
+            # raw row
+            _tw_rows.append({
+                "name":           _tw_name,
+                "variant":        "raw",
+                "fine sill (m)":  _fine_sill,
+                "coarse sill (m)": _fmt(tw["coarse"]["sill_depth"]),
+                "deficit (m)":    _fmt(tw.get("sill_deficit_m", float("nan"))),
+                "MAE (m)":        _fmt(tw.get("path_mae_m", float("nan"))),
+            })
+            # one row per smooth variant
             for lbl, sc in tw.get("smooth_coarse", {}).items():
-                row[f"{lbl} sill (m)"]    = _fmt(sc["sill_depth"])
-                row[f"{lbl} deficit (m)"] = _fmt(sc["deficit_m"])
-                row[f"{lbl} MAE (m)"]     = _fmt(sc["path_mae_m"])
-            _tw_rows.append(row)
+                _tw_rows.append({
+                    "name":           _tw_name,
+                    "variant":        lbl,
+                    "fine sill (m)":  _fine_sill,
+                    "coarse sill (m)": _fmt(sc["sill_depth"]),
+                    "deficit (m)":    _fmt(sc["deficit_m"]),
+                    "MAE (m)":        _fmt(sc["path_mae_m"]),
+                })
 
         rpt.add_section(
             "Thalweg analysis",
