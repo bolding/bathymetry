@@ -1318,8 +1318,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     len(thalweg_records), time.time() - t0)
 
         thalwegmod.print_thalweg_table(thalweg_records)
-        tw_sum = thalwegmod.thalweg_summary(thalweg_records)
-        report.print_table(tw_sum, title="Thalweg summary")
 
         # Overview table: one row per (thalweg × variant) — keeps fixed width
         # regardless of how many smooth variants exist.
@@ -1336,7 +1334,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "fine sill (m)":  _fine_sill,
                 "coarse sill (m)": _fmt(tw["coarse"]["sill_depth"]),
                 "deficit (m)":    _fmt(tw.get("sill_deficit_m", float("nan"))),
-                "MAE (m)":        _fmt(tw.get("path_mae_m", float("nan"))),
+                "MAE (m)":        _fmt(tw.get("path_mae_m",  float("nan"))),
+                "RMSE (m)":       _fmt(tw.get("path_rmse_m", float("nan"))),
             })
             # one row per smooth variant
             for lbl, sc in tw.get("smooth_coarse", {}).items():
@@ -1347,6 +1346,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     "coarse sill (m)": _fmt(sc["sill_depth"]),
                     "deficit (m)":    _fmt(sc["deficit_m"]),
                     "MAE (m)":        _fmt(sc["path_mae_m"]),
+                    "RMSE (m)":       _fmt(sc["path_rmse_m"]),
                 })
 
         rpt.add_section(
@@ -1371,26 +1371,29 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 tw, _thalweg_src, dst,
                 png_path=os.path.join(report_dir, img),
             )
-            deficit = tw.get("sill_deficit_m", float("nan"))
-            mae     = tw.get("path_mae_m",   float("nan"))
-            coarse_sill = tw["coarse"]["sill_depth"]
-            _parts = [
-                f"Category: **{cat}**.",
-                f"Fine sill: **{tw['fine']['sill_depth']:.1f} m**.",
-                f"Raw coarse sill: **{coarse_sill:.1f} m**.",
-                (f"Deficit: **{deficit:.1f} m**." if np.isfinite(deficit) else ""),
-                (f"MAE: **{mae:.1f} m**." if np.isfinite(mae) else ""),
-            ]
+            _tw_detail: list[dict] = []
+            _fine_sill = _fmt(tw["fine"]["sill_depth"])
+            _tw_detail.append({
+                "variant":        "raw",
+                "fine sill (m)":  _fine_sill,
+                "coarse sill (m)": _fmt(tw["coarse"]["sill_depth"]),
+                "deficit (m)":    _fmt(tw.get("sill_deficit_m", float("nan"))),
+                "MAE (m)":        _fmt(tw.get("path_mae_m",     float("nan"))),
+                "RMSE (m)":       _fmt(tw.get("path_rmse_m",    float("nan"))),
+            })
             for lbl, sc in tw.get("smooth_coarse", {}).items():
-                _parts.append(
-                    f"{lbl} sill: **{sc['sill_depth']:.1f} m** "
-                    f"(deficit {sc['deficit_m']:.1f} m, MAE {sc['path_mae_m']:.1f} m)."
-                    if np.isfinite(sc["sill_depth"]) else ""
-                )
+                _tw_detail.append({
+                    "variant":        lbl,
+                    "fine sill (m)":  _fine_sill,
+                    "coarse sill (m)": _fmt(sc["sill_depth"]),
+                    "deficit (m)":    _fmt(sc["deficit_m"]),
+                    "MAE (m)":        _fmt(sc["path_mae_m"]),
+                    "RMSE (m)":       _fmt(sc["path_rmse_m"]),
+                })
             rpt.add_section(
                 f"Thalweg: {tw_name}",
-                text="  ".join(p for p in _parts if p),
-                table={},
+                text=f"Category: {cat}.",
+                table_rows=_tw_detail,
                 images=[img],
             )
             csv_name = pfx + f"05e_thalweg_{k:03d}_{safe}.csv"
