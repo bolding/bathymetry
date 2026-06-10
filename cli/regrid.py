@@ -1319,9 +1319,25 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         thalwegmod.print_thalweg_table(thalweg_records)
 
+        # Suggest set_depth fixes for coarse cells that are too shallow
+        _depth_fixes = thalwegmod.suggest_depth_fixes(thalweg_records, dst)
+        _fixes_yaml  = pfx + "05e_thalweg_fixes.yaml"
+        if _depth_fixes:
+            thalwegmod.write_fixes_yaml(
+                _depth_fixes,
+                path=os.path.join(report_dir, _fixes_yaml),
+            )
+            logger.info("      wrote %d fix suggestion(s) → %s", len(_depth_fixes), _fixes_yaml)
+
         def _fmt(v: float) -> str:
             return f"{v:.1f}" if np.isfinite(v) else "n/a"
 
+        _fixes_note = (
+            f"  {len(_depth_fixes)} set_depth fix suggestion(s) written to "
+            f"``{_fixes_yaml}`` — review and paste selected entries into the "
+            f"config ``fixes:`` block."
+            if _depth_fixes else ""
+        )
         rpt.add_section(
             "Thalweg analysis",
             text=(
@@ -1329,9 +1345,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "segments, extracted on the fine source grid.  Depths are sampled on "
                 "the raw (pre-smoothing) and each smoothed coarse grid.  Sill depth is "
                 "the path minimum; deficit = fine − coarse (positive = coarse is shallower). "
-                f"Total: {len(thalweg_records)} thalweg(s)."
+                f"Total: {len(thalweg_records)} thalweg(s)." + _fixes_note
             ),
-            images=[],
+            images=[_fixes_yaml] if _depth_fixes else [],
         )
 
         for k, tw in enumerate(thalweg_records):

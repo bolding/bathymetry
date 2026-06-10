@@ -1283,6 +1283,118 @@ def add_smooth_coarse(
 
 
 # ---------------------------------------------------------------------------
+# Depth-fix suggestions from thalweg comparison
+# ---------------------------------------------------------------------------
+
+def suggest_depth_fixes(
+    records: list[dict],
+    dst,
+    min_deficit_m: float = 2.0,
+) -> list[dict]:
+    """Suggest set_depth fixes for coarse cells that are too shallow along thalwegs.
+
+    For every unique coarse cell the thalweg path visits, the maximum fine-grid
+    depth among the fine path points that fall in that cell is compared to the
+    current coarse depth.  When the deficit exceeds *min_deficit_m* a fix entry
+    is produced.
+
+    Parameters
+    ----------
+    records:
+        Thalweg records as returned by the Mode A/B/C functions.
+    dst:
+        Coarse-grid xarray Dataset (``depth``, ``mask``, ``lon``/``lat``).
+    min_deficit_m:
+        Only emit a fix when ``fine_max − coarse_depth >= min_deficit_m``.
+
+    Returns
+    -------
+    list of dicts with keys ``lon``, ``lat``, ``action``, ``value``, ``comment``.
+    The ``comment`` field names the thalweg(s) that triggered the fix.
+    """
+    try:
+        from scipy.spatial import cKDTree as _KDTree  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("suggest_depth_fixes: scipy not available — skipping fix suggestions")
+        return []
+
+    lon_raw = dst.lon.values
+    lat_raw = dst.lat.values
+    if lon_raw.ndim == 1 and lat_raw.ndim == 1:
+        lon2d, lat2d = np.meshgrid(lon_raw, lat_raw)
+    else:
+        lon2d, lat2d = lon_raw, lat_raw
+
+    depth2d = dst["depth"].values.astype(float)
+    ny, nx = lon2d.shape
+    pts = np.column_stack([lon2d.ravel(), lat2d.ravel()])
+    tree = _KDTree(pts)
+
+    # cell_data[flat_idx] = (fine_depth_max, [thalweg_names])
+    cell_fine_max: dict[int, float]       = {}
+    cell_names:   dict[int, list[str]]    = {}
+
+    for rec in records:
+        fine     = rec["fine"]
+        fine_lon = np.asarray(fine["lon"],   dtype=float)
+        fine_lat = np.asarray(fine["lat"],   dtype=float)
+        fine_dep = np.asarray(fine["depth"], dtype=float)
+        tw_name  = rec.get("name", "thalweg")
+
+        _, cidx = tree.query(np.column_stack([fine_lon, fine_lat]))
+        for uidx in np.unique(cidx):
+            sel      = cidx == uidx
+            fine_max = float(np.nanmax(fine_dep[sel]))
+            if uidx not in cell_fine_max or fine_max > cell_fine_max[uidx]:
+                cell_fine_max[uidx] = fine_max
+            cell_names.setdefault(int(uidx), [])
+            if tw_name not in cell_names[int(uidx)]:
+                cell_names[int(uidx)].append(tw_name)
+
+    fixes: list[dict] = []
+    for uidx, fine_max in sorted(cell_fine_max.items(), key=lambda kv: kv[0]):
+        row, col   = divmod(int(uidx), nx)
+        if row >= ny or col >= nx:
+            continue
+        coarse_val = float(depth2d[row, col])
+        deficit    = fine_max - coarse_val
+        if deficit < min_deficit_m:
+            continue
+        fixes.append({
+            "lon":     round(float(lon2d[row, col]), 6),
+            "lat":     round(float(lat2d[row, col]), 6),
+            "action":  "set_depth",
+            "value":   round(fine_max, 1),
+            "comment": f"thalweg: {', '.join(cell_names[uidx])}; "
+                       f"fine_max={fine_max:.1f} m, coarse={coarse_val:.1f} m, "
+                       f"deficit={deficit:.1f} m",
+        })
+
+    logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.1f m",
+                len(fixes), min_deficit_m)
+    return fixes
+
+
+def write_fixes_yaml(fixes: list[dict], path: str) -> None:
+    """Write a list of fix dicts to a YAML file ready to paste into the config."""
+    import os
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    lines = [
+        "# Suggested set_depth fixes from thalweg analysis.",
+        "# Review, select relevant entries, and paste into your config's fixes: block.",
+        "fixes:",
+    ]
+    for fx in fixes:
+        lines.append(f"  - lon: {fx['lon']}")
+        lines.append(f"    lat: {fx['lat']}")
+        lines.append(f"    action: {fx['action']}")
+        lines.append(f"    value: {fx['value']}")
+        lines.append(f"    # {fx['comment']}")
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Mode C: user-specified waypoints
 # ---------------------------------------------------------------------------
 
