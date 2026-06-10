@@ -1331,6 +1331,7 @@ def suggest_depth_fixes(
         lon2d, lat2d = lon_raw, lat_raw
 
     depth2d = dst["depth"].values.astype(float)
+    mask2d  = dst["mask"].values.astype(bool)
     ny, nx = lon2d.shape
     pts = np.column_stack([lon2d.ravel(), lat2d.ravel()])
     tree = _KDTree(pts)
@@ -1361,18 +1362,32 @@ def suggest_depth_fixes(
         row, col   = divmod(int(uidx), nx)
         if row >= ny or col >= nx:
             continue
-        coarse_val  = float(depth2d[row, col])
+        is_land    = not bool(mask2d[row, col])
+        coarse_val = float(depth2d[row, col]) if not is_land else 0.0
+        if not np.isfinite(coarse_val):
+            coarse_val = 0.0
         deficit     = fine_max - coarse_val
         rel_deficit = deficit / fine_max if fine_max > 0 else 0.0
-        if deficit < min_deficit_m or rel_deficit < min_rel_deficit:
+        if not np.isfinite(deficit):
             continue
+        if not is_land and (deficit < min_deficit_m or rel_deficit < min_rel_deficit):
+            continue
+        if is_land:
+            action  = "set_depth"
+            value   = round(fine_max, 1)
+            comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
+                       f"blocked in coarse — fine sill={fine_max:.1f} m")
+        else:
+            action  = "deepen_by"
+            value   = round(deficit, 1)
+            comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
+                       f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)")
         fixes.append({
-            "lon":     round(float(lon2d[row, col]), 6),
-            "lat":     round(float(lat2d[row, col]), 6),
-            "action":  "deepen_by",
-            "value":   round(deficit, 1),
-            "comment": (f"thalweg: {', '.join(cell_names[uidx])}; "
-                        f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)"),
+            "lon":    round(float(lon2d[row, col]), 6),
+            "lat":    round(float(lat2d[row, col]), 6),
+            "action": action,
+            "value":  value,
+            "comment": comment,
         })
 
     logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.0f%%",
