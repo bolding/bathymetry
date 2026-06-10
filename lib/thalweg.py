@@ -1422,14 +1422,18 @@ def waypoint_thalwegs(
           - name: "Little Belt"
             begin: [9.5, 55.0]
             via:
-              - [9.75, 55.5]
-            end: [10.5, 56.5]
-            corridor_margin: 1.0   # degrees; default 1.0
+              - [9.8, 55.5]
+            end:  [10.5, 56.5]
+            bbox: [9.0, 11.0, 54.5, 57.0]   # [lon_min, lon_max, lat_min, lat_max]
+          - name: "Öresund"
+            begin: [12.6, 55.4]
+            end:   [12.9, 56.1]
+            bbox:  [12.0, 13.5, 55.0, 56.5]
 
-    Each segment between consecutive stops is solved with a local MST
-    restricted to a bounding-box corridor of ``corridor_margin`` degrees
-    around that segment.  This prevents the path from detouring through a
-    distant deeper passage (e.g. the Great Belt when routing through Öresund).
+    The MST for each waypoint is built on fine-grid cells inside the ``bbox``
+    (intersected with the coarse model domain).  This prevents the path from
+    detouring through a distant deeper passage.  If no ``bbox`` is given, a
+    ``corridor_margin`` (default 1.0°) is added around all stops as a fallback.
 
     Parameters
     ----------
@@ -1438,7 +1442,7 @@ def waypoint_thalwegs(
     dst : xr.Dataset
         Coarse regridded bathymetry.
     waypoints : list[dict]
-        Each dict: begin, end [, name, via, corridor_margin].
+        Each dict: begin, end [, name, via, bbox, corridor_margin].
 
     Returns
     -------
@@ -1517,28 +1521,34 @@ def waypoint_thalwegs(
         if not ok:
             continue
 
-        # Per-segment corridor: build a local MST restricted to a bounding box
-        # around each consecutive stop pair.  This prevents the path from
-        # detouring through a distant deeper passage (e.g. Great Belt when
-        # computing an Öresund segment).
-        corridor_margin = float(wp.get("corridor_margin", 1.0))
+        # Build MST restricted to a bounding box for this waypoint.
+        # bbox: [lon_min, lon_max, lat_min, lat_max] — explicit, recommended.
+        # corridor_margin: fallback margin added around begin/end bounding box.
+        bbox = wp.get("bbox")
+        if bbox:
+            blo0, blo1, bla0, bla1 = (float(bbox[0]), float(bbox[1]),
+                                       float(bbox[2]), float(bbox[3]))
+        else:
+            margin = float(wp.get("corridor_margin", 1.0))
+            all_lons = [lo for lo, _ in stops_lonlat]
+            all_lats = [la for _, la in stops_lonlat]
+            blo0, blo1 = min(all_lons) - margin, max(all_lons) + margin
+            bla0, bla1 = min(all_lats) - margin, max(all_lats) + margin
+        wp_mask = src_mask_domain & (
+            (lon2d_f >= blo0) & (lon2d_f <= blo1) &
+            (lat2d_f >= bla0) & (lat2d_f <= bla1)
+        )
+        wp_mst, wp_node_id, wp_wet_rc = _build_bottleneck_mst(src_depth, wp_mask)
 
         full_path: list[tuple[int, int]] = []
         ok = True
         for (a_lo, a_la), (b_lo, b_la), a_ij, b_ij in zip(
             stops_lonlat[:-1], stops_lonlat[1:], stop_ijs[:-1], stop_ijs[1:]
         ):
-            seg_mask = src_mask_domain & (
-                (lon2d_f >= min(a_lo, b_lo) - corridor_margin) &
-                (lon2d_f <= max(a_lo, b_lo) + corridor_margin) &
-                (lat2d_f >= min(a_la, b_la) - corridor_margin) &
-                (lat2d_f <= max(a_la, b_la) + corridor_margin)
-            )
-            seg_mst, seg_node_id, seg_wet_rc = _build_bottleneck_mst(src_depth, seg_mask)
-            seg = _mst_path(seg_mst, seg_node_id, seg_wet_rc, a_ij, b_ij)
+            seg = _mst_path(wp_mst, wp_node_id, wp_wet_rc, a_ij, b_ij)
             if seg is None or len(seg) < 2:
                 logger.warning("thalweg '%s': no wet path between (%.3f,%.3f)→(%.3f,%.3f) "
-                               "— skipped (try increasing corridor_margin)",
+                               "— skipped (adjust bbox or corridor_margin)",
                                name, a_lo, a_la, b_lo, b_la)
                 ok = False
                 break
