@@ -1498,17 +1498,72 @@ def waypoint_thalwegs(
 
     results: list[dict] = []
     for wp in waypoints:
-        name  = str(wp.get("name", "thalweg"))
-        _s = wp["begin"]
-        lo0, la0 = float(_s[0]), float(_s[1])
-        _e = wp["end"]
-        lo1, la1 = float(_e[0]), float(_e[1])
-
-        # Build ordered list of (lon, lat) stops: start, optional via points, end
+        name    = str(wp.get("name", "thalweg"))
         via_raw = wp.get("via") or []
-        stops_lonlat = [(lo0, la0)] + [(float(v[0]), float(v[1])) for v in via_raw] + [(lo1, la1)]
 
-        stop_ijs = []
+        # --- 1. Resolve bounding box (needed before stop detection) ---
+        bbox_cfg = wp.get("bbox")
+
+        # --- 2. Resolve stops (begin/end explicit, or auto-detect from bbox) ---
+        _s = wp.get("begin")
+        _e = wp.get("end")
+
+        if _s is not None and _e is not None:
+            stops_lonlat: list[tuple[float, float]] = (
+                [(float(_s[0]), float(_s[1]))]
+                + [(float(v[0]), float(v[1])) for v in via_raw]
+                + [(float(_e[0]), float(_e[1]))]
+            )
+        elif bbox_cfg is not None:
+            # Auto-detect entry/exit from bbox boundary (like boundary_thalwegs)
+            _blo0, _blo1 = float(bbox_cfg[0]), float(bbox_cfg[1])
+            _bla0, _bla1 = float(bbox_cfg[2]), float(bbox_cfg[3])
+            r0b = int(np.searchsorted(src_lat, _bla0))
+            r1b = min(int(np.searchsorted(src_lat, _bla1)) + 1, len(src_lat))
+            c0b = int(np.searchsorted(src_lon, _blo0))
+            c1b = min(int(np.searchsorted(src_lon, _blo1)) + 1, len(src_lon))
+            depth_sub = src_depth[r0b:r1b, c0b:c1b]
+            # Use domain-restricted mask for bbox auto-detection
+            domain_sub = src_mask_domain[r0b:r1b, c0b:c1b]
+            lon_sub    = lon2d_f[r0b:r1b, c0b:c1b]
+            lat_sub    = lat2d_f[r0b:r1b, c0b:c1b]
+            raw_bdy    = _boundary_starts(depth_sub, domain_sub, lon_sub, lat_sub)
+            if len(raw_bdy) < 2:
+                logger.warning("thalweg '%s': fewer than 2 boundary starts in bbox — skipped", name)
+                continue
+            bdy_starts = [{**s, "ij": (r0b + s["ij"][0], c0b + s["ij"][1])}
+                          for s in raw_bdy]
+            pairs = [(a, b) for i, a in enumerate(bdy_starts)
+                     for b in bdy_starts[i+1:]
+                     if a["edge"] != b["edge"]]
+            if not pairs:
+                pairs = [(bdy_starts[0], bdy_starts[-1])]
+            p0, p1 = pairs[0]
+            stops_lonlat = ([(p0["lon"], p0["lat"])]
+                            + [(float(v[0]), float(v[1])) for v in via_raw]
+                            + [(p1["lon"], p1["lat"])])
+        else:
+            logger.warning("thalweg '%s': needs begin/end or bbox — skipped", name)
+            continue
+
+        # --- 3. Build bbox mask (fall back to corridor around stops if no bbox) ---
+        if bbox_cfg is not None:
+            mlo0, mlo1 = float(bbox_cfg[0]), float(bbox_cfg[1])
+            mla0, mla1 = float(bbox_cfg[2]), float(bbox_cfg[3])
+        else:
+            margin = float(wp.get("corridor_margin", 1.0))
+            all_lons = [lo for lo, _ in stops_lonlat]
+            all_lats = [la for _, la in stops_lonlat]
+            mlo0, mlo1 = min(all_lons) - margin, max(all_lons) + margin
+            mla0, mla1 = min(all_lats) - margin, max(all_lats) + margin
+        wp_mask = src_mask_domain & (
+            (lon2d_f >= mlo0) & (lon2d_f <= mlo1) &
+            (lat2d_f >= mla0) & (lat2d_f <= mla1)
+        )
+        wp_mst, wp_node_id, wp_wet_rc = _build_bottleneck_mst(src_depth, wp_mask)
+
+        # --- 4. Snap stops to nearest wet fine-grid cell ---
+        stop_ijs: list[tuple[int, int]] = []
         ok = True
         for slo, sla in stops_lonlat:
             ij = _nearest_ij(slo, sla)
@@ -1520,25 +1575,6 @@ def waypoint_thalwegs(
             stop_ijs.append(ij)
         if not ok:
             continue
-
-        # Build MST restricted to a bounding box for this waypoint.
-        # bbox: [lon_min, lon_max, lat_min, lat_max] — explicit, recommended.
-        # corridor_margin: fallback margin added around begin/end bounding box.
-        bbox = wp.get("bbox")
-        if bbox:
-            blo0, blo1, bla0, bla1 = (float(bbox[0]), float(bbox[1]),
-                                       float(bbox[2]), float(bbox[3]))
-        else:
-            margin = float(wp.get("corridor_margin", 1.0))
-            all_lons = [lo for lo, _ in stops_lonlat]
-            all_lats = [la for _, la in stops_lonlat]
-            blo0, blo1 = min(all_lons) - margin, max(all_lons) + margin
-            bla0, bla1 = min(all_lats) - margin, max(all_lats) + margin
-        wp_mask = src_mask_domain & (
-            (lon2d_f >= blo0) & (lon2d_f <= blo1) &
-            (lat2d_f >= bla0) & (lat2d_f <= bla1)
-        )
-        wp_mst, wp_node_id, wp_wet_rc = _build_bottleneck_mst(src_depth, wp_mask)
 
         full_path: list[tuple[int, int]] = []
         ok = True
@@ -1582,8 +1618,8 @@ def waypoint_thalwegs(
             },
             "sill_deficit_m": (fine["sill_depth"] - coarse_sill
                                if np.isfinite(coarse_sill) else np.nan),
-            "lon": float(0.5 * (lo0 + lo1)),
-            "lat": float(0.5 * (la0 + la1)),
+            "lon": float(np.mean([lo for lo, _ in stops_lonlat])),
+            "lat": float(np.mean([la for _, la in stops_lonlat])),
             "direction": "user",
             "category": "WAYPOINT",
             "zoomable": bool(wp.get("zoomable", False)),
