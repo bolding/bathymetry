@@ -1425,6 +1425,12 @@ def waypoint_thalwegs(
             via:
               - [9.75, 55.5]
             end: [10.5, 56.5]
+            corridor_margin: 1.0   # degrees; default 1.0
+
+    Each segment between consecutive stops is solved with a local MST
+    restricted to a bounding-box corridor of ``corridor_margin`` degrees
+    around that segment.  This prevents the path from detouring through a
+    distant deeper passage (e.g. the Great Belt when routing through Öresund).
 
     Parameters
     ----------
@@ -1433,7 +1439,7 @@ def waypoint_thalwegs(
     dst : xr.Dataset
         Coarse regridded bathymetry.
     waypoints : list[dict]
-        Each dict: begin, end [, name, via].
+        Each dict: begin, end [, name, via, corridor_margin].
 
     Returns
     -------
@@ -1457,9 +1463,7 @@ def waypoint_thalwegs(
     max_lookup = float(max(abs(np.diff(src_lon)).mean(),
                           abs(np.diff(src_lat)).mean()) * 25)
 
-    # Restrict MST to the coarse domain — same as boundary_thalwegs — so that
-    # the max-bottleneck path cannot detour through deep open ocean outside the
-    # model domain, which would produce unrealistically long paths.
+    # Restrict paths to the coarse domain.
     _dom_lon_min = float(dst_lon2d.min())
     _dom_lon_max = float(dst_lon2d.max())
     _dom_lat_min = float(dst_lat2d.min())
@@ -1468,11 +1472,8 @@ def waypoint_thalwegs(
         (lon2d_f >= _dom_lon_min) & (lon2d_f <= _dom_lon_max) &
         (lat2d_f >= _dom_lat_min) & (lat2d_f <= _dom_lat_max)
     )
-    src_mask_mst = src_mask & _in_domain_f
+    src_mask_domain = src_mask & _in_domain_f
 
-    # Build MST once — shared across all waypoint queries
-    logger.info("      building max-bottleneck MST …")
-    mst, node_id_f, wet_rc_f = _build_bottleneck_mst(src_depth, src_mask_mst)
     logger.info("      %d waypoint(s) to process", len(waypoints))
 
     def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
@@ -1518,16 +1519,31 @@ def waypoint_thalwegs(
         if not ok:
             continue
 
-        # Concatenate MST segments between consecutive stops
+        # Per-segment corridor: build a local MST restricted to a bounding box
+        # around each consecutive stop pair.  This prevents the path from
+        # detouring through a distant deeper passage (e.g. Great Belt when
+        # computing an Öresund segment).
+        corridor_margin = float(wp.get("corridor_margin", 1.0))
+
         full_path: list[tuple[int, int]] = []
         ok = True
-        for a, b in zip(stop_ijs[:-1], stop_ijs[1:]):
-            seg = _mst_path(mst, node_id_f, wet_rc_f, a, b)
+        for (a_lo, a_la), (b_lo, b_la), a_ij, b_ij in zip(
+            stops_lonlat[:-1], stops_lonlat[1:], stop_ijs[:-1], stop_ijs[1:]
+        ):
+            seg_mask = src_mask_domain & (
+                (lon2d_f >= min(a_lo, b_lo) - corridor_margin) &
+                (lon2d_f <= max(a_lo, b_lo) + corridor_margin) &
+                (lat2d_f >= min(a_la, b_la) - corridor_margin) &
+                (lat2d_f <= max(a_la, b_la) + corridor_margin)
+            )
+            seg_mst, seg_node_id, seg_wet_rc = _build_bottleneck_mst(src_depth, seg_mask)
+            seg = _mst_path(seg_mst, seg_node_id, seg_wet_rc, a_ij, b_ij)
             if seg is None or len(seg) < 2:
-                logger.warning("thalweg '%s': no wet path between stops — skipped", name)
+                logger.warning("thalweg '%s': no wet path between (%.3f,%.3f)→(%.3f,%.3f) "
+                               "— skipped (try increasing corridor_margin)",
+                               name, a_lo, a_la, b_lo, b_la)
                 ok = False
                 break
-            # Remove the first point of each segment except the very first to avoid duplicates
             full_path.extend(seg if not full_path else seg[1:])
         if not ok or len(full_path) < 3:
             continue
@@ -1538,17 +1554,6 @@ def waypoint_thalwegs(
             float(dst_lon2d.min()), float(dst_lon2d.max()),
             float(dst_lat2d.min()), float(dst_lat2d.max()),
         )
-        # Skip detour check when via points are used — user is explicitly routing the path
-        if not has_via and len(fine["lon"]) >= 2 and max_detour > 0:
-            direct_km = _great_circle_km(
-                float(fine["lon"][0]),  float(fine["lat"][0]),
-                float(fine["lon"][-1]), float(fine["lat"][-1]),
-            )
-            if direct_km > 0 and float(fine["dist_km"][-1]) > max_detour * direct_km:
-                logger.warning("thalweg '%s': path %.0f km vs %.0f km direct — skipped "
-                               "(increase max_detour to keep)", name,
-                               fine["dist_km"][-1], direct_km)
-                continue
         coarse_dep = _sample_coarse(
             fine["lon"], fine["lat"], coarse_tree, coarse_dep_arr,  # type: ignore[arg-type]
             max_dist_deg=max_lookup,
