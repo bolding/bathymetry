@@ -1498,24 +1498,46 @@ def waypoint_thalwegs(
         lo0, la0 = float(wp["lon_start"]), float(wp["lat_start"])
         lo1, la1 = float(wp["lon_end"]),   float(wp["lat_end"])
 
-        ij_start = _nearest_ij(lo0, la0)
-        ij_end   = _nearest_ij(lo1, la1)
-        if ij_start is None or ij_end is None:
-            logger.warning("thalweg '%s': no wet cell near start or end — skipped", name)
+        # Build ordered list of (lon, lat) stops: start, optional via points, end
+        via_raw = wp.get("via") or []
+        stops_lonlat = [(lo0, la0)] + [(float(v[0]), float(v[1])) for v in via_raw] + [(lo1, la1)]
+        has_via = bool(via_raw)
+
+        stop_ijs = []
+        ok = True
+        for slo, sla in stops_lonlat:
+            ij = _nearest_ij(slo, sla)
+            if ij is None:
+                logger.warning("thalweg '%s': no wet cell near (%.3f, %.3f) — skipped",
+                               name, slo, sla)
+                ok = False
+                break
+            stop_ijs.append(ij)
+        if not ok:
             continue
 
-        path = _mst_path(mst, node_id_f, wet_rc_f, ij_start, ij_end)
-        if path is None or len(path) < 3:
-            logger.warning("thalweg '%s': no wet path found — skipped", name)
+        # Concatenate MST segments between consecutive stops
+        full_path: list[tuple[int, int]] = []
+        ok = True
+        for a, b in zip(stop_ijs[:-1], stop_ijs[1:]):
+            seg = _mst_path(mst, node_id_f, wet_rc_f, a, b)
+            if seg is None or len(seg) < 2:
+                logger.warning("thalweg '%s': no wet path between stops — skipped", name)
+                ok = False
+                break
+            # Remove the first point of each segment except the very first to avoid duplicates
+            full_path.extend(seg if not full_path else seg[1:])
+        if not ok or len(full_path) < 3:
             continue
 
-        fine = _path_to_profile(path, src_depth, lon2d_f, lat2d_f)
+        fine = _path_to_profile(full_path, src_depth, lon2d_f, lat2d_f)
         fine = _clip_profile_to_domain(
             fine,
             float(dst_lon2d.min()), float(dst_lon2d.max()),
             float(dst_lat2d.min()), float(dst_lat2d.max()),
         )
-        if len(fine["lon"]) >= 2 and max_detour > 0:
+        # Skip detour check when via points are used — user is explicitly routing the path
+        if not has_via and len(fine["lon"]) >= 2 and max_detour > 0:
             direct_km = _great_circle_km(
                 float(fine["lon"][0]),  float(fine["lat"][0]),
                 float(fine["lon"][-1]), float(fine["lat"][-1]),
