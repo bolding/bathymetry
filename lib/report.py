@@ -1476,12 +1476,17 @@ def plot_thalweg_comparison(
                p_lat_min - margin, p_lat_max + margin]
     ax_map.set_extent(ext, crs=geo)  # type: ignore[union-attr]
 
-    # ── shared depth colormap — coarse background and coarse path dots share scale
-    depth_vmax = max(
-        1.0,
-        float(np.nanmax(fine["depth"])),
-        float(np.nanmax(coarse_depth_bg)) if coarse_lon2d is not None else 0.0,
-    )
+    # ── shared depth colormap — scale to depths visible within the map extent
+    if coarse_lon2d is not None:
+        _in_ext = (
+            (coarse_lon2d >= ext[0]) & (coarse_lon2d <= ext[1]) &
+            (coarse_lat2d >= ext[2]) & (coarse_lat2d <= ext[3])
+        )
+        _vis = coarse_depth_bg[_in_ext]
+        _vis_max = float(np.nanmax(_vis)) if _vis.size > 0 and np.any(np.isfinite(_vis)) else 1.0
+    else:
+        _vis_max = 1.0
+    depth_vmax = max(1.0, float(np.nanmax(fine["depth"])), _vis_max)
     cmap = cmocean.cm.deep
     norm = plt.Normalize(vmin=0, vmax=depth_vmax)
 
