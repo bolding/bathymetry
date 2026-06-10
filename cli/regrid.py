@@ -1184,6 +1184,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     if rx0_list:
         depth_arr = np.where(dst["mask"].values, dst["depth"].values, 0.0)
+        _nan_wet = np.isnan(depth_arr) & dst["mask"].values.astype(bool)
+        if _nan_wet.any():
+            logger.warning("  %d wet cell(s) with NaN depth after fixes — replacing with 0 for smoothing",
+                           int(_nan_wet.sum()))
+            depth_arr = np.where(_nan_wet, 0.0, depth_arr)
         mask_arr  = dst["mask"].values
         rx0_u_b, rx0_v_b = smoothmod.compute_rx0(depth_arr, mask_arr)
         rx0_before = np.maximum(
