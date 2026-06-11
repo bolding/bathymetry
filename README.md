@@ -216,6 +216,34 @@ output:
 #     action: set_depth
 #     value: 22.0
 
+# Thalweg analysis (step 4e) — compare fine-vs-coarse depth profiles.
+# Enabled automatically when this section is present.
+# thalweg:
+#   boundary_thalwegs: false      # Mode B: auto-start from domain edges
+#   bbox_depth_percentile: 75     # global percentile for all waypoint bboxes
+#   auto_corridors: true          # Mode D: auto-detect narrow chokepoints
+#   auto_corridor_min_basin_cells: 20  # ignore basins smaller than this
+#   auto_corridor_margin: 3       # search radius for begin/end (cells)
+#   auto_corridor_merge_dist: 2   # merge nearby chokepoints
+#   waypoints:
+#     - name: "Great Belt"
+#       begin: [10.2, 55.3]
+#       end:   [11.0, 55.9]
+#       bbox:  [10.0, 12.0, 54.5, 56.0]
+#       bbox_depth_percentile: 75   # per-waypoint override
+
+# Nudge inner depths near open boundaries toward an outer (coarser) model
+# to preserve cross-sectional area at the nesting interface (step 4c-iii).
+# nudge_boundaries:
+#   outer_file: /path/to/outer_model_bathymetry.nc   # required
+#   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
+#   boundaries: [N, S, E, W]  # fallback sides; default all four if no file
+#   width: 10                  # taper width in cells
+#   shape: cosine              # cosine | linear | exponential
+#   min_depth: 2.0             # floor for nudged depth (m)
+#   max_scale: 3.0             # clamp scale to [1/max_scale, max_scale]
+#   outer_depth_var: depth     # auto-detected if omitted
+
 # Force geographic areas to land (step 4c, before isolation masking).
 # Masking a fjord mouth causes its interior to be removed automatically
 # by the isolation step (4d).
@@ -245,11 +273,12 @@ output:
 |------|--------|-------------|
 | 1 | `grid` | Build target grid from parameters |
 | 2 | `reader` | Read and clip fine-resolution source bathymetry |
-| 3 | `interpolate` | xESMF conservative regrid; weight file cached for reuse |
+| 3 | `interpolate` | xESMF conservative regrid; `bbox_depth_percentile` post-pass; result cached as `regrid_weights/{name}_raw_regrid.nc` |
 | 4a | `analysis` | Apply user fixes from `fixes:` (set_depth, open_cell, close_cell) |
 | 4b | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4c | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
 | 4c-ii | `analysis` | Detect LAND_BRIDGE cells (forced-land with wet_fraction > 0 between disconnected basins) |
+| 4c-iii | `interpolate` | Boundary cross-section matching (optional; `nudge_boundaries:` in config) |
 | 4d | `analysis` | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT) |
 | 4e | `thalweg` | Compare fine-vs-coarse thalweg depth profiles (optional; `--thalweg`) |
 | 5 | `smooth` | rx0 slope smoothing via linear programming (optional) |
@@ -287,6 +316,12 @@ rasterio`).
 
 Omit the key (or set it to `null`) to skip coastline masking and rely solely
 on GEBCO's own land flag.
+
+> **Thalweg analysis always uses raw GEBCO** (no coastline mask), even when
+> `coastline_mask` is set.  NE land polygons clip narrow channel cells (e.g.
+> Little Belt) as land, which disconnects the max-bottleneck MST used for path
+> finding.  When `coastline_mask` is configured the thalweg source is reloaded
+> from the original file without the mask.
 
 ## GEBCO auto-download
 
@@ -452,26 +487,105 @@ Specify one or more named start→end pairs under the `thalweg.waypoints` key:
 ```yaml
 thalweg:
   boundary_thalwegs: false   # set true to enable Mode B auto-detection
+  # bbox_depth_percentile: 75  # global fallback — see below
   waypoints:
     - name: "Great Belt"
       begin: [10.2, 55.3]
       end:   [11.0, 55.9]
-      bbox:  [10.0, 12.0, 54.5, 56.0]   # optional bounding box for fix suggestions
+      bbox:  [10.0, 12.0, 54.5, 56.0]   # bounding box: restricts MST + fix suggestions
     - name: "Little Belt"
       begin: [9.5, 55.0]
       via:
         - [9.8, 55.5]   # force path through the narrow strait
       end: [10.5, 56.5]
+      bbox: [9.3, 10.2, 55.0, 55.7]
+      bbox_depth_percentile: 75   # per-waypoint; see below
     - name: "Öresund"
       begin: [12.6, 55.4]
       end:   [12.9, 56.1]
 ```
 
-Each endpoint is snapped to the nearest wet fine-grid cell.  The
-max-bottleneck Dijkstra algorithm then finds the deepest route between the
+Each endpoint is snapped to the nearest wet fine-grid cell inside the `bbox`.
+The max-bottleneck MST algorithm then finds the deepest route between the
 points.  Optional `via` points force the path through a specific location,
 useful when the deepest detour would bypass a narrow strait entirely.
 The presence of any `thalweg:` section in the config enables step 4e automatically.
+
+#### Mode D — Automatic chokepoint detection (`auto_corridors`)
+
+Narrow straits that you haven't explicitly listed can be found automatically
+by searching for *articulation points* — wet coarse cells whose removal would
+split the ocean domain into two or more disconnected components.  Clusters of
+nearby articulation points form a *corridor*; begin/end waypoints are chosen as
+the deepest wet cell within `auto_corridor_margin` cells of each disconnected
+component on either side.
+
+```yaml
+thalweg:
+  auto_corridors: true
+  auto_corridor_min_basin_cells: 20   # ignore components smaller than N cells
+  auto_corridor_min_length: 1         # min articulation-point cells per corridor
+  auto_corridor_margin: 3             # bbox padding + begin/end search radius (cells)
+  auto_corridor_merge_dist: 2         # merge corridors within this many cells
+```
+
+Auto-detected corridors are appended to any user-specified waypoints and run
+through the same thalweg pipeline.  Any corridor whose bbox overlaps an
+existing manual waypoint bbox (or is within a proximity threshold of the
+waypoint's centroid) is skipped to avoid duplication.
+
+#### `bbox_depth_percentile` — correcting coarse cell depths
+
+Conservative area-averaging can both under- and over-represent a channel:
+
+- **Too shallow**: when a coarse cell straddles land and water, the land area
+  dilutes the average.
+- **Too deep**: when an isolated deep hole (scour pit) dominates a coarse cell,
+  the average is pulled unrealistically deep.
+
+Setting `bbox_depth_percentile` replaces the area-average in coarse cells
+inside the waypoint bbox with the Nth percentile of fine-grid depths within
+each cell.  It works **bidirectionally** — it can deepen or shallow.  50th
+percentile (median) is most robust against outliers; 75th retains the deeper
+parts of a channel while ignoring isolated pits.
+
+```yaml
+waypoints:
+  - name: "Little Belt"
+    bbox: [9.3, 10.2, 55.0, 55.7]
+    bbox_depth_percentile: 75   # per-waypoint
+```
+
+Or set a global fallback for all waypoints at the `thalweg:` level:
+
+```yaml
+thalweg:
+  bbox_depth_percentile: 75   # applies to every waypoint that has a bbox
+```
+
+**The result is baked into the raw-regrid cache.**  If you change this value,
+delete `regrid_weights/{name}_raw_regrid.nc` and rerun without `--skip-regrid`.
+
+The same percentile also controls the suggested fix *value* in `fixes.yaml` for
+that waypoint — preventing an isolated deep hole from inflating a fix to an
+unrealistic depth.  When a percentile below 100 is used the comment in
+`fixes.yaml` shows both the percentile value and the actual cell maximum:
+
+```yaml
+"001":
+  value: 28.5
+  comment: "thalweg: Little Belt; deficit=8.5 m (29.8%) p75; fine max=64.0 m"
+```
+
+#### Coastline resolution for thalweg maps
+
+`output.coastline_scale` controls the NaturalEarth resolution used in thalweg
+map panels (default `"10m"`):
+
+```yaml
+output:
+  coastline_scale: "10m"   # "10m" | "50m" | "110m"
+```
 
 ### Output
 
@@ -526,7 +640,7 @@ after the run.
 
 The regridding step (step 3) is the most expensive part of the pipeline.
 After the first run the raw post-regrid result is cached as
-`{cache_dir}/{name}_raw_regrid.nc`.  The typical iteration loop is:
+`regrid_weights/{name}_raw_regrid.nc`.  The typical iteration loop is:
 
 ```
 First run (full)
@@ -536,6 +650,37 @@ Re-run with --skip-regrid (fast — no regrid)
   ↓  inspect result
 Re-run again until satisfied
 ```
+
+### Iterating on `bbox_depth_percentile` and thalweg fixes
+
+`bbox_depth_percentile` is baked into the regrid cache at step 3, so changing
+it requires rebuilding the cache.  The typical workflow:
+
+```bash
+# 1. Edit the config — add or change bbox_depth_percentile on a waypoint:
+#      bbox_depth_percentile: 75
+#    (or 50 for median, 90 to only clip the very deepest outliers)
+
+# 2. Delete only the raw-regrid cache (weight files are reused):
+rm regrid_weights/northsea_1d15deg_raw_regrid.nc
+
+# 3. Full rerun — rebuilds cache with new percentile, regenerates fixes.yaml
+#    (do NOT use --skip-regrid here)
+bathymetry-regrid --config config/northsea_1d15deg.yaml
+
+# 4. Inspect the new fixes.yaml and depth profiles.
+#    If the fix values look right, accept them:
+bathymetry-regrid --config config/northsea_1d15deg.yaml \
+    --skip-regrid --accept-fixes
+```
+
+When you change `bbox_depth_percentile`, also **delete `fixes.yaml`** (or at
+least the affected `tw_` group) before the full rerun — otherwise the old fix
+values with `applied: true` are re-applied on top of the new percentile-adjusted
+cache before `fixes.yaml` is rewritten with fresh suggestions.
+
+If only the thalweg waypoint geometry changes (begin/end/via/bbox) but not the
+percentile, `--skip-regrid` is sufficient — the cache is still valid.
 
 ### `fixes.yaml` format
 
@@ -737,6 +882,88 @@ west seg 1 │ i=0..0, j=5..62, n=58
 north seg 1 │ i=1..348, j=99..99, n=348
 east seg 1 │ i=349..349, j=8..99, n=92
 ```
+
+## Boundary cross-section matching
+
+When your inner model receives open-boundary conditions from a coarser outer
+model, the bathymetry at the boundary faces can be inconsistent: the outer
+model may have a deeper (or shallower) channel than the inner model because of
+different source data or different regridding.  This can produce spurious
+pressure gradients and incorrect volume transport at the nesting interface.
+
+`nudge_boundaries:` in the YAML config applies a cross-section-area-preserving
+nudge at step 4c-iii (after basin isolation, before strait detection):
+
+```yaml
+nudge_boundaries:
+  outer_file: /path/to/outer_model_bathymetry.nc   # required
+  # Specify open boundary cells with a file, side names, or both:
+  boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
+  boundaries: [N, S, E, W]   # fallback: nudge all cells on these grid edges
+  width: 10                  # taper zone width in cells (default 10)
+  shape: cosine              # taper: cosine (default) | linear | exponential
+  min_depth: 2.0             # floor for nudged depth (m)
+  max_scale: 3.0             # clamp scale factor to [1/max_scale, max_scale]
+  outer_depth_var: depth     # depth variable name in outer file; auto-detected if omitted
+```
+
+### Identifying open boundary cells
+
+Two methods are supported and can be combined:
+
+**`boundaries_file`** (recommended for nested models): point to the
+`*_bdy.csv` file written by `--write-boundaries`.  The file format is a
+two-row header ("T-grid" / "lon,lat") followed by one coordinate pair per
+wet boundary cell.  Each coordinate is snapped to the nearest inner-grid
+cell via KDTree, so only the actual open boundary cells are nudged —
+important when only some edges carry an open boundary condition.
+
+**`boundaries`**: list of side names (`N`, `S`, `E`, `W`).  Every wet cell
+on those grid edges is treated as an open boundary cell.  This is the
+default when no `boundaries_file` is given.
+
+Both can appear together: the file-based cells are collected first, then
+the side-based cells are appended and de-duplicated.
+
+### How it works
+
+For each boundary face the outer model cell that is nearest to each inner
+boundary cell is found via KDTree nearest-neighbour lookup.  Inner cells that
+share the same outer cell are grouped, and a scale factor is computed:
+
+```
+scale = A_outer / A_inner
+      = (h_outer × width_outer) / Σᵢ (hᵢ × widthᵢ)
+```
+
+where width is the approximate along-face cell size in degrees × cos(lat).
+The scale is clamped to `[1/max_scale, max_scale]` to prevent extreme
+corrections from bad outer-model values.
+
+A BFS flood propagates each scale factor inland up to `width` cells.  The
+taper weight at distance `d` from the boundary is:
+
+| `shape` | `w(d)` |
+|---------|--------|
+| `cosine` | `0.5 × (1 + cos(π d / width))` |
+| `linear` | `1 − d / width` |
+| `exponential` | `exp(−3 d / width)` |
+
+The nudged depth is `depth_in × (w × scale + (1 − w))`, which equals
+`depth_in × scale` at the boundary face and `depth_in` at `width` cells inland.
+
+A minimum depth (`min_depth`) is enforced everywhere.  Cells that are
+**deepened** by the nudge are soft-pinned for Haney smoothing: the LP can
+deepen their neighbours but cannot shallow the nudged cells themselves.
+
+### Outer file format
+
+Any NetCDF file is accepted.  The depth variable is auto-detected from common
+names (`depth`, `bathy`, `bathymetry`, `h`, `deptho`); override with
+`outer_depth_var` if needed.  Coordinates are searched under names `lon`,
+`longitude`, `nav_lon`, `x_T`, `xt_ocean` (and the lat equivalents).  Both 1-D
+and 2-D lon/lat arrays are supported.  Depth values must be positive = wet (the
+sign convention is auto-detected from the median of finite values).
 
 ## References
 

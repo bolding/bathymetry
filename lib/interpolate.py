@@ -296,7 +296,9 @@ def _get_tile_regridder(xe, src_ds: xr.Dataset, dst_ds: xr.Dataset, cache_dir: s
     weight_file = Path(cache_dir) / f"weights_conservative_{key}.nc"
     cached = weight_file.exists()
     if cached:
-        logger.debug("    (weights cached: %s)", weight_file.name)
+        logger.info("    weights loaded from cache: %s", weight_file.name)
+    else:
+        logger.info("    computing weights → %s", weight_file.name)
     regridder = xe.Regridder(
         src_ds, dst_ds, "conservative",
         filename=str(weight_file),
@@ -375,8 +377,11 @@ def _regrid_single(
     depth_num   = np.asarray(regridder(depth_src)).reshape(ny, nx)
     wetfrac_out = np.asarray(regridder(ocean_src)).reshape(ny, nx)
 
-    # Ocean-only average; cells with no ocean source remain 0 / NaN-free
-    depth_out = np.where(wetfrac_out > 0, depth_num / wetfrac_out, 0.0)
+    # Ocean-only average; cells with no ocean source remain 0 / NaN-free.
+    # np.where evaluates both branches before selecting, causing a divide-by-zero
+    # warning for zero-wetfrac cells.  np.divide with where= avoids this.
+    depth_out = np.divide(depth_num, wetfrac_out,
+                          out=np.zeros_like(wetfrac_out), where=wetfrac_out > 0)
 
     return depth_out, wetfrac_out
 
@@ -525,7 +530,10 @@ def apply_bbox_percentile(
 ) -> npt.NDArray:
     """Replace area-weighted mean depth with a percentile inside bbox regions.
 
-    Only deepens cells — never makes a cell shallower than the conservative mean.
+    Sets each coarse cell to the chosen percentile of fine-grid depths within
+    it — this can either deepen a cell that is too shallow (e.g. a channel
+    whose mean is pulled shallow by land fractions) or shallow a cell that is
+    too deep (e.g. a cell dominated by an isolated deep hole).
     Cells with ``wet_fraction`` below *min_wet_fraction* are left unchanged.
 
     The result is baked into the raw-regrid cache so ``--skip-regrid`` runs
@@ -643,20 +651,356 @@ def apply_bbox_percentile(
     })
     pct_series = df.groupby(['j', 'i'])['depth'].quantile(percentile / 100.0)
 
-    # ---- Apply: only deepen; skip marginal and land cells ---------------
-    n_deepened = 0
+    # ---- Apply: replace with percentile; skip marginal and land cells -----
+    n_changed = 0
     for (j, i), pct_val in pct_series.items():  # type: ignore[misc]
         cur = depth_out[j, i]
         if not np.isfinite(cur):                   # land → skip
             continue
         if wet_fraction[j, i] < min_wet_fraction:
             continue
-        if pct_val > cur:
+        if pct_val != cur:
             depth_out[j, i] = float(pct_val)
-            n_deepened += 1
+            n_changed += 1
 
     logger.info(
-        "  bbox_depth_percentile (%.0f%%): %d / %d bbox cell(s) deepened",
-        percentile, n_deepened, n_target,
+        "  bbox_depth_percentile (%.0f%%): %d / %d bbox cell(s) adjusted",
+        percentile, n_changed, n_target,
     )
     return depth_out
+
+
+# ---------------------------------------------------------------------------
+# Boundary cross-section matching
+# ---------------------------------------------------------------------------
+
+def apply_boundary_crosssection_match(
+    depth: npt.NDArray[np.floating],
+    lon_centers: npt.NDArray[np.floating],
+    lat_centers: npt.NDArray[np.floating],
+    outer_file: str,
+    boundaries: list[str] | None = None,
+    boundaries_file: str | None = None,
+    taper_width: int = 10,
+    taper_shape: str = "cosine",
+    min_depth: float = 2.0,
+    max_scale: float = 3.0,
+    outer_depth_var: str | None = None,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.bool_]]:
+    """Nudge inner-grid depths near open boundaries toward the outer model.
+
+    Boundary cells are identified in one of two ways (both may be used):
+    - *boundaries_file*: path to a ``*_bdy.csv`` written by ``--write-boundaries``.
+      Each lon/lat row is snapped to the nearest inner-grid cell.  Only the cells
+      listed in the file are treated as open boundaries.
+    - *boundaries*: list of sides (``["N","S","E","W"]``); every wet cell on those
+      grid edges is treated as a boundary cell.  This is the default when no file
+      is given.
+
+    For each open boundary face the total cross-sectional area of each outer-model
+    boundary cell is preserved: the inner cells that map to the same outer cell are
+    scaled uniformly so their combined area equals the outer cell's area.  A cosine
+    (default) taper blends the correction to zero over *taper_width* cells inland.
+
+    Returns
+    -------
+    depth_out : ndarray
+        Modified depth array (NaN = land, unchanged).
+    soft_pin_mask : bool ndarray
+        True where depth was increased by the nudge.  These cells get a
+        soft-pin in the LP: the smoother can deepen but not shallow them.
+    """
+    from collections import deque
+
+    import numpy as np
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    if boundaries is None and boundaries_file is None:
+        boundaries = ["N", "S", "E", "W"]
+    if boundaries is not None:
+        boundaries = [b.upper() for b in boundaries]
+
+    depth_out = depth.copy().astype(float)
+    ny, nx = depth_out.shape
+    soft_pin_mask = np.zeros((ny, nx), dtype=bool)
+
+    # ---- Load outer model ---------------------------------------------------
+    ds_outer = xr.open_dataset(outer_file)
+    _outer_var: str | None = outer_depth_var
+    if _outer_var is None:
+        for candidate in ("depth", "bathy", "bathymetry", "Bathymetry", "h", "deptho"):
+            if candidate in ds_outer:
+                _outer_var = candidate
+                break
+        if _outer_var is None:
+            raise ValueError(
+                f"Cannot find depth variable in {outer_file}. "
+                "Set outer_depth_var in nudge_boundaries config."
+            )
+    outer_depth_raw = ds_outer[_outer_var].values.squeeze()
+    # Detect lon/lat coordinate names
+    _lon_names = ("lon", "longitude", "nav_lon", "x_T", "xt_ocean", "geolon_t")
+    _lat_names = ("lat", "latitude", "nav_lat", "y_T", "yt_ocean", "geolat_t")
+    _outer_lon: npt.NDArray[np.floating] | None = None
+    _outer_lat: npt.NDArray[np.floating] | None = None
+    for _n in _lon_names:
+        if _n in ds_outer.coords or _n in ds_outer:
+            _outer_lon = ds_outer[_n].values
+            break
+    for _n in _lat_names:
+        if _n in ds_outer.coords or _n in ds_outer:
+            _outer_lat = ds_outer[_n].values
+            break
+    if _outer_lon is None or _outer_lat is None:
+        raise ValueError(
+            f"Cannot find lon/lat coordinates in {outer_file}. "
+            "Expected names: lon/lat, longitude/latitude, nav_lon/nav_lat."
+        )
+    ds_outer.close()
+
+    # Build flat (lon, lat) → depth lookup for outer model using KDTree
+    if _outer_lon.ndim == 1 and _outer_lat.ndim == 1:
+        _olon2d, _olat2d = np.meshgrid(_outer_lon, _outer_lat)
+    else:
+        _olon2d, _olat2d = _outer_lon, _outer_lat
+    _outer_depth_2d = outer_depth_raw if outer_depth_raw.ndim == 2 else outer_depth_raw
+    # Flip sign: outer model may store positive = wet depth
+    if np.nanmedian(_outer_depth_2d[np.isfinite(_outer_depth_2d)]) > 0:
+        _outer_depth_2d = np.where(_outer_depth_2d > 0, _outer_depth_2d, np.nan)
+    else:
+        _outer_depth_2d = np.where(_outer_depth_2d < 0, -_outer_depth_2d, np.nan)
+
+    _outer_valid = np.isfinite(_outer_depth_2d) & (_outer_depth_2d > 0)
+    _pts_outer = np.column_stack([
+        _olon2d[_outer_valid].ravel(),
+        _olat2d[_outer_valid].ravel(),
+    ])
+    _vals_outer = _outer_depth_2d[_outer_valid].ravel()
+    if _pts_outer.shape[0] == 0:
+        logger.warning("  nudge_boundaries: no valid wet cells in outer model — skipped")
+        return depth_out, soft_pin_mask
+    _tree = cKDTree(_pts_outer)
+
+    # ---- Collect boundary cells (file and/or sides) ------------------------
+    # Build 1D lat/lon for spacing estimates and cell-width approximation
+    _lon1d = lon_centers if lon_centers.ndim == 1 else lon_centers[0, :]
+    _lat1d = lat_centers if lat_centers.ndim == 1 else lat_centers[:, 0]
+    # For exact cell-centre coordinates (handles rotated / curvilinear grids)
+    _lon2d: npt.NDArray[np.floating] = (
+        np.broadcast_to(lon_centers[None, :], (ny, nx))
+        if lon_centers.ndim == 1 else lon_centers
+    )
+    _lat2d: npt.NDArray[np.floating] = (
+        np.broadcast_to(lat_centers[:, None], (ny, nx))
+        if lat_centers.ndim == 1 else lat_centers
+    )
+
+    # lat/lon spacing for cell-width approximation
+    _dlat = float(abs(np.diff(_lat1d).mean())) if _lat1d.size > 1 else 1.0
+    _dlon = float(abs(np.diff(_lon1d).mean())) if _lon1d.size > 1 else 1.0
+
+    def _infer_side(j: int, i: int) -> str:
+        """Infer boundary side from grid position; prefers N/S over E/W."""
+        if j == ny - 1:
+            return "N"
+        if j == 0:
+            return "S"
+        if i == nx - 1:
+            return "E"
+        return "W"
+
+    def _cell_width(j: int, side: str) -> float:
+        lat = float(_lat1d[j]) if j < _lat1d.size else float(_lat1d[-1])
+        if side in ("N", "S"):
+            return _dlon * abs(np.cos(np.radians(lat)))
+        return _dlat
+
+    # side_cells maps side label → list of (j, i)
+    side_cells: dict[str, list[tuple[int, int]]] = {}
+
+    if boundaries_file:
+        import csv  # noqa: PLC0415
+        # Read lon/lat from bdy.csv (first line may be "T-grid" header)
+        bdy_lons: list[float] = []
+        bdy_lats: list[float] = []
+        with open(boundaries_file, newline="") as _f:
+            _reader = csv.reader(_f)
+            for _row in _reader:
+                if not _row or _row[0].strip().lstrip("#").strip() in ("T-grid", "lon"):
+                    continue
+                try:
+                    bdy_lons.append(float(_row[0]))
+                    bdy_lats.append(float(_row[1]))
+                except (ValueError, IndexError):
+                    continue
+        if not bdy_lons:
+            logger.warning("  nudge_boundaries: boundaries_file %s is empty or unreadable",
+                           boundaries_file)
+        else:
+            # Build KDTree on inner-grid cell centres; snap each bdy point to a cell
+            _inner_pts = np.column_stack([_lon2d.ravel(), _lat2d.ravel()])
+            _inner_tree = cKDTree(_inner_pts)
+            _bdy_pts = np.column_stack([bdy_lons, bdy_lats])
+            _, _inner_idx = _inner_tree.query(_bdy_pts, k=1)
+            seen: set[int] = set()
+            for flat_idx in _inner_idx:
+                if int(flat_idx) in seen:
+                    continue
+                seen.add(int(flat_idx))
+                j_c, i_c = divmod(int(flat_idx), nx)
+                if not (np.isfinite(depth_out[j_c, i_c]) and depth_out[j_c, i_c] > 0):
+                    continue
+                side = _infer_side(j_c, i_c)
+                side_cells.setdefault(side, []).append((j_c, i_c))
+            logger.info(
+                "  nudge_boundaries: %d boundary cell(s) read from %s",
+                sum(len(v) for v in side_cells.values()),
+                os.path.basename(boundaries_file),
+            )
+
+    if boundaries:
+        edge_map: dict[str, list[tuple[int, int]]] = {
+            "N": [(ny - 1, i) for i in range(nx)],
+            "S": [(0,       i) for i in range(nx)],
+            "E": [(j, nx - 1) for j in range(ny)],
+            "W": [(j,       0) for j in range(ny)],
+        }
+        for side in boundaries:
+            if side not in edge_map:
+                continue
+            for j, i in edge_map[side]:
+                if np.isfinite(depth_out[j, i]) and depth_out[j, i] > 0:
+                    side_cells.setdefault(side, []).append((j, i))
+        # De-duplicate within each side (file + edge may overlap)
+        for side in list(side_cells):
+            side_cells[side] = list(dict.fromkeys(side_cells[side]))
+
+    if not side_cells:
+        logger.info("  nudge_boundaries: no boundary cells found — skipped")
+        return depth_out, soft_pin_mask
+
+    # ---- Per-side processing -----------------------------------------------
+    bfs_seed: list[tuple[int, int]] = []
+    target_depth: dict[tuple[int, int], float] = {}
+
+    for side, cells in side_cells.items():
+        if not cells:
+            continue
+
+        # Query outer model depth at each boundary cell
+        query_pts = np.array([
+            [float(_lon2d[j, i]), float(_lat2d[j, i])]
+            for j, i in cells
+        ])
+        _, idx = _tree.query(query_pts, k=1)
+
+        # Group inner cells by nearest outer cell, compute scale factors
+        outer_groups: dict[int, list[tuple[int, int]]] = {}
+        for cell_idx, (j, i) in enumerate(cells):
+            outer_idx = int(idx[cell_idx])
+            outer_groups.setdefault(outer_idx, []).append((j, i))
+
+        for outer_idx, group in outer_groups.items():
+            h_outer = float(_vals_outer[outer_idx])
+            if h_outer <= 0:
+                continue
+
+            group_lats = [float(_lat2d[j, i]) for j, i in group]
+            mean_lat = float(np.mean(group_lats))
+            if side in ("N", "S"):
+                w_outer = _dlon * abs(np.cos(np.radians(mean_lat)))
+            else:
+                w_outer = _dlat
+            A_outer = h_outer * w_outer
+
+            A_inner = sum(
+                depth_out[j, i] * _cell_width(j, side)
+                for j, i in group
+                if depth_out[j, i] > 0
+            )
+            if A_inner <= 0:
+                continue
+            raw_scale = A_outer / A_inner
+            scale = float(np.clip(raw_scale, 1.0 / max_scale, max_scale))
+
+            for j, i in group:
+                h_in = float(depth_out[j, i])
+                if h_in <= 0:
+                    continue
+                h_target = max(min_depth, h_in * scale)
+                target_depth[(j, i)] = h_target
+                bfs_seed.append((j, i))
+
+    if not bfs_seed:
+        logger.info("  nudge_boundaries: no valid boundary cells to nudge")
+        return depth_out, soft_pin_mask
+
+    # Build per-cell scale factor dict (boundary cells only so far)
+    cell_scale: dict[tuple[int, int], float] = {}
+    for (j, i), h_target in target_depth.items():
+        h_in = float(depth_out[j, i])
+        if h_in > 0:
+            cell_scale[(j, i)] = h_target / h_in
+
+    # ---- BFS: propagate scale factors inland + track distances -------------
+    dist_field = np.full((ny, nx), -1, dtype=int)
+    scale_field = np.ones((ny, nx), dtype=float)
+    q: deque[tuple[int, int]] = deque()
+    for j, i in bfs_seed:
+        if dist_field[j, i] < 0:
+            dist_field[j, i] = 0
+            scale_field[j, i] = cell_scale.get((j, i), 1.0)
+            q.append((j, i))
+
+    while q:
+        j, i = q.popleft()
+        d = dist_field[j, i]
+        if d >= taper_width:
+            continue
+        for dj, di in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nj, ni = j + dj, i + di
+            if 0 <= nj < ny and 0 <= ni < nx and dist_field[nj, ni] < 0:
+                if np.isfinite(depth_out[nj, ni]) and depth_out[nj, ni] > 0:
+                    dist_field[nj, ni] = d + 1
+                    scale_field[nj, ni] = scale_field[j, i]  # inherit parent scale
+                    q.append((nj, ni))
+
+    # ---- Taper and apply ---------------------------------------------------
+    n_deepened = 0
+    n_shallowed = 0
+    for j in range(ny):
+        for i in range(nx):
+            d = dist_field[j, i]
+            if d < 0:
+                continue
+            h_in = float(depth_out[j, i])
+            if h_in <= 0 or not np.isfinite(h_in):
+                continue
+
+            if taper_shape == "cosine":
+                w = 0.5 * (1.0 + np.cos(np.pi * d / taper_width))
+            elif taper_shape == "linear":
+                w = 1.0 - d / taper_width
+            elif taper_shape == "exponential":
+                w = np.exp(-3.0 * d / taper_width)
+            else:
+                w = 0.5 * (1.0 + np.cos(np.pi * d / taper_width))
+
+            scale = float(scale_field[j, i])
+            h_nudged = h_in * (w * scale + (1.0 - w))
+            h_nudged = max(min_depth, h_nudged)
+
+            if abs(h_nudged - h_in) < 1e-6:
+                continue
+            depth_out[j, i] = h_nudged
+            if h_nudged > h_in:
+                n_deepened += 1
+                soft_pin_mask[j, i] = True
+            else:
+                n_shallowed += 1
+
+    logger.info(
+        "  nudge_boundaries: %d cell(s) deepened, %d shallowed over taper_width=%d",
+        n_deepened, n_shallowed, taper_width,
+    )
+    return depth_out, soft_pin_mask

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
+from typing import Iterator
 
 import numpy as np
 import numpy.typing as npt
@@ -483,6 +484,10 @@ def _build_bottleneck_mst(
     between any two nodes in the tree is the max-bottleneck path: the route
     that maximises the minimum depth along it.
 
+    8-connectivity (horizontal, vertical and diagonal neighbours) is used so
+    that narrow channels which meander diagonally across the grid remain
+    connected.
+
     This is O(E log E) in C via scipy and is built once per dataset, after
     which each path query is a cheap BFS on the sparse tree.
 
@@ -512,7 +517,10 @@ def _build_bottleneck_mst(
     node_id = np.full(depth.shape, -1, dtype=np.int32)
     node_id[wet_rc[:, 0], wet_rc[:, 1]] = np.arange(n_nodes, dtype=np.int32)
 
-    # Vectorised edge construction for 4-connected grid
+    # Vectorised edge construction for 8-connected grid.
+    # Diagonal edges are needed for narrow channels that meander: a 1-cell-wide
+    # channel that shifts by one column between rows is only diagonally connected
+    # and would be invisible to a 4-connected graph.
     row_lists: list[npt.NDArray] = []
     col_lists: list[npt.NDArray] = []
     w_lists:   list[npt.NDArray] = []
@@ -531,6 +539,22 @@ def _build_bottleneck_mst(
         u = node_id[r, c]
         v = node_id[r + 1, c]
         w = np.minimum(depth[r, c], depth[r + 1, c])
+        row_lists += [u, v];  col_lists += [v, u];  w_lists += [w, w]
+
+    # Diagonal edges: (r, c) ↔ (r+1, c+1)
+    r, c = np.where(wet[:-1, :-1] & wet[1:, 1:])
+    if len(r):
+        u = node_id[r, c]
+        v = node_id[r + 1, c + 1]
+        w = np.minimum(depth[r, c], depth[r + 1, c + 1])
+        row_lists += [u, v];  col_lists += [v, u];  w_lists += [w, w]
+
+    # Diagonal edges: (r, c+1) ↔ (r+1, c)
+    r, c = np.where(wet[:-1, 1:] & wet[1:, :-1])
+    if len(r):
+        u = node_id[r, c + 1]
+        v = node_id[r + 1, c]
+        w = np.minimum(depth[r, c + 1], depth[r + 1, c])
         row_lists += [u, v];  col_lists += [v, u];  w_lists += [w, w]
 
     if not row_lists:
@@ -1349,10 +1373,12 @@ def suggest_depth_fixes(
 ) -> list[dict]:
     """Suggest set_depth fixes for coarse cells that are too shallow along thalwegs.
 
-    For every unique coarse cell the thalweg path visits, the maximum fine-grid
-    depth among the fine path points that fall in that cell is compared to the
-    current coarse depth.  A fix is emitted only when BOTH thresholds are met:
-    the absolute deficit and the relative deficit (fraction of fine_max).
+    For every unique coarse cell the thalweg path visits, the fine-grid depth
+    is computed as the percentile of fine path-points in that cell (using
+    ``fix_value_percentile`` stored on each record; defaults to 100 = max).
+    Using a lower percentile (e.g. 75) avoids isolated deep holes inflating
+    the suggested fix value.  The fix is emitted only when BOTH thresholds
+    are met: the absolute deficit and the relative deficit.
 
     Parameters
     ----------
@@ -1391,9 +1417,11 @@ def suggest_depth_fixes(
     pts = np.column_stack([lon2d.ravel(), lat2d.ravel()])
     tree = _KDTree(pts)
 
-    # cell_data[flat_idx] = (fine_depth_max, [thalweg_names])
-    cell_fine_max: dict[int, float]       = {}
-    cell_names:   dict[int, list[str]]    = {}
+    # Accumulate all fine depths per coarse cell and the minimum percentile
+    # across thalwegs that visit it (minimum = most conservative).
+    cell_fine_depths: dict[int, list[float]] = {}
+    cell_fine_pct:    dict[int, float]       = {}
+    cell_names:       dict[int, list[str]]   = {}
 
     for rec in records:
         if rec.get("failed"):
@@ -1403,42 +1431,55 @@ def suggest_depth_fixes(
         fine_lat = np.asarray(fine["lat"],   dtype=float)
         fine_dep = np.asarray(fine["depth"], dtype=float)
         tw_name  = rec.get("name", "thalweg")
+        pct      = float(rec.get("fix_value_percentile", 100.0))
 
         _, cidx = tree.query(np.column_stack([fine_lon, fine_lat]))
         for uidx in np.unique(cidx):
-            sel      = cidx == uidx
-            fine_max = float(np.nanmax(fine_dep[sel]))
-            if uidx not in cell_fine_max or fine_max > cell_fine_max[uidx]:
-                cell_fine_max[uidx] = fine_max
+            sel    = cidx == uidx
+            depths = fine_dep[sel][np.isfinite(fine_dep[sel])]
+            if len(depths) == 0:
+                continue
+            cell_fine_depths.setdefault(int(uidx), [])
+            cell_fine_depths[int(uidx)].extend(depths.tolist())
+            if uidx not in cell_fine_pct or pct < cell_fine_pct[uidx]:
+                cell_fine_pct[uidx] = pct
             cell_names.setdefault(int(uidx), [])
             if tw_name not in cell_names[int(uidx)]:
                 cell_names[int(uidx)].append(tw_name)
 
     fixes: list[dict] = []
-    for uidx, fine_max in sorted(cell_fine_max.items(), key=lambda kv: kv[0]):
-        row, col   = divmod(int(uidx), nx)
+    for uidx in sorted(cell_fine_depths.keys()):
+        row, col = divmod(int(uidx), nx)
         if row >= ny or col >= nx:
             continue
+        depths     = np.asarray(cell_fine_depths[uidx])
+        pct        = cell_fine_pct.get(uidx, 100.0)
+        fine_val   = (float(np.max(depths)) if pct >= 100.0
+                      else float(np.percentile(depths, pct)))
+        fine_max   = float(np.max(depths))   # always max, for deficit reporting
         is_land    = not bool(mask2d[row, col])
         coarse_val = float(depth2d[row, col]) if not is_land else 0.0
         if not np.isfinite(coarse_val):
             coarse_val = 0.0
-        deficit     = fine_max - coarse_val
-        rel_deficit = deficit / fine_max if fine_max > 0 else 0.0
+        deficit     = fine_val - coarse_val
+        rel_deficit = deficit / fine_val if fine_val > 0 else 0.0
         if not np.isfinite(deficit):
             continue
         if not is_land and (deficit < min_deficit_m or rel_deficit < min_rel_deficit):
             continue
+        pct_tag = f" p{pct:.0f}" if pct < 100.0 else ""
         if is_land:
             action  = "set_depth"
-            value   = round(fine_max, 1)
+            value   = round(fine_val, 1)
             comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
-                       f"blocked in coarse — fine sill={fine_max:.1f} m")
+                       f"blocked in coarse — fine{pct_tag}={fine_val:.1f} m"
+                       + (f" (max={fine_max:.1f} m)" if pct < 100.0 else ""))
         else:
             action  = "set_depth"
-            value   = round(fine_max, 1)
+            value   = round(fine_val, 1)
             comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
-                       f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)")
+                       f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%){pct_tag}"
+                       + (f"; fine max={fine_max:.1f} m" if pct < 100.0 else ""))
         fixes.append({
             "lon":          round(float(lon2d[row, col]), 6),
             "lat":          round(float(lat2d[row, col]), 6),
@@ -1461,6 +1502,9 @@ def waypoint_thalwegs(
     src,
     dst,
     waypoints: list[dict],
+    default_wet_frac_threshold: float = 0.3,
+    default_sill_ratio_threshold: float = 0.7,
+    default_area_ratio_threshold: float = 0.5,
 ) -> list[dict]:
     """Compute thalwegs along user-specified start→end waypoints.
 
@@ -1470,6 +1514,19 @@ def waypoint_thalwegs(
     (deepest possible route between the points).  Via points force the path
     through a specific location, which is useful for narrow straits where the
     deepest detour would otherwise exit the passage.
+
+    Per-waypoint threshold overrides
+    ---------------------------------
+    Each waypoint dict may contain any combination of:
+
+    * ``wet_frac_threshold``   – override the global wet-fraction trigger
+    * ``sill_ratio_threshold`` – override the sill-depth ratio trigger
+    * ``area_ratio_threshold`` – override the cross-section area ratio trigger
+
+    These fall back to the ``default_*`` parameters (which in turn come from
+    the global ``analysis:`` section of the YAML config).  The effective
+    thresholds are stored on every thalweg record so they propagate to
+    reporting and fix-suggestion code.
 
     YAML config example::
 
@@ -1537,14 +1594,22 @@ def waypoint_thalwegs(
 
     logger.info("      %d waypoint(s) to process", len(waypoints))
 
-    def _nearest_ij(lo: float, la: float) -> tuple[int, int] | None:
-        """Snap to the nearest wet fine-grid cell within a generous search radius."""
+    def _nearest_ij(
+        lo: float, la: float, mask: npt.NDArray | None = None
+    ) -> tuple[int, int] | None:
+        """Snap to the nearest wet fine-grid cell within a generous search radius.
+
+        *mask* defaults to src_mask (full domain).  Pass wp_mask to restrict
+        snapping to cells inside the per-waypoint bbox — required so the
+        returned ij is always a node in the MST built on wp_mask.
+        """
+        m = mask if mask is not None else src_mask
         i_lo = int(np.argmin(np.abs(src_lon - lo)))
         i_la = int(np.argmin(np.abs(src_lat - la)))
         radius = 50
         r0 = max(0, i_la - radius);  r1 = min(len(src_lat), i_la + radius + 1)
         c0 = max(0, i_lo - radius);  c1 = min(len(src_lon), i_lo + radius + 1)
-        sub = src_mask[r0:r1, c0:c1]
+        sub = m[r0:r1, c0:c1]
         if not sub.any():
             return None
         # Pick nearest wet cell (not deepest) to honour user intent
@@ -1558,6 +1623,14 @@ def waypoint_thalwegs(
     for wp in waypoints:
         name    = str(wp.get("name", "thalweg"))
         via_raw = wp.get("via") or []
+
+        # Per-waypoint threshold overrides (fall back to caller-supplied defaults)
+        wp_wf_thr   = float(wp.get("wet_frac_threshold",
+                                   default_wet_frac_threshold))
+        wp_sill_thr = float(wp.get("sill_ratio_threshold",
+                                   default_sill_ratio_threshold))
+        wp_area_thr = float(wp.get("area_ratio_threshold",
+                                   default_area_ratio_threshold))
 
         # --- 1. Resolve bounding box (needed before stop detection) ---
         bbox_cfg = wp.get("bbox")
@@ -1633,7 +1706,7 @@ def waypoint_thalwegs(
         ok = True
         _fail_reason = ""
         for slo, sla in stops_lonlat:
-            ij = _nearest_ij(slo, sla)
+            ij = _nearest_ij(slo, sla, wp_mask)
             if ij is None:
                 _fail_reason = f"no wet cell near ({slo:.3f}, {sla:.3f})"
                 logger.warning("thalweg '%s': %s — skipped", name, _fail_reason)
@@ -1643,7 +1716,12 @@ def waypoint_thalwegs(
         if not ok:
             results.append({"name": name, "failed": True, "failed_reason": _fail_reason,
                              "bbox": _bbox_for_rec, "stops_lonlat": stops_lonlat,
-                             "category": "WAYPOINT"})
+                             "category": "WAYPOINT",
+                             "thresholds": {
+                                 "wet_frac_threshold":   wp_wf_thr,
+                                 "sill_ratio_threshold": wp_sill_thr,
+                                 "area_ratio_threshold": wp_area_thr,
+                             }})
             continue
 
         full_path: list[tuple[int, int]] = []
@@ -1684,6 +1762,21 @@ def waypoint_thalwegs(
         logger.info("      + %s  fine_sill=%.1f m  coarse_sill=%s  L=%.0f km",
                     name, fine["sill_depth"], cs_str, fine["dist_km"][-1])
 
+        sill_deficit = (fine["sill_depth"] - coarse_sill
+                        if np.isfinite(coarse_sill) else float("nan"))
+        sill_ratio   = (coarse_sill / fine["sill_depth"]
+                        if np.isfinite(coarse_sill) and fine["sill_depth"] > 0
+                        else float("nan"))
+
+        # Classify using per-waypoint thresholds
+        if not np.isfinite(sill_ratio):
+            category = "WAYPOINT"
+        elif sill_ratio < wp_sill_thr:
+            category = "SILL_DEFICIT"
+        else:
+            category = "OK"
+
+        _fix_pct_raw = wp.get("bbox_depth_percentile")
         results.append({
             "name": name,
             "fine": fine,
@@ -1692,13 +1785,304 @@ def waypoint_thalwegs(
                 "depth":      coarse_dep,
                 "sill_depth": coarse_sill,
             },
-            "sill_deficit_m": (fine["sill_depth"] - coarse_sill
-                               if np.isfinite(coarse_sill) else np.nan),
+            "sill_deficit_m":      sill_deficit,
+            "sill_ratio":          sill_ratio,
+            "fix_value_percentile": float(_fix_pct_raw) if _fix_pct_raw is not None else 100.0,
             "lon": float(np.mean([lo for lo, _ in stops_lonlat])),
             "lat": float(np.mean([la for _, la in stops_lonlat])),
             "direction": "user",
-            "category": "WAYPOINT",
+            "category": category,
             "zoomable": bool(wp.get("zoomable", False)),
+            "thresholds": {
+                "wet_frac_threshold":   wp_wf_thr,
+                "sill_ratio_threshold": wp_sill_thr,
+                "area_ratio_threshold": wp_area_thr,
+            },
         })
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Automatic corridor detection
+# ---------------------------------------------------------------------------
+
+def _find_articulation_points_2d(mask: npt.NDArray) -> npt.NDArray:
+    """Iterative Tarjan's algorithm on the 4-connected wet-cell graph.
+
+    Returns a boolean array (same shape as *mask*) where ``True`` marks
+    articulation points — wet cells whose removal disconnects the ocean.
+    Runs in O(V + E) time.
+    """
+    ny, nx = mask.shape
+    wet_rows, wet_cols = np.where(mask)
+    n = len(wet_rows)
+    if n < 3:
+        return np.zeros((ny, nx), dtype=bool)
+
+    node_id = np.full((ny, nx), -1, dtype=np.int32)
+    node_id[wet_rows, wet_cols] = np.arange(n, dtype=np.int32)
+
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for k in range(n):
+        r, c = int(wet_rows[k]), int(wet_cols[k])
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < ny and 0 <= cc < nx:
+                nb = int(node_id[rr, cc])
+                if nb >= 0:
+                    adj[k].append(nb)
+
+    disc = np.full(n, -1, dtype=np.int32)
+    low  = np.full(n, -1, dtype=np.int32)
+    par  = np.full(n, -1, dtype=np.int32)
+    is_ap = np.zeros(n, dtype=bool)
+    timer = 0
+
+    for root in range(n):
+        if disc[root] >= 0:
+            continue
+        disc[root] = low[root] = timer
+        timer += 1
+        root_children = [0]
+        stack: list[tuple[int, Iterator[int]]] = [(root, iter(adj[root]))]
+
+        while stack:
+            u, it = stack[-1]
+            advanced = False
+            for v in it:
+                if disc[v] < 0:                 # unvisited → tree edge
+                    par[v] = u
+                    disc[v] = low[v] = timer
+                    timer += 1
+                    if u == root:
+                        root_children[0] += 1
+                    stack.append((v, iter(adj[v])))
+                    advanced = True
+                    break
+                elif v != par[u]:               # back edge
+                    low[u] = min(low[u], disc[v])
+            if not advanced:                    # finished u → propagate
+                stack.pop()
+                if stack:
+                    p = stack[-1][0]
+                    low[p] = min(low[p], low[u])
+                    if p != root and low[u] >= disc[p]:
+                        is_ap[p] = True
+
+        if root_children[0] >= 2:
+            is_ap[root] = True
+
+    result = np.zeros((ny, nx), dtype=bool)
+    result[wet_rows[is_ap], wet_cols[is_ap]] = True
+    return result
+
+
+def detect_auto_corridors(
+    dst,
+    user_waypoints: list[dict] | None = None,
+    min_basin_cells: int = 20,
+    min_corridor_cells: int = 1,
+    corridor_margin_cells: int = 3,
+    merge_dist_cells: int = 2,
+) -> list[dict]:
+    """Automatically detect narrow-channel corridors that need thalweg analysis.
+
+    Uses articulation-point detection on the coarse 4-connected wet-cell graph.
+    An articulation point is a cell whose removal disconnects the ocean into two
+    or more components — i.e. a genuine chokepoint.  Adjacent articulation points
+    are grouped into *corridors* (merged within *merge_dist_cells*).  For each
+    corridor a waypoint dict ``{name, begin, end, bbox, auto: True}`` is returned,
+    ready to pass to :func:`waypoint_thalwegs`.
+
+    Corridors that overlap a manual waypoint's bbox (or lie within
+    *corridor_margin_cells* degrees of its key points) are silently skipped so
+    auto-generated entries never duplicate manual ones.
+
+    Parameters
+    ----------
+    dst:
+        Post-fix coarse-grid xarray Dataset (``mask``, ``depth``, ``lon``, ``lat``).
+    user_waypoints:
+        Existing manual waypoint dicts (used only for the overlap filter).
+    min_basin_cells:
+        Both components produced by removing a corridor must have at least this
+        many wet cells, otherwise the corridor is ignored (filters isolated pools).
+    min_corridor_cells:
+        Minimum number of articulation-point cells in a merged corridor.
+    corridor_margin_cells:
+        Padding added to the corridor bounding box; also the search radius for
+        begin/end cell selection and the no-bbox proximity threshold (cells).
+    merge_dist_cells:
+        Corridors whose articulation-point masks overlap after dilation by this
+        many cells are merged into a single corridor.
+
+    Returns
+    -------
+    list of waypoint dicts (``auto: True`` flag set on each).
+    """
+    try:
+        from scipy.ndimage import binary_dilation
+        from scipy.ndimage import label as _ndlabel
+    except ImportError:
+        logger.warning("detect_auto_corridors: scipy not available — skipped")
+        return []
+
+    mask2d = dst["mask"].values.astype(bool)
+    ny, nx = mask2d.shape
+    depth2d = np.where(mask2d, dst["depth"].values.astype(float), np.nan)
+
+    lon_raw = dst.lon.values
+    lat_raw = dst.lat.values
+    if lon_raw.ndim == 1 and lat_raw.ndim == 1:
+        lon2d, lat2d = np.meshgrid(lon_raw, lat_raw)
+    else:
+        lon2d, lat2d = lon_raw, lat_raw
+
+    # Approximate cell size for proximity checks (degrees)
+    _dlon = float(np.abs(np.diff(lon2d[0, :])).mean()) if nx > 1 else 1.0
+    _dlat = float(np.abs(np.diff(lat2d[:, 0])).mean()) if ny > 1 else 1.0
+    _cell_deg = max(_dlon, _dlat)
+    _prox_thresh = corridor_margin_cells * _cell_deg
+
+    struct4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+
+    # ---- Step 1: find articulation points ----------------------------------
+    ap_2d = _find_articulation_points_2d(mask2d)
+    if not ap_2d.any():
+        logger.info("      auto_corridors: no articulation points found")
+        return []
+
+    # ---- Step 2: merge nearby APs by dilation then re-label ---------------
+    dilated = ap_2d.copy()
+    for _ in range(merge_dist_cells):
+        dilated = binary_dilation(dilated, structure=struct4)
+    dil_labels, _ = _ndlabel(dilated, structure=struct4)  # type: ignore[misc]
+
+    # Group original AP cells by their dilated-component label
+    ap_ij = np.argwhere(ap_2d)
+    corridors_raw: dict[int, list[tuple[int, int]]] = {}
+    for i, j in ap_ij:
+        lbl = int(dil_labels[i, j])
+        corridors_raw.setdefault(lbl, []).append((int(i), int(j)))
+
+    # ---- Step 3: generate waypoints ----------------------------------------
+    results: list[dict] = []
+    n_skipped_size = 0
+    n_skipped_manual = 0
+
+    for lbl, ij_list in corridors_raw.items():
+        if len(ij_list) < min_corridor_cells:
+            continue
+
+        # Remove corridor APs from mask and find resulting components
+        test = mask2d.copy()
+        for i, j in ij_list:
+            test[i, j] = False
+        comp_lbl, n_comps = _ndlabel(test, structure=struct4)  # type: ignore[misc]
+        if n_comps < 2:
+            continue
+        comp_sizes = [int((comp_lbl == k).sum()) for k in range(1, n_comps + 1)]
+        if min(comp_sizes) < min_basin_cells:
+            n_skipped_size += 1
+            continue
+
+        # Two largest components → begin and end
+        order = sorted(range(1, n_comps + 1), key=lambda k: -comp_sizes[k - 1])
+        comp_a, comp_b = order[0], order[1]
+
+        ij_arr = np.array(ij_list)
+        i_min, j_min = int(ij_arr[:, 0].min()), int(ij_arr[:, 1].min())
+        i_max, j_max = int(ij_arr[:, 0].max()), int(ij_arr[:, 1].max())
+        m = corridor_margin_cells
+        ri0 = max(0, i_min - m);  ri1 = min(ny, i_max + m + 1)
+        rj0 = max(0, j_min - m);  rj1 = min(nx, j_max + m + 1)
+
+        depth_roi = depth2d[ri0:ri1, rj0:rj1]
+
+        def _deepest(comp_id: int) -> tuple[int, int] | None:
+            cells = np.argwhere(comp_lbl[ri0:ri1, rj0:rj1] == comp_id)
+            if len(cells) == 0:
+                return None
+            depths = np.array([depth_roi[li, lj] for li, lj in cells])
+            valid = np.isfinite(depths)
+            if not valid.any():
+                return None
+            best = int(np.nanargmax(depths))
+            li, lj = cells[best]
+            return int(li + ri0), int(lj + rj0)
+
+        begin_ij = _deepest(comp_a)
+        end_ij   = _deepest(comp_b)
+        if begin_ij is None or end_ij is None:
+            continue
+
+        begin = [round(float(lon2d[begin_ij]), 4), round(float(lat2d[begin_ij]), 4)]
+        end   = [round(float(lon2d[end_ij]),   4), round(float(lat2d[end_ij]),   4)]
+
+        bbox = [
+            round(float(lon2d[ri0:ri1, rj0:rj1].min()), 4),
+            round(float(lon2d[ri0:ri1, rj0:rj1].max()), 4),
+            round(float(lat2d[ri0:ri1, rj0:rj1].min()), 4),
+            round(float(lat2d[ri0:ri1, rj0:rj1].max()), 4),
+        ]
+
+        c_lon = float(np.mean([lon2d[i, j] for i, j in ij_list]))
+        c_lat = float(np.mean([lat2d[i, j] for i, j in ij_list]))
+        name  = (f"auto_{abs(c_lon):.2f}{'E' if c_lon >= 0 else 'W'}"
+                 f"_{abs(c_lat):.2f}N")
+
+        # ---- Skip if a manual waypoint already covers this corridor --------
+        if _overlaps_manual(ij_list, lon2d, lat2d, user_waypoints or [],
+                            c_lon, c_lat, _prox_thresh):
+            n_skipped_manual += 1
+            continue
+
+        results.append({
+            "name":  name,
+            "begin": begin,
+            "end":   end,
+            "bbox":  bbox,
+            "auto":  True,
+        })
+
+    logger.info(
+        "      auto_corridors: %d candidate(s)  "
+        "(skipped: %d too small, %d covered by manual waypoint)",
+        len(results), n_skipped_size, n_skipped_manual,
+    )
+    return results
+
+
+def _overlaps_manual(
+    corridor_ij: list[tuple[int, int]],
+    lon2d: npt.NDArray,
+    lat2d: npt.NDArray,
+    user_waypoints: list[dict],
+    c_lon: float,
+    c_lat: float,
+    prox_thresh: float,
+) -> bool:
+    """True if the corridor overlaps or is near any manual waypoint."""
+    for wp in user_waypoints:
+        bbox_cfg = wp.get("bbox")
+        if bbox_cfg is not None:
+            lo0, lo1 = float(bbox_cfg[0]), float(bbox_cfg[1])
+            la0, la1 = float(bbox_cfg[2]), float(bbox_cfg[3])
+            for i, j in corridor_ij:
+                if lo0 <= lon2d[i, j] <= lo1 and la0 <= lat2d[i, j] <= la1:
+                    return True
+        else:
+            # No bbox: check centroid proximity to begin / end / via
+            pts: list[tuple[float, float]] = []
+            for key in ("begin", "end"):
+                pt = wp.get(key)
+                if pt:
+                    pts.append((float(pt[0]), float(pt[1])))
+            for pt in (wp.get("via") or []):
+                pts.append((float(pt[0]), float(pt[1])))
+            for pto_lon, pto_lat in pts:
+                if (abs(pto_lon - c_lon) < prox_thresh
+                        and abs(pto_lat - c_lat) < prox_thresh):
+                    return True
+    return False

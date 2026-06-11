@@ -73,6 +73,7 @@ if _lib not in sys.path:
     sys.path.insert(0, os.path.abspath(_lib))
 
 import numpy as np
+import numpy.typing as npt
 import xarray as xr
 
 import analysis
@@ -574,6 +575,26 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 rx0_list.append(_cli_rx0)
     fixes_list    = list(_nested_get(cfg, "fixes") or [])
 
+    # Boundary cross-section matching
+    _nb_cfg = _nested_get(cfg, "nudge_boundaries") or {}
+    if not isinstance(_nb_cfg, dict):
+        _nb_cfg = {}
+    _nudge_outer_file   = _nb_cfg.get("outer_file", None)
+    _nudge_bdy_raw      = _nb_cfg.get("boundaries", None)
+    _nudge_boundaries   = list(_nudge_bdy_raw) if _nudge_bdy_raw is not None else None
+    _nudge_bdy_file_raw = _nb_cfg.get("boundaries_file", None)
+    if _nudge_bdy_file_raw:
+        _cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else "."
+        _nudge_boundaries_file: str | None = os.path.join(_cfg_dir, str(_nudge_bdy_file_raw))
+    else:
+        _nudge_boundaries_file = None
+    _nudge_taper_width  = int(_nb_cfg.get("width", 10))
+    _nudge_taper_shape  = str(_nb_cfg.get("shape", "cosine"))
+    _nudge_min_depth    = float(_nb_cfg.get("min_depth", float(min_depth) if min_depth else 2.0))
+    _nudge_max_scale    = float(_nb_cfg.get("max_scale", 3.0))
+    _nudge_depth_var    = _nb_cfg.get("outer_depth_var", None)
+    run_nudge = bool(_nudge_outer_file)
+
     # Thalweg: read from `thalweg:` section (new) or legacy `thalwegs:` list.
     _tw_cfg = _nested_get(cfg, "thalweg") or {}
     if not isinstance(_tw_cfg, dict):
@@ -598,7 +619,14 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         _thalweg_boundaries_csv = os.path.join(_cfg_dir, _thalweg_boundaries_csv)
     _bbox_pct_raw = _tw_cfg.get("bbox_depth_percentile")
     bbox_depth_percentile = float(_bbox_pct_raw) if _bbox_pct_raw is not None else None
-    _thalweg_default = bool(_tw_cfg.get("enabled", bool(user_waypoints_cfg)))
+    _auto_corridors      = bool(_tw_cfg.get("auto_corridors", False))
+    _auto_min_basin      = int(_tw_cfg.get("auto_corridor_min_basin_cells", 20))
+    _auto_min_len        = int(_tw_cfg.get("auto_corridor_min_length", 1))
+    _auto_margin         = int(_tw_cfg.get("auto_corridor_margin", 3))
+    _auto_merge          = int(_tw_cfg.get("auto_corridor_merge_dist", 2))
+    _thalweg_default = bool(
+        _tw_cfg.get("enabled", bool(user_waypoints_cfg) or _auto_corridors)
+    )
     run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
     # Mode B (boundary auto-detection) is off by default — it relies on
     # _boundary_starts() which needs further tuning for complex domains.
@@ -628,7 +656,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                          default=f"{name}.nc")
     report_dir  = _merge(args.report_dir, cfg, "output", "report_dir",
                          default=f"./report/{name}")
-    log_depth_scale = bool((cfg.get("output") or {}).get("log_depth_scale", False))
+    log_depth_scale  = bool((cfg.get("output") or {}).get("log_depth_scale", False))
+    coastline_scale  = str((cfg.get("output") or {}).get("coastline_scale", "10m"))
 
     os.makedirs(report_dir, exist_ok=True)
 
@@ -839,27 +868,33 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             tile_cells=tile_cells,
             tile_buf_deg=tile_buf_deg,
         )
-        # Bbox percentile post-pass: deepen coarse cells inside waypoint bboxes
-        if bbox_depth_percentile is not None and user_waypoints_cfg:
-            _wp_bboxes = [
-                (float(wp["bbox"][0]), float(wp["bbox"][1]),
-                 float(wp["bbox"][2]), float(wp["bbox"][3]))
-                for wp in user_waypoints_cfg if wp.get("bbox")
-            ]
-            if _wp_bboxes:
-                logger.info(
-                    "  Applying %.0f%% depth percentile in %d waypoint bbox(es) …",
-                    bbox_depth_percentile, len(_wp_bboxes),
-                )
-                _pct_min_wf = max(0.3, float(min_wf))
-                _new_depth = interpolate.apply_bbox_percentile(
-                    dst["depth"].values,
-                    dst["wet_fraction"].values,
-                    src, dst_grid, _wp_bboxes,
-                    percentile=bbox_depth_percentile,
-                    min_wet_fraction=_pct_min_wf,
-                )
-                dst["depth"].values[:] = _new_depth
+        # Bbox percentile post-pass: deepen coarse cells inside waypoint bboxes.
+        # Each waypoint may set its own bbox_depth_percentile; falls back to
+        # the thalweg-level default (bbox_depth_percentile).
+        _pct_min_wf = max(0.3, float(min_wf))
+        for _wp in (user_waypoints_cfg or []):
+            if not _wp.get("bbox"):
+                continue
+            _wp_pct_raw = _wp.get("bbox_depth_percentile")
+            _wp_pct = float(_wp_pct_raw) if _wp_pct_raw is not None else bbox_depth_percentile
+            if _wp_pct is None:
+                continue
+            _bbox = (
+                float(_wp["bbox"][0]), float(_wp["bbox"][1]),
+                float(_wp["bbox"][2]), float(_wp["bbox"][3]),
+            )
+            logger.info(
+                "  Applying %.0f%% depth percentile in bbox for '%s' …",
+                _wp_pct, _wp.get("name", "?"),
+            )
+            _new_depth = interpolate.apply_bbox_percentile(
+                dst["depth"].values,
+                dst["wet_fraction"].values,
+                src, dst_grid, [_bbox],
+                percentile=_wp_pct,
+                min_wet_fraction=_pct_min_wf,
+            )
+            dst["depth"].values[:] = _new_depth
 
         # Save raw post-regrid result for --skip-regrid on subsequent runs
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
@@ -1127,6 +1162,48 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         rpt.add_section("Land-bridge detection", text="No land bridges found.")
 
     # ------------------------------------------------------------------
+    # Step 4c-iii – Boundary cross-section matching (optional)
+    # Nudge inner depths near open boundaries toward an outer coarser model
+    # so that cross-sectional areas at the boundary faces are preserved.
+    # Applies before strait detection so any opened/deepened cells are visible
+    # to the connectivity analysis.
+    # ------------------------------------------------------------------
+    nudge_pin_mask: npt.NDArray[np.bool_] | None = None
+    if run_nudge:
+        logger.info("\n[4c-iii] Boundary cross-section matching …")
+        assert _nudge_outer_file is not None
+        _lon_c = dst_grid.center_lon if hasattr(dst_grid, "center_lon") else dst["lon"].values
+        _lat_c = dst_grid.center_lat if hasattr(dst_grid, "center_lat") else dst["lat"].values
+        _depth_nudged, nudge_pin_mask = interpolate.apply_boundary_crosssection_match(
+            depth=dst["depth"].values,
+            lon_centers=np.asarray(_lon_c),
+            lat_centers=np.asarray(_lat_c),
+            outer_file=_nudge_outer_file,
+            boundaries=_nudge_boundaries,
+            boundaries_file=_nudge_boundaries_file,
+            taper_width=_nudge_taper_width,
+            taper_shape=_nudge_taper_shape,
+            min_depth=_nudge_min_depth,
+            max_scale=_nudge_max_scale,
+            outer_depth_var=_nudge_depth_var,
+        )
+        dst["depth"].values[:] = _depth_nudged
+        _n_nudged = int(nudge_pin_mask.sum()) if nudge_pin_mask is not None else 0
+        _bdy_src = (
+            os.path.basename(_nudge_boundaries_file) if _nudge_boundaries_file
+            else ", ".join(_nudge_boundaries) if _nudge_boundaries
+            else "N, S, E, W"
+        )
+        rpt.add_section(
+            "Boundary cross-section matching",
+            text=(
+                f"Outer model: `{os.path.basename(_nudge_outer_file)}`.  "
+                f"Boundary cells: {_bdy_src}.  "
+                f"Taper: {_nudge_taper_shape}, width={_nudge_taper_width} cells.  "
+                f"{_n_nudged} cell(s) deepened (soft-pinned for Haney smoothing)."
+            ),
+        )
+    # ------------------------------------------------------------------
     # Step 4d – Strait detection
     # Runs on the basin-cleaned grid so only interfaces between genuinely
     # connected ocean cells are checked — no spurious flags from isolated
@@ -1287,13 +1364,16 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         )
         # Pin mask: cells deepened by set_depth/open_cell fixes must not be
         # shallowed by the LP — it must deepen their neighbours instead.
+        # Cells deepened by boundary nudging are soft-pinned the same way.
         _pin_mask: np.ndarray | None = None
-        if _set_depth_overrides:
+        if _set_depth_overrides or nudge_pin_mask is not None:
             _pin_mask = np.zeros(mask_arr.shape, dtype=bool)
-            for _row, _col, _ in _set_depth_overrides:
+            for _row, _col, _ in (_set_depth_overrides or []):
                 _pin_mask[_row, _col] = True
-            logger.info("  Pinning %d fixed cell(s) against LP shallowing",
-                        len(_set_depth_overrides))
+            if nudge_pin_mask is not None:
+                _pin_mask |= nudge_pin_mask
+            _n_pins = int(_pin_mask.sum())
+            logger.info("  Pinning %d cell(s) against LP shallowing", _n_pins)
 
         for rx0_val in sorted(rx0_list, reverse=True):   # coarsest first
             smooth_var = _smooth_var_name(rx0_val)
@@ -1347,10 +1427,16 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         thalweg_records: list[dict] = []
 
-        # With --skip-regrid the fine source may not have been loaded.
-        _thalweg_src = src
+        # Thalweg path-finding must use raw GEBCO (no coastline mask): the NE
+        # land polygons clip narrow channel cells as land, disconnecting the MST.
+        # If the main pipeline applied a coastline mask to src, reload without it.
+        _needs_reload = (coastline_res is not None) or (src is None)
+        if not _needs_reload:
+            _thalweg_src = src
+        else:
+            _thalweg_src = None
         if _thalweg_src is None and source is not None:
-            logger.info("      Loading fine source for thalweg …")
+            logger.info("      Loading fine source for thalweg (no coastline mask) …")
             _t_src = time.time()
             try:
                 _thalweg_src = reader.read_source(
@@ -1360,10 +1446,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     emodnet_resolution=(float(emodnet_res)
                                         if emodnet_res is not None else None),
                 )
-                if coastline_res is not None:
-                    _thalweg_src = reader.apply_coastline_mask(
-                        _thalweg_src, resolution=str(coastline_res)
-                    )
                 logger.info("      Fine source loaded in %.1f s",
                             time.time() - _t_src)
             except Exception as exc:
@@ -1406,17 +1488,34 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 logger.info("      boundary auto: disabled "
                             "(set thalweg.boundary_thalwegs: true to enable)")
 
-            # Mode C: user waypoints
-            if user_waypoints_cfg:
+            # Mode C: user waypoints + auto-detected corridors
+            _auto_wp: list[dict] = []
+            if _auto_corridors:
+                logger.info("      detecting auto corridors …")
+                _auto_wp = thalwegmod.detect_auto_corridors(
+                    dst,
+                    user_waypoints=user_waypoints_cfg or [],
+                    min_basin_cells=_auto_min_basin,
+                    min_corridor_cells=_auto_min_len,
+                    corridor_margin_cells=_auto_margin,
+                    merge_dist_cells=_auto_merge,
+                )
+            _all_waypoints = list(user_waypoints_cfg or []) + _auto_wp
+            if _all_waypoints:
                 tw_c = thalwegmod.waypoint_thalwegs(
-                    _thalweg_src, dst, user_waypoints_cfg,
+                    _thalweg_src, dst, _all_waypoints,
+                    default_wet_frac_threshold=float(wf_thr),
+                    default_sill_ratio_threshold=float(sill_thr),
+                    default_area_ratio_threshold=float(area_thr),
                 )
                 thalweg_records.extend(tw_c)
                 _tw_c_ok   = sum(1 for t in tw_c if not t.get("failed"))
                 _tw_c_fail = len(tw_c) - _tw_c_ok
-                logger.info("      waypoints:     %d thalweg(s)%s",
+                _auto_label = f" ({len(_auto_wp)} auto)" if _auto_wp else ""
+                logger.info("      waypoints:     %d thalweg(s)%s%s",
                             _tw_c_ok,
-                            f", {_tw_c_fail} failed" if _tw_c_fail else "")
+                            f", {_tw_c_fail} failed" if _tw_c_fail else "",
+                            _auto_label)
 
             # Add one smoothed-coarse profile per rx0 variant.
             # dst still holds raw (fixed) depths; smooth depths are in smooth_variants.
@@ -1485,12 +1584,24 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             report.plot_thalweg_comparison(
                 tw, _thalweg_src, dst,
                 png_path=os.path.join(report_dir, img),
+                coastline_scale=coastline_scale,
             )
             if tw.get("failed"):
                 rpt.add_section(
                     f"Thalweg: {tw_name}",
-                    text=(f"Category: {cat}.  **FAILED** — {tw.get('failed_reason', '')}.\n"
-                          "Adjust the bbox or add via points and re-run."),
+                    text=(
+                        f"Category: {cat}.  **FAILED** — {tw.get('failed_reason', '')}.\n\n"
+                        "The map shows:\n"
+                        "- **Coarse depth** (background, cmocean *deep*) — tan = land at coarse resolution\n"
+                        "- **Fine-grid ocean cells** (semi-transparent blue overlay) — "
+                        "gaps in the blue layer indicate genuine dry barriers in GEBCO\n"
+                        "- Markers: ▲ begin, ■ via, ◆ end (snapped to nearest fine wet cell)\n\n"
+                        "**Remedies** (choose one or combine):\n"
+                        "1. Move the failing stop coordinates into the centre of the channel\n"
+                        "2. Add `via:` points to route the path through the narrow section\n"
+                        "3. Widen the `bbox` if the natural route lies just outside it\n"
+                        "4. Add a `fixes:` entry to open the blocking coarse cell(s) and re-run"
+                    ),
                     images=[img],
                     warnings=[f"No thalweg computed: {tw.get('failed_reason', '')}"],
                 )

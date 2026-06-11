@@ -58,11 +58,12 @@ lib/
 |------|------|
 | 1 | Build target grid |
 | 2 | Read + clip source bathymetry |
-| 3 | xESMF conservative regrid (may take a minute; result cached as `{name}_raw_regrid.nc`) |
+| 3 | xESMF conservative regrid (may take a minute; result cached as `regrid_weights/{name}_raw_regrid.nc`).  `bbox_depth_percentile` post-pass applied here and baked into the cache. |
 | 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
 | 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins) |
 | 4c-ii | Detect LAND_BRIDGE cells (wet_fraction > 0 cells between disconnected basins) |
+| 4c-iii | Boundary cross-section matching (optional; `nudge_boundaries:` in config) |
 | 4d | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT); write `fixes.yaml` |
 | 4e | Thalweg analysis — fine-vs-coarse depth profiles, depth-fix suggestions (optional) |
 | 5 | rx0 Haney slope smoothing via linear programming (optional) |
@@ -94,6 +95,8 @@ fixes:
       action: set_depth
       value: 32.0
       comment: "thalweg: Great Belt; deficit=12.1 m (37.9%)"
+      # With bbox_depth_percentile: 75 on the waypoint, the comment would read:
+      # "thalweg: Great Belt; deficit=12.1 m (37.9%) p75; fine max=45.0 m"
 ```
 
 Flat entries (b/s/a/lb prefixes) each have their own `applied` flag.
@@ -115,10 +118,11 @@ call writes the file without thalweg data (e.g. during `--skip-regrid`).
 ### Protecting fixed cells during Haney smoothing
 
 When fixes are applied, every `set_depth` / `open_cell` cell is recorded in a
-boolean `pin_mask`.  This mask is passed to `smooth_rx0()` as a lower-bound
-constraint on the LP variables (correction ≥ 0 for pinned cells), so the LP
-solver cannot shallow a fixed cell — it must instead deepen the neighbours to
-satisfy rx0.  This guarantees the smoothed field satisfies rx0 ≤ target
+boolean `pin_mask`.  Cells deepened by `nudge_boundaries:` (step 4c-iii) are
+OR-ed into the same mask as `nudge_pin_mask`.  The combined mask is passed to
+`smooth_rx0()` as a lower-bound constraint on the LP variables (correction ≥ 0
+for pinned cells), so the LP solver cannot shallow any fixed or nudged cell —
+it must instead deepen the neighbours to satisfy rx0.  This guarantees the smoothed field satisfies rx0 ≤ target
 everywhere, which is verified by an rx0 summary table printed just before "Done":
 
 ```
@@ -197,7 +201,87 @@ resulting dimensions so the user can confirm before the run proceeds.
   after `--apply-all-fixes`.
 - `_inset_gridlines(ax, extent)` — call this on all inset Cartopy axes.
 
-### Thalweg depth profile plot (4 series)
+### Thalweg analysis
+
+#### Source data (no coastline mask)
+
+Thalweg path-finding always uses **raw GEBCO** — without the NaturalEarth
+coastline mask that is applied to the main pipeline source.  NE land polygons
+clip narrow channel cells (e.g. Little Belt) as land, which disconnects the
+max-bottleneck MST and causes a false "no wet path" failure.  When
+`regridding.coastline_mask` is set, the thalweg source is reloaded from the
+original file without the mask.
+
+#### Auto-corridor detection (`auto_corridors`)
+
+`detect_auto_corridors(dst, user_waypoints, ...)` in `lib/thalweg.py` finds
+narrow straits automatically without requiring manual waypoints:
+
+1. `_find_articulation_points_2d(mask)` — iterative Tarjan's DFS on the 4-connected
+   coarse wet-cell graph.  Returns a boolean mask of articulation points (cells
+   whose removal disconnects the graph).  Iterative to avoid Python recursion limit.
+2. Nearby APs are merged via dilation + relabelling (controlled by `auto_corridor_merge_dist`).
+3. For each corridor: remove the AP cells, flood-fill to find the two (or more)
+   disconnected components; pick begin/end as the deepest cell within
+   `auto_corridor_margin` cells of each component edge.
+4. Components smaller than `auto_corridor_min_basin_cells` are skipped.
+5. Corridors whose bbox overlaps an existing manual waypoint (or whose centroid
+   is within a proximity threshold) are skipped to avoid duplicates.
+6. Returns `list[dict]` with `{name, begin, end, bbox, auto: True}`.
+
+Auto-corridors are appended to `user_waypoints_cfg` before calling
+`waypoint_thalwegs()`, so they run through the identical pipeline as manual
+waypoints.  The `auto: True` flag is for bookkeeping only.
+
+#### `bbox_depth_percentile` (per-waypoint and global)
+
+Set on a waypoint (or globally under `thalweg:`) to replace the conservative
+area-average depth in coarse cells inside the bbox with the Nth percentile of
+the fine-grid depths within each cell.  This is **bidirectional** — it can
+deepen a cell that the area-average made too shallow (land-fraction dilution)
+*and* shallow a cell that was pulled too deep by an isolated deep hole.
+
+```yaml
+thalweg:
+  # bbox_depth_percentile: 75   # global fallback for all waypoints
+  waypoints:
+    - name: "Little Belt"
+      bbox: [9.3, 10.2, 55.0, 55.7]
+      bbox_depth_percentile: 75   # per-waypoint; overrides global
+```
+
+The result is baked into the raw-regrid cache (`regrid_weights/{name}_raw_regrid.nc`).
+**Delete the cache and rerun without `--skip-regrid`** whenever you change this value.
+
+#### Fix-value percentile
+
+When `bbox_depth_percentile` is set on a waypoint, `suggest_depth_fixes` uses
+the same percentile to compute the suggested fix *value* for each coarse cell
+(instead of the maximum fine depth).  This prevents an isolated deep hole from
+producing a fix that sets the coarse cell to an unrealistically deep value.
+
+- The fix value becomes `np.percentile(fine_thalweg_depths_in_cell, pct)`.
+- The comment in `fixes.yaml` shows both the percentile value and the actual
+  maximum (`fine max=Xm`) so the clipping is visible.
+- Deficit thresholds are evaluated against the percentile value, not the max.
+- For cells visited by multiple thalwegs with different percentiles the most
+  conservative (lowest) percentile is used.
+
+#### Coastline resolution for thalweg maps
+
+`output.coastline_scale: "10m"` (default) controls the NaturalEarth resolution
+used in both `plot_thalweg_comparison` and `_plot_thalweg_failed` maps.
+Values: `"10m"` | `"50m"` | `"110m"`.
+
+#### Failed-thalweg diagnostic plot
+
+When a waypoint thalweg fails (no wet MST path), `_plot_thalweg_failed` writes
+a PNG showing the **fine GEBCO depth** as background (not the coarse grid), the
+waypoint bbox, and the start/end/via markers.  The Cartopy LAND feature is at
+`zorder=1` (behind the fine depth overlay) so it does not obscure the channel.
+The colorbar uses the local bbox depth range, not the global domain max.
+
+#### Depth profile plot (4 series)
 
 Each thalweg panel shows:
 
@@ -212,9 +296,57 @@ The dashed style and higher z-order (5) ensure the smoothed line is visible
 even where it overlaps the orange dots (which occurs when re-pinning kept the
 fixed depth unchanged through smoothing).
 
+### Boundary cross-section matching (`nudge_boundaries:`)
+
+Nudges inner-grid depths near open boundaries so the cross-sectional area of
+each outer-model boundary cell is preserved.  Applied at step 4c-iii — after
+basin removal, before strait detection.
+
+```yaml
+nudge_boundaries:
+  outer_file: /path/to/outer_bathymetry.nc   # required
+  boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
+  boundaries: [N, S, E, W]   # fallback sides when no file; default all four
+  width: 10                  # taper width in cells
+  shape: cosine              # cosine | linear | exponential
+  min_depth: 2.0             # floor for nudged depth (m)
+  max_scale: 3.0             # clamp scale factor to [1/max_scale, max_scale]
+  outer_depth_var: depth     # variable name; auto-detected if omitted
+```
+
+**Boundary cell identification** (both can be used simultaneously):
+- `boundaries_file`: reads the `*_bdy.csv` produced by `--write-boundaries`
+  (two-row header "T-grid" / "lon,lat", then one row per wet boundary cell).
+  Each lon/lat is snapped to the nearest inner-grid cell via KDTree.  Only
+  those cells are treated as open boundaries — useful when not all four edges
+  carry an open boundary condition.
+- `boundaries`: scans every wet cell on the listed grid edges (N/S/E/W).
+  This is the default when no `boundaries_file` is given.
+
+**Algorithm:**
+1. Load outer model NetCDF; auto-detect depth variable and lon/lat coordinates.
+2. Build KDTree over outer wet cells; query nearest outer cell for each inner
+   boundary cell.
+3. For each group of inner cells that map to the same outer cell, compute
+   `scale = A_outer / A_inner` where `A = depth × cell_width_deg_coslat`.
+   Scale is clamped to `[1/max_scale, max_scale]`.
+4. BFS inland from boundary cells to propagate each scale factor over
+   `width` cells.
+5. Apply: `depth_nudged = depth_in × (w × scale + (1 − w))` where `w` is
+   the taper weight (1 at boundary, 0 at `width` cells inland).
+6. Cells that are **deepened** are added to `soft_pin_mask` so the Haney LP
+   cannot shallow them — it must deepen their neighbours instead.
+
+`apply_boundary_crosssection_match()` in `lib/interpolate.py` implements steps 1–6
+and returns `(depth_nudged, soft_pin_mask)`.
+
 ## Known issues / invariants
 
 - xESMF weight files are cached in `regrid_weights/` — delete to force recompute.
+- Raw-regrid result cached as `regrid_weights/{name}_raw_regrid.nc` (includes
+  `bbox_depth_percentile` post-pass).  Delete it when changing `bbox_depth_percentile`
+  or the grid spec; `--skip-regrid` will error with a shape-mismatch message if stale.
 - `tqdm` is **not** a dependency — progress bar was removed (strait detection is fast).
 - Pyright reports false positives on `set_title`, `tight_layout`, `savefig` and
-  `vmin`/`vmax` in `report.py` — these are pre-existing stubs issues, not real bugs.
+  `vmin`/`vmax` in `report.py`, and on `lib/` imports in `cli/regrid.py` — these are
+  pre-existing stubs / path issues, not real bugs.

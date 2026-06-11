@@ -1538,10 +1538,19 @@ def _save_straits_html(
 
 
 def _plot_thalweg_failed(record: dict[str, Any], coarse_ds: Any,
-                         png_path: str | Path) -> None:
-    """Single-panel map showing the bbox and detected stops for a failed thalweg."""
+                         png_path: str | Path,
+                         fine_ds: Any = None,
+                         coastline_scale: str = "10m") -> None:
+    """Single-panel map showing why a thalweg failed.
+
+    The coarse depth field is shown as the main background.  When *fine_ds*
+    is supplied, the fine-resolution wet mask is overlaid as a semi-transparent
+    blue layer — this immediately reveals whether the gap is a GEBCO dry
+    barrier or a stop-coordinate placement issue.
+    """
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
+    import matplotlib.colors as mcolors
 
     try:
         import cartopy.crs as ccrs
@@ -1592,15 +1601,49 @@ def _plot_thalweg_failed(record: dict[str, Any], coarse_ds: Any,
         ext = [-180, 180, -90, 90]
     ax.set_extent(ext, crs=geo)
 
-    if coarse_lon2d is not None:
-        vmax = float(np.nanmax(coarse_depth_bg)) if np.isfinite(coarse_depth_bg).any() else 1.0
+    # Cartopy LAND goes behind all data so it fills gaps without hiding channels.
+    ax.add_feature(cfeature.LAND.with_scale(coastline_scale),      facecolor="#e8dcc8", zorder=1)
+    ax.add_feature(cfeature.COASTLINE.with_scale(coastline_scale), linewidth=0.5,        zorder=6)
+
+    # Primary background: fine-resolution GEBCO depth when available (most
+    # informative for diagnosing path failures); fall back to coarse depth.
+    _colorbar_drawn = False
+    if fine_ds is not None:
+        try:
+            f_lon = fine_ds.lon.values
+            f_lat = fine_ds.lat.values
+            f_depth_raw = fine_ds["depth"].values.astype(float)
+            f_land  = fine_ds["land"].values.astype(bool)
+            f_depth = np.where(f_land, np.nan, f_depth_raw)
+            lo0_, lo1_, la0_, la1_ = ext
+            lon_mask = (f_lon >= lo0_) & (f_lon <= lo1_)
+            lat_mask = (f_lat >= la0_) & (f_lat <= la1_)
+            f_lon_c   = f_lon[lon_mask]
+            f_lat_c   = f_lat[lat_mask]
+            f_depth_c = f_depth[np.ix_(lat_mask, lon_mask)]
+            if f_lon_c.size and f_lat_c.size and np.isfinite(f_depth_c).any():
+                f_lon2d, f_lat2d = np.meshgrid(f_lon_c, f_lat_c)
+                vmax_f = float(np.nanmax(f_depth_c))
+                pcm = ax.pcolormesh(f_lon2d, f_lat2d, f_depth_c,
+                                    cmap=cmocean.cm.deep, vmin=0, vmax=vmax_f,
+                                    shading="auto", transform=geo, zorder=2)
+                plt.colorbar(pcm, ax=ax, label="Fine depth (m)", shrink=0.75, pad=0.02)
+                _colorbar_drawn = True
+        except Exception:
+            pass  # best-effort; fall through to coarse
+
+    if not _colorbar_drawn and coarse_lon2d is not None:
+        lo0_, lo1_, la0_, la1_ = ext
+        in_ext = (
+            (coarse_lon2d >= lo0_) & (coarse_lon2d <= lo1_) &
+            (coarse_lat2d >= la0_) & (coarse_lat2d <= la1_)
+        )
+        local_depths = coarse_depth_bg[in_ext]
+        vmax = float(np.nanmax(local_depths)) if np.isfinite(local_depths).any() else 1.0
         pcm = ax.pcolormesh(coarse_lon2d, coarse_lat2d, coarse_depth_bg,
                             cmap=cmocean.cm.deep, vmin=0, vmax=vmax,
-                            shading="auto", transform=geo)
-        plt.colorbar(pcm, ax=ax, label="Depth (m)", shrink=0.75, pad=0.02)
-
-    ax.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)
+                            shading="auto", transform=geo, zorder=2)
+        plt.colorbar(pcm, ax=ax, label="Coarse depth (m)", shrink=0.75, pad=0.02)
     _gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="grey",
                        alpha=0.5, x_inline=False, y_inline=False)
     _gl.top_labels   = False
@@ -1641,6 +1684,7 @@ def plot_thalweg_comparison(
     fine_ds: Any,
     coarse_ds: Any,
     png_path: str | Path,
+    coastline_scale: str = "10m",
 ) -> None:
     """Two-panel thalweg comparison: map (left) + depth profile (right).
 
@@ -1667,7 +1711,8 @@ def plot_thalweg_comparison(
     name  = record.get("name", "Thalweg")
 
     if record.get("failed"):
-        _plot_thalweg_failed(record, coarse_ds, png_path)
+        _plot_thalweg_failed(record, coarse_ds, png_path, fine_ds=fine_ds,
+                             coastline_scale=coastline_scale)
         return
 
     fine  = record["fine"]
@@ -1746,8 +1791,8 @@ def plot_thalweg_comparison(
         )
         plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.75, pad=0.02)
 
-    ax_map.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
-    ax_map.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
+    ax_map.add_feature(cfeature.LAND.with_scale(coastline_scale),      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
+    ax_map.add_feature(cfeature.COASTLINE.with_scale(coastline_scale), linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
     _gl = ax_map.gridlines(draw_labels=True, linewidth=0.3, color="grey",   # type: ignore[union-attr]
                            alpha=0.5, x_inline=False, y_inline=False)
     _gl.top_labels   = False

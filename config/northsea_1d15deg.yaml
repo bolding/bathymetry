@@ -46,6 +46,7 @@ output:
   #   file       → northsea_1d15deg.nc
   #   report_dir → ./report/northsea_1d15deg/
   # log_depth_scale: true
+  # coastline_scale: "10m"   # NaturalEarth scale for thalweg maps: "10m" | "50m" | "110m" (default "10m")
 
 # Fixes: re-run with --accept-fixes to apply all suggestions automatically,
 # or paste selected entries here.  Available actions: set_depth, open_cell, close_cell
@@ -58,24 +59,22 @@ output:
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
-#mask_regions:
+mask_regions:
 #   - type: rectangle
 #     lon_min: 9.0
 #     lon_max: 10.5
 #     lat_min: 54.5
 #     lat_max: 55.5
 #     name: Kiel Bight
-#   - type: polygon
-#     name: Custom enclosed bay
-#     vertices:        # list of [lon, lat] corner pairs
-#       - [10.0, 55.0]
-#       - [11.0, 55.5]
-#       - [11.5, 54.5]
-#       - [10.0, 54.0]
-#   - type: point
-#     lon: 8.5
-#     lat: 54.8
-#     name: Isolated tidal pool
+  - type: polygon
+    name: North East boundary
+    vertices:        # list of [lon, lat] corner pairs
+      - [5.204, 59.967]
+      - [5.204, 59.9]
+  - type: point
+    lon: -5.750
+    lat: 50.033
+    name: Irish Sea
 #   # Grid-index variants (i = x/longitude column, j = y/latitude row, as in ncview):
 #   - type: ij_rectangle
 #     i_min: 10
@@ -90,23 +89,48 @@ output:
 #
 thalweg:
   boundary_thalwegs: false   # set to true to enable boundary auto-detection
-  # bbox_depth_percentile: 75  # deepen coarse cells inside waypoint bboxes to the
-  #                             # 75th percentile of fine-grid depths (only deepens,
-  #                             # never shallows; baked into the raw-regrid cache)
+  # auto_corridors: true        # auto-detect narrow chokepoints (articulation-point method)
+  # auto_corridor_min_basin_cells: 20   # ignore components smaller than this
+  # auto_corridor_min_length: 1         # min articulation-point cells per corridor
+  # auto_corridor_margin: 3             # bbox padding + begin/end search radius (cells)
+  # auto_corridor_merge_dist: 2         # merge corridors within this many cells
+  # bbox_depth_percentile: 75  # global fallback: set coarse cells in ALL waypoint bboxes
+  #                             # to this fine-grid depth percentile (can deepen or shallow;
+  #                             # baked into the raw-regrid cache — delete
+  #                             # regrid_weights/{name}_raw_regrid.nc to recompute)
   waypoints:
+    - name: "Little Belt"
+      begin: [9.75, 55.58]  # northern entrance of the narrow Lillebælt, well inside the belt
+      end:   [9.9, 55.1]    # south end of Lillebælt
+      via:
+        - [9.768, 55.233]   # narrowest section
+      bbox: [9.3, 10.2, 55.0, 55.7]
+      bbox_depth_percentile: 75  # per-waypoint override (overrides thalweg-level default)
     - name: "Great Belt"
       begin: [11.0, 55.8]   # Kattegat, north of Funen
       end:   [11.0, 54.7]   # Baltic approach, south of Langeland
       bbox:  [10.5, 12.0, 54.5, 56.0]
-    - name: "Little Belt"
-      begin: [9.7, 56.2]    # Kattegat, north end of Lillebælt
-      end:   [9.9, 55.1]    # south end of Lillebælt
-      via:
-        - [9.8, 55.5]       # narrow section
-      bbox: [9.0, 10.5, 55.0, 56.5]
+      bbox_depth_percentile: 75  # per-waypoint override (overrides thalweg-level default)
     - name: "Öresund"
       begin: [12.6, 56.1]   # Kattegat north of strait
       end:   [12.8, 55.65]  # Baltic south of Malmö
       via:
         - [12.65, 56.04]    # Helsingborg/Helsingør narrows
       bbox: [12.4, 13.0, 55.5, 56.2]
+      bbox_depth_percentile: 75  # per-waypoint override (overrides thalweg-level default)
+
+# Nudge inner bathymetry near open boundaries toward an outer (coarser) model.
+# Cross-sectional area at each boundary face is preserved; a cosine taper blends
+# the correction to zero over 'width' cells inland.  Cells that are deepened are
+# soft-pinned so Haney smoothing cannot shallow them.
+#
+# nudge_boundaries:
+#   outer_file: /path/to/outer_model_bathymetry.nc
+#   # Specify open boundaries by file OR by sides (or both):
+#   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
+#   boundaries: [N, S, E, W]         # fallback: nudge all cells on these grid edges
+#   width: 10                        # taper width in cells (default 10)
+#   shape: cosine                    # taper shape: cosine | linear | exponential
+#   min_depth: 2.0                   # floor for nudged depth (m)
+#   max_scale: 3.0                   # clamp scale factor to [1/max_scale, max_scale]
+#   outer_depth_var: depth           # variable name in outer file (auto-detected if omitted)

@@ -743,11 +743,29 @@ def apply_mask_regions(
                 mask
             )
         elif rtype == "polygon":
+            import warnings as _warnings
             import matplotlib.path as mpath
             verts = region["vertices"]   # [[lon, lat], ...]
-            path  = mpath.Path(verts)
-            pts   = np.column_stack([lon_2d.ravel(), lat_2d.ravel()])
-            sel   = path.contains_points(pts).reshape(lon_2d.shape) & mask
+            if len(verts) < 3:
+                # A polygon with fewer than 3 vertices has zero area and
+                # contains_points will never match any cell centre.
+                # Fall back to masking the nearest wet cell to each vertex.
+                _warnings.warn(
+                    f"Mask region '{label}': polygon has only {len(verts)} vertex/vertices "
+                    f"(need ≥ 3 for an area).  Falling back to nearest-cell masking "
+                    f"for each vertex.",
+                    stacklevel=2,
+                )
+                sel = np.zeros_like(mask)
+                for v in verts:
+                    flon, flat = float(v[0]), float(v[1])
+                    dist = (lon_2d - flon) ** 2 + (lat_2d - flat) ** 2
+                    iy, ix = np.unravel_index(int(dist.argmin()), dist.shape)
+                    sel[iy, ix] = mask[iy, ix]
+            else:
+                path = mpath.Path(verts)
+                pts  = np.column_stack([lon_2d.ravel(), lat_2d.ravel()])
+                sel  = path.contains_points(pts).reshape(lon_2d.shape) & mask
         elif rtype == "point":
             flon, flat = float(region["lon"]), float(region["lat"])
             dist = (lon_2d - flon) ** 2 + (lat_2d - flat) ** 2
