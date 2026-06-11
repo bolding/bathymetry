@@ -211,31 +211,25 @@ resulting dimensions so the user can confirm before the run proceeds.
 are mostly land in the fine-resolution source — typically small islands that the
 conservative regrid kept as 2 m ocean cells instead of land.
 
-**Algorithm:**
+**Algorithm (full run — fine source available):**
 1. Candidate cells: ocean (mask=1) with `wet_fraction < max_wet_fraction` (default 0.5).
-2. Neighbourhood check: dilate the coarse land mask by `search_radius` cells.  Any
-   candidate that overlaps the dilated land is adjacent to the coast and is therefore
-   a poorly-resolved coastal cell, not an island — it is excluded.
-3. Connected-component labelling (4-connectivity) on the surviving candidates.
-4. Clusters with more than `max_cluster_size` cells are discarded (too large to be
-   a single island; more likely a poorly-resolved land mass).
+2. For each candidate, find the fine-grid connected land-component IDs in its footprint
+   (via `scipy.ndimage.label` + KDTree bounding-box search).
+3. Candidates that touch any component with ≥ `max_island_fine_cells` pixels are excluded
+   — those pixels belong to the mainland or a large island, not a phantom.
+   Candidates with zero fine land pixels are also excluded.
+4. Remaining candidates are grouped by shared fine-grid component (Union-Find): two coarse
+   cells are in the same cluster when they contain pixels from the same fine component.
+5. Clusters exceeding `max_cluster_size` (default 5 with src) are discarded as a safety cap.
 
-**Multi-cell grouping with fine-grid source (`src` provided):**  
-When the fine-resolution source is available (full run, not `--skip-regrid`),
-`_group_by_fine_components()` maps each coarse candidate cell to the set of
-connected fine-grid land-component IDs within its footprint (via `scipy.ndimage.label`
-+ KDTree), then uses Union-Find to merge coarse cells that share at least one component.
-Two coarse cells containing parts of the same connected fine-grid island are grouped
-together; coarse cells whose fine land pixels belong to distinct components remain in
-separate clusters.  This correctly handles a real 3×1-pixel island straddling 2 coarse
-cells while avoiding false groupings caused by coincidentally adjacent unrelated land pixels.
-When `src` is available the effective `max_cluster_size` cap defaults to 5 (safety net
-on anomalously large groupings); without `src` (e.g. `--skip-regrid`) the fallback is
-coarse-grid 4-connectivity and the cap defaults to 1.
+The coarse-grid neighbourhood check (`search_radius`) is **not used** in the full-run path —
+it is the wrong discriminator for fjords where every ocean cell is near land at coarse resolution.
 
-Candidates with zero fine land pixels in their footprint (low `wet_fraction` for
-other reasons) are silently excluded — only cells with at least one fine land pixel
-qualify as phantom islands.
+**Fallback (--skip-regrid, no fine source):**
+1. Candidate cells as above.
+2. Neighbourhood check: dilate coarse land mask by `search_radius`; exclude candidates
+   within that radius (they are coastal cells, not isolated islands).
+3. Coarse 4-connectivity grouping; `max_cluster_size` cap defaults to 1.
 
 **`fixes.yaml` structure:**  All detected cells are written under a single
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
@@ -253,8 +247,9 @@ markers.  Hover text shows lon, lat, wet_fraction, depth, and fine cell count.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `phantom_island_max_wet_fraction` | 0.5 | Maximum wet_fraction to be a candidate |
-| `phantom_island_search_radius` | 2 | Cells of all-ocean neighbourhood required |
-| `phantom_island_max_cluster_size` | 1 | Max connected-component size to flag |
+| `phantom_island_max_fine_cells` | 1000 | Fine-grid component size threshold: larger = mainland, not island |
+| `phantom_island_search_radius` | 2 | Coarse neighbourhood radius (fallback only, ignored when fine src available) |
+| `phantom_island_max_cluster_size` | 1 | Max coarse-cell cluster size (auto-raised to 5 with fine src) |
 
 ### Thalweg analysis
 

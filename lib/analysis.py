@@ -598,24 +598,26 @@ def detect_phantom_islands(
     max_wet_fraction: float = 0.5,
     search_radius: int = 2,
     max_cluster_size: int = 1,
+    max_island_fine_cells: int = 1000,
 ) -> list[dict]:
     """Detect ocean cells that are mostly land in the fine-resolution source.
 
     A *phantom island* is a coarse ocean cell (mask=1) whose fine-grid
-    wet-fraction is below *max_wet_fraction*, AND that has no coarse land
-    cell (mask=0) within *search_radius* cells — meaning the cell is
-    isolated from the main land mass and is likely a real island that the
-    conservative regrid failed to preserve as land.
+    wet-fraction is below *max_wet_fraction* and whose fine-grid land pixels
+    belong only to small (island-sized) connected components — not to the
+    mainland.
 
-    **Multi-cell grouping** (when *src* is provided):
-    Adjacent candidate cells are grouped into the same cluster only if they
-    share pixels from the **same connected fine-grid land component**.  This
-    correctly handles a real island (e.g. 3×1 fine pixels) that straddles two
-    coarse cells, while avoiding false multi-cell clusters caused by
-    coincidentally adjacent separate tiny land features.
+    **When src is provided (full run):**
+    Each candidate's fine-grid land pixels are checked against connected
+    component sizes.  Cells whose pixels belong to any component larger than
+    *max_island_fine_cells* are excluded (those are mainland or large islands,
+    not phantom islands).  The coarse-grid neighbourhood check (*search_radius*)
+    is not used — it is wrong for fjords where every ocean cell is near land.
 
-    Without *src*, grouping falls back to coarse-grid 4-connectivity, and
-    *max_cluster_size* defaults to 1 to avoid false positives.
+    **When src is not provided (--skip-regrid):**
+    Falls back to the coarse-grid neighbourhood check: all cells within
+    *search_radius* must be ocean.  Grouping uses coarse 4-connectivity and
+    *max_cluster_size* applies directly.
 
     Parameters
     ----------
@@ -624,25 +626,22 @@ def detect_phantom_islands(
         2-D ``lon``/``lat`` coordinate arrays.
     src : xr.Dataset | None
         Fine-resolution source dataset (``lon``, ``lat``, ``land`` arrays).
-        When provided, multi-cell grouping uses shared fine-grid components.
     max_wet_fraction : float
-        Cells with wet_fraction below this are considered phantom-island
-        candidates (default 0.5 — cell is majority land in fine grid).
+        Cells with wet_fraction below this are candidates (default 0.5).
     search_radius : int
-        Square neighbourhood half-width in cells.  All cells within this
-        radius must be ocean (mask=1) for the candidate to qualify.
+        Coarse-grid neighbourhood half-width; used only when src is None.
     max_cluster_size : int
-        Maximum cluster size to flag.  With *src* the cluster boundary is
-        defined by shared fine-grid components so this is a safety cap on
-        anomalously large groupings (default 1 when src is None; recommend
-        raising to ~5 when src is provided).
+        Safety cap on coarse-cell cluster size.  With src, auto-raised to 5.
+    max_island_fine_cells : int
+        Fine-grid connected component size threshold.  Any component with more
+        pixels than this is treated as mainland and excluded (default 1000).
 
     Returns
     -------
     list[dict]
         One record per phantom-island cell with keys:
         ``lon``, ``lat``, ``wet_fraction``, ``depth``, ``cluster_id``,
-        ``cluster_size``.
+        ``cluster_size``, ``fine_cells``.
     """
     from scipy.ndimage import label, binary_dilation
 
@@ -655,19 +654,25 @@ def detect_phantom_islands(
     # --- candidates: ocean cells with low wet_fraction ----------------------
     candidates = mask & (wf < max_wet_fraction)
 
-    # --- neighbourhood check: no land within search_radius ------------------
-    struct = np.ones((2 * search_radius + 1, 2 * search_radius + 1), dtype=bool)
-    land_dilated = binary_dilation(~mask, structure=struct)
-    isolated = candidates & ~land_dilated
-
-    if not isolated.any():
+    if not candidates.any():
         return []
 
     # --- group candidates into islands --------------------------------------
     fine_pixel_count: dict[tuple[int, int], int] = {}
     if src is not None:
-        cluster_map, fine_pixel_count = _group_by_fine_components(isolated, dst, src)
+        # Primary path: discriminate by fine-grid component size.
+        # Coarse-grid neighbourhood check is NOT used — it incorrectly
+        # excludes real islands near the fjord shore.
+        cluster_map, fine_pixel_count = _group_by_fine_components(
+            candidates, dst, src, max_island_fine_cells=max_island_fine_cells,
+        )
     else:
+        # Fallback (--skip-regrid): coarse neighbourhood + 4-connectivity.
+        struct = np.ones((2 * search_radius + 1, 2 * search_radius + 1), dtype=bool)
+        land_dilated = binary_dilation(~mask, structure=struct)
+        isolated = candidates & ~land_dilated
+        if not isolated.any():
+            return []
         labelled, n = label(isolated)
         cluster_map = {int(cid): list(map(tuple, np.argwhere(labelled == cid).tolist()))
                        for cid in range(1, n + 1)}
@@ -693,31 +698,39 @@ def detect_phantom_islands(
 
 
 def _group_by_fine_components(
-    isolated: npt.NDArray,
+    candidates: npt.NDArray,
     dst: xr.Dataset,
     src: xr.Dataset,
+    max_island_fine_cells: int = 1000,
 ) -> tuple[dict[int, list[tuple[int, int]]], dict[tuple[int, int], int]]:
-    """Group isolated coarse candidate cells by shared fine-grid land component.
+    """Group candidate coarse cells by shared fine-grid island component.
 
-    For each isolated coarse candidate cell, collect the fine-grid connected
-    component IDs present within its footprint.  Two coarse cells that share a
-    component ID belong to the same island — they are grouped together.
-    Coarse cells that share no fine component with any other candidate are
-    singleton clusters.
+    For each candidate coarse cell, find the fine-grid connected land-component
+    IDs in its footprint.  Cells that contain ANY component larger than
+    *max_island_fine_cells* are excluded (mainland / large island — not a
+    phantom island).  Remaining cells are grouped together when they share
+    a component ID (same fine-grid island spanning multiple coarse cells).
 
     Returns
     -------
     cluster_map : dict[int, list[tuple[int,int]]]
         Maps cluster ID → list of (iy, ix) coarse-cell indices.
     fine_pixel_count : dict[tuple[int,int], int]
-        Maps each candidate coarse cell → number of fine land pixels in its footprint.
+        Maps each accepted coarse cell → number of fine land pixels in its footprint.
     """
     from scipy.ndimage import label as _label
     from scipy.spatial import cKDTree
 
     # Label connected components on the fine-grid land mask
     fine_land = src["land"].values.astype(bool)
-    fine_comp, _ = _label(fine_land)   # 0 = ocean; 1,2,… = land components
+    fine_comp, n_comp = _label(fine_land)   # 0 = ocean; 1,2,… = land components
+
+    # Compute component sizes; mark mainland components (too large to be islands)
+    comp_sizes = np.bincount(fine_comp.ravel())   # index 0 = ocean pixels (ignored)
+    mainland_ids: set[int] = set(
+        int(cid) for cid in range(1, n_comp + 1)
+        if comp_sizes[cid] >= max_island_fine_cells
+    )
 
     fine_lon = src.lon.values
     fine_lat = src.lat.values
@@ -750,18 +763,18 @@ def _group_by_fine_components(
     ])
     tree = cKDTree(fine_land_lonlat)
 
-    # For each isolated candidate coarse cell, query nearby fine land pixels
-    all_cand_ij = list(map(tuple, np.argwhere(isolated).tolist()))
+    # For each candidate coarse cell, query nearby fine land pixels
+    all_cand_ij = list(map(tuple, np.argwhere(candidates).tolist()))
     coarse_comps: dict[tuple[int, int], set[int]] = {}
     fine_pixel_count: dict[tuple[int, int], int] = {}
     for iy, ix in all_cand_ij:
         clat = float(dst_lat[iy, ix]) if dst_lat.ndim == 2 else float(dst_lat[iy])
         clon = float(dst_lon[iy, ix]) if dst_lon.ndim == 2 else float(dst_lon[ix])
-        # Bounding-box query via KDTree ball in lon/lat space
         radius = max(half_lat, half_lon) * 1.5
         idxs = tree.query_ball_point([clon, clat], r=radius)
         comp_ids: set[int] = set()
         n_fine = 0
+        touches_mainland = False
         for fi in idxs:
             fiy, fix = fine_land_ij[fi]
             flat = float(fine_lat[fiy, fix])
@@ -770,9 +783,12 @@ def _group_by_fine_components(
                 n_fine += 1
                 cid = int(fine_comp[fiy, fix])
                 if cid > 0:
+                    if cid in mainland_ids:
+                        touches_mainland = True
+                        break   # any mainland pixel disqualifies this cell
                     comp_ids.add(cid)
-        if n_fine == 0:
-            continue   # no fine land pixels → not a real phantom island
+        if n_fine == 0 or touches_mainland:
+            continue   # no fine land pixels, or connected to mainland
         coarse_comps[(iy, ix)] = comp_ids
         fine_pixel_count[(iy, ix)] = n_fine
 

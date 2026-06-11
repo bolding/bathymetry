@@ -588,9 +588,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     _keep_basins_raw = (cfg.get("analysis") or {}).get("keep_basins", None)
     keep_basins: list[int] | None = [int(b) for b in _keep_basins_raw] if _keep_basins_raw else None
     max_sections  = int(_merge(None, cfg, "analysis", "max_section_profiles", default=10))
-    pi_max_wf     = float(_merge(None, cfg, "analysis", "phantom_island_max_wet_fraction", default=0.5))
-    pi_radius     = int(_merge(None, cfg, "analysis", "phantom_island_search_radius",      default=2))
-    pi_max_size   = int(_merge(None, cfg, "analysis", "phantom_island_max_cluster_size",   default=1))
+    pi_max_wf     = float(_merge(None, cfg, "analysis", "phantom_island_max_wet_fraction",  default=0.5))
+    pi_radius     = int(_merge(None, cfg, "analysis", "phantom_island_search_radius",       default=2))
+    pi_max_size   = int(_merge(None, cfg, "analysis", "phantom_island_max_cluster_size",    default=1))
+    pi_max_fine   = int(_merge(None, cfg, "analysis", "phantom_island_max_fine_cells",      default=1000))
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
     sill_thr      = _merge(args.sill_ratio_threshold, cfg, "analysis", "sill_ratio_threshold",
@@ -943,6 +944,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             max_wet_fraction=pi_max_wf,
             search_radius=pi_radius,
             max_cluster_size=_pi_max_size,
+            max_island_fine_cells=pi_max_fine,
         )
         if _phantom_islands:
             n_clusters = len(set(r["cluster_id"] for r in _phantom_islands))
