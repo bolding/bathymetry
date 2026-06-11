@@ -664,8 +664,9 @@ def detect_phantom_islands(
         return []
 
     # --- group candidates into islands --------------------------------------
+    fine_pixel_count: dict[tuple[int, int], int] = {}
     if src is not None:
-        cluster_map = _group_by_fine_components(isolated, dst, src)
+        cluster_map, fine_pixel_count = _group_by_fine_components(isolated, dst, src)
     else:
         labelled, n = label(isolated)
         cluster_map = {int(cid): list(map(tuple, np.argwhere(labelled == cid).tolist()))
@@ -675,6 +676,7 @@ def detect_phantom_islands(
     for cid, cells in cluster_map.items():
         if len(cells) > max_cluster_size:
             continue
+        cluster_fine = sum(fine_pixel_count.get(c, 0) for c in cells)
         for iy, ix in cells:
             records.append({
                 "lon":          float(lon_2d[iy, ix]),
@@ -684,6 +686,7 @@ def detect_phantom_islands(
                                 if np.isfinite(depth_arr[iy, ix]) else 0.0,
                 "cluster_id":   int(cid),
                 "cluster_size": int(len(cells)),
+                "fine_cells":   cluster_fine,
             })
 
     return records
@@ -693,7 +696,7 @@ def _group_by_fine_components(
     isolated: npt.NDArray,
     dst: xr.Dataset,
     src: xr.Dataset,
-) -> dict[int, list[tuple[int, int]]]:
+) -> tuple[dict[int, list[tuple[int, int]]], dict[tuple[int, int], int]]:
     """Group isolated coarse candidate cells by shared fine-grid land component.
 
     For each isolated coarse candidate cell, collect the fine-grid connected
@@ -701,6 +704,13 @@ def _group_by_fine_components(
     component ID belong to the same island — they are grouped together.
     Coarse cells that share no fine component with any other candidate are
     singleton clusters.
+
+    Returns
+    -------
+    cluster_map : dict[int, list[tuple[int,int]]]
+        Maps cluster ID → list of (iy, ix) coarse-cell indices.
+    fine_pixel_count : dict[tuple[int,int], int]
+        Maps each candidate coarse cell → number of fine land pixels in its footprint.
     """
     from scipy.ndimage import label as _label
     from scipy.spatial import cKDTree
@@ -735,6 +745,7 @@ def _group_by_fine_components(
     # For each isolated candidate coarse cell, query nearby fine land pixels
     cand_ij = list(map(tuple, np.argwhere(isolated).tolist()))
     coarse_comps: dict[tuple[int, int], set[int]] = {}
+    fine_pixel_count: dict[tuple[int, int], int] = {}
     for iy, ix in cand_ij:
         clat = float(dst_lat[iy, ix]) if dst_lat.ndim == 2 else float(dst_lat[iy])
         clon = float(dst_lon[iy, ix]) if dst_lon.ndim == 2 else float(dst_lon[ix])
@@ -742,15 +753,18 @@ def _group_by_fine_components(
         radius = max(half_lat, half_lon) * 1.5
         idxs = tree.query_ball_point([clon, clat], r=radius)
         comp_ids: set[int] = set()
+        n_fine = 0
         for fi in idxs:
             fiy, fix = fine_land_ij[fi]
             flat = float(fine_lat[fiy, fix])
             flon = float(fine_lon[fiy, fix])
             if abs(flat - clat) <= half_lat and abs(flon - clon) <= half_lon:
+                n_fine += 1
                 cid = int(fine_comp[fiy, fix])
                 if cid > 0:
                     comp_ids.add(cid)
         coarse_comps[(iy, ix)] = comp_ids
+        fine_pixel_count[(iy, ix)] = n_fine
 
     # Union-Find: merge coarse cells that share a fine component
     parent: dict[tuple[int, int], tuple[int, int]] = {c: c for c in cand_ij}
@@ -780,7 +794,10 @@ def _group_by_fine_components(
     for cell in cand_ij:
         clusters[_find(cell)].append(cell)
 
-    return {i + 1: cells for i, (_, cells) in enumerate(clusters.items())}
+    return (
+        {i + 1: cells for i, (_, cells) in enumerate(clusters.items())},
+        fine_pixel_count,
+    )
 
 
 # ---------------------------------------------------------------------------

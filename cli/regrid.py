@@ -952,9 +952,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 f"(wf < {pi_max_wf}, radius={pi_radius}) → fixes.yaml"
             )
             for r in _phantom_islands:
+                fine_str = f"  fine_cells={r['fine_cells']}" if r.get("fine_cells") else ""
                 logger.info(
                     f"    lon={r['lon']:.4f}  lat={r['lat']:.4f}  "
                     f"wf={r['wet_fraction']:.2f}  depth={r['depth']:.1f} m"
+                    + fine_str
                     + (f"  [{r['cluster_size']}-cell cluster]" if r["cluster_size"] > 1 else "")
                 )
         else:
@@ -1010,6 +1012,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     "lat": f"{r['lat']:.4f}",
                     "wet_fraction": f"{r['wet_fraction']:.2f}",
                     "depth (m)": f"{r['depth']:.1f}",
+                    "fine_cells": r.get("fine_cells", ""),
                     "cluster_size": r["cluster_size"],
                 }
                 for r in _phantom_islands

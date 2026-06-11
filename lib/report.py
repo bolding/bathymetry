@@ -362,8 +362,12 @@ def update_fixes_yaml(
         fh.write(f"    applied: {'true' if applied else 'false'}"
                  "   # set true to mask all detected phantom island cells\n")
         for idx, e in enumerate(entries, start=1):
-            cluster_note = (f"; {e['cluster_size']}-cell cluster"
-                            if e.get("cluster_size", 1) > 1 else "")
+            notes = []
+            if e.get("cluster_size", 1) > 1:
+                notes.append(f"{e['cluster_size']}-cell cluster")
+            if e.get("fine_cells"):
+                notes.append(f"{e['fine_cells']} fine px")
+            note_str = ("; " + ", ".join(notes)) if notes else ""
             fh.write(f"    \"{idx:03d}\":\n")
             fh.write(f"      lon:          {e['lon']}\n")
             fh.write(f"      lat:          {e['lat']}\n")
@@ -371,7 +375,7 @@ def update_fixes_yaml(
             fh.write(f"      wet_fraction: {e['wet_fraction']:.3f}\n")
             fh.write(f"      comment: \"phantom island — "
                      f"wf={e['wet_fraction']:.2f}, depth={e['depth']:.1f} m"
-                     f"{cluster_note}\"\n")
+                     f"{note_str}\"\n")
 
     with open(path, "w") as fh:
         fh.write("# fixes.yaml — edit applied: true/false, then re-run with --accept-fixes.\n")
