@@ -729,8 +729,8 @@ def _group_by_fine_components(
     dst_lat = dst.lat.values
     _dlat = float(np.abs(np.diff(dst_lat.ravel()[:10])).mean()) if dst_lat.size > 1 else 1.0
     _dlon = float(np.abs(np.diff(dst_lon.ravel()[:10])).mean()) if dst_lon.size > 1 else 1.0
-    half_lat = _dlat * 0.6   # slight oversize to catch boundary fine cells
-    half_lon = _dlon * 0.6
+    half_lat = _dlat * 0.75   # oversize to catch fine cells near coarse-cell edges
+    half_lon = _dlon * 0.75
 
     # Build KDTree over fine land pixels only
     fine_land_ij = np.argwhere(fine_land)
