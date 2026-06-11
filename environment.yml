@@ -1,0 +1,27 @@
+name: bathymetry
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python>=3.10
+  # Core numerics
+  - numpy
+  - scipy
+  - xarray
+  - netcdf4
+  # Regridding (ESMF + xESMF must come from conda-forge)
+  - esmpy
+  - xesmf
+  # Geospatial
+  - pyproj
+  - rasterio        # required for regridding.coastline_mask
+  - rioxarray       # GeoTIFF source reading
+  - cartopy         # projections, NaturalEarth + GSHHG coastlines
+  # Plotting
+  - matplotlib
+  - cmocean         # perceptual ocean colormaps
+  - plotly          # interactive HTML depth plots
+  # Data / config
+  - pyyaml          # YAML config files
+  - pandas          # boundary CSV I/O

@@ -1821,6 +1821,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         depth_variants.append((sv, np.where(_mask, d_smooth, np.nan), f"rx0≤{rx0_val}"))
 
     subtitle = _plot_subtitle(dst_grid, dst)
+    # Derive shared colour limits from the raw regrid so all final plots use
+    # the same scale — makes it easy to see what fixes and smoothing changed.
+    _raw_depth = depth_variants[0][1]  # first variant is always depth_raw
+    _final_vmin = float(np.nanmin(_raw_depth))
+    _final_vmax = float(np.nanmax(_raw_depth))
     final_plots: list[str] = []
     for var_name, depth_arr, label in depth_variants:
         fname = pfx + f"06_final_{var_name}.png"
@@ -1832,6 +1837,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             path=os.path.join(report_dir, fname),
             interactive=True,
             log_scale=log_depth_scale,
+            vmin=_final_vmin,
+            vmax=_final_vmax,
             coastline_scale=final_coastline_scale,
         )
         final_plots.append(fname)
