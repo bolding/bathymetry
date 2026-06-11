@@ -488,7 +488,11 @@ def _add_land_feature(
     high-resolution regional or fjord domains.
 
     Set *fill_land=False* to draw only the coastline (no land fill).
+    Set *scale="none"* to skip all coastline/land features entirely.
     """
+    if scale == "none":
+        ax.set_facecolor("white")
+        return
     import cartopy.feature as cfeature  # noqa: PLC0415
     import cartopy.io.shapereader as shapereader  # noqa: PLC0415
 
@@ -857,6 +861,10 @@ def plot_depth(
 
     if cmap is None:
         cmap = _cm_depth()
+    if coastline_scale == "none":
+        import copy
+        cmap = copy.copy(cmap)
+        cmap.set_bad("white")
     path = _ensure_dir(path)
     masked = np.where(mask, depth, np.nan)
 
@@ -879,7 +887,8 @@ def plot_depth(
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-        pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(), **kw)  # type: ignore[union-attr]
+        pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(),
+                            rasterized=True, **kw)  # type: ignore[union-attr]
         _add_land_feature(ax, coastline_scale)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
         _add_colorbar(fig, ax, pcm, colorbar_label)

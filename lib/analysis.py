@@ -55,8 +55,15 @@ _R_EARTH_KM = 6371.0
 def mask_isolated(
     dst: xr.Dataset,
     nkeep: int = 1,
+    keep_basins: list[int] | None = None,
 ) -> tuple[xr.Dataset, list[dict]]:
-    """Remove disconnected wet regions, keeping the *nkeep* largest.
+    """Remove disconnected wet regions.
+
+    Basins are numbered 1, 2, 3 … in descending size order (1 = largest).
+
+    By default the *nkeep* largest basins are retained.  Pass *keep_basins*
+    to select specific basins by their size-rank number instead; *nkeep* is
+    ignored when *keep_basins* is given.
 
     Adapted from pygetm.domain.Domain.mask_subbasins() (GETM, line 1312).
 
@@ -67,6 +74,10 @@ def mask_isolated(
         ``mask`` variables.
     nkeep : int
         Number of connected ocean basins to retain (largest first).
+        Ignored when *keep_basins* is provided.
+    keep_basins : list[int] | None
+        Explicit list of size-rank basin numbers to retain (1 = largest).
+        Overrides *nkeep* when given.
 
     Returns
     -------
@@ -85,7 +96,12 @@ def mask_isolated(
         basin_sizes[bid] = int((labelled == bid).sum())
 
     ordered = sorted(basin_sizes, key=lambda b: basin_sizes[b], reverse=True)
-    keep_ids = set(ordered[:nkeep])
+
+    if keep_basins is not None:
+        # keep_basins contains 1-based size-rank indices
+        keep_ids = {ordered[r - 1] for r in keep_basins if 1 <= r <= len(ordered)}
+    else:
+        keep_ids = set(ordered[:nkeep])
 
     new_ocean = np.isin(labelled, list(keep_ids))
     new_mask = new_ocean.astype(np.int8)

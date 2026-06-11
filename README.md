@@ -193,7 +193,10 @@ regridding:
   # pad_deg: 1.0                # extra source margin beyond grid extent (expert)
 
 analysis:
-  nkeep_basins: 1
+  nkeep_basins: 1          # keep the N largest basins (default 1 = largest only)
+  # keep_basins: [1]       # alternatively: explicit list of size-rank numbers to keep
+  #                        # e.g. [5] keeps only the 5th largest; [1, 3] keeps 1st and 3rd
+  #                        # basins are numbered in the 04c_basins.png plot
   wet_frac_threshold: 0.3
   sill_ratio_threshold: 0.7
   area_ratio_threshold: 0.5
@@ -277,7 +280,7 @@ output:
 | 3 | `interpolate` | xESMF conservative regrid; `bbox_depth_percentile` post-pass; result cached as `regrid_weights/{name}_raw_regrid.nc` |
 | 4a | `analysis` | Apply user fixes from `fixes:` (set_depth, open_cell, close_cell) |
 | 4b | `analysis` | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
-| 4c | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins) |
+| 4c | `analysis` | Remove isolated ocean cells (flood-fill; keeps *nkeep* largest basins, or explicit `keep_basins` list) |
 | 4c-ii | `analysis` | Detect LAND_BRIDGE cells (forced-land with wet_fraction > 0 between disconnected basins) |
 | 4c-iii | `interpolate` | Boundary cross-section matching (optional; `nudge_boundaries:` in config) |
 | 4d | `analysis` | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT) |
@@ -317,6 +320,14 @@ rasterio`).
 
 Omit the key (or set it to `null`) to skip coastline masking and rely solely
 on GEBCO's own land flag.
+
+> **When to omit `coastline_mask`:** GEBCO and EMODnet already carry a native
+> land flag at full source resolution.  For regional high-resolution domains
+> (e.g. 250 m fjord grids) the NE 10m polygons are *coarser* than the source
+> data and will incorrectly mask valid coastal ocean cells, leaving white gaps
+> in the regridded result.  Leave the key commented out unless you have a
+> specific reason to believe the raw source land flag is unreliable for your
+> domain.
 
 > **Thalweg analysis always uses raw GEBCO** (no coastline mask), even when
 > `coastline_mask` is set.  NE land polygons clip narrow channel cells (e.g.
@@ -588,11 +599,17 @@ output:
   coastline_scale: "10m"       # NaturalEarth: "10m" | "50m" | "110m"
   # coastline_scale: "gshhg-h" # GSHHG high-res — recommended for fjord / high-res grids
   #                             # GSHHG scales: "gshhg-f" | "gshhg-h" | "gshhg-i" | "gshhg-l" | "gshhg-c"
+  # coastline_scale: "none"    # no coastline or land fill on any plot
+  final_coastline: true        # set false to suppress coastline on step-6 final plots only
 ```
 
 GSHHG (Global Self-consistent Hierarchical High-resolution Geography) is auto-downloaded
 by Cartopy and is significantly finer than NaturalEarth — use `"gshhg-h"` or `"gshhg-f"`
 for grids where NE 10m coastlines are too coarse (e.g. 250 m fjord grids).
+
+Set `coastline_scale: "none"` to show only the grid cells with no land/coastline overlay
+on any plot.  `final_coastline: false` applies the same suppression to the step-6 final
+depth plots only, while keeping coastlines on all diagnostic plots.
 
 ### Output
 

@@ -728,13 +728,16 @@ def apply_boundary_crosssection_match(
     ds_outer = xr.open_dataset(outer_file)
     _outer_var: str | None = outer_depth_var
     if _outer_var is None:
-        for candidate in ("depth", "bathy", "bathymetry", "Bathymetry", "h", "deptho"):
-            if candidate in ds_outer:
+        # Search data_vars only — dimension coordinates (e.g. a 'depth' z-level
+        # axis) share candidate names but are not the bathymetry field.
+        for candidate in ("depth", "bathy", "bathymetry", "Bathymetry", "H", "h", "deptho"):
+            if candidate in ds_outer.data_vars:
                 _outer_var = candidate
                 break
         if _outer_var is None:
             raise ValueError(
                 f"Cannot find depth variable in {outer_file}. "
+                f"Data variables present: {list(ds_outer.data_vars)}. "
                 "Set outer_depth_var in nudge_boundaries config."
             )
     outer_depth_raw = ds_outer[_outer_var].values.squeeze()

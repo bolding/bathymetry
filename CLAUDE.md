@@ -61,7 +61,7 @@ lib/
 | 3 | xESMF conservative regrid (may take a minute; result cached as `regrid_weights/{name}_raw_regrid.nc`).  `bbox_depth_percentile` post-pass applied here and baked into the cache. |
 | 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
 | 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
-| 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins) |
+| 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins, or explicit `keep_basins` list) |
 | 4c-ii | Detect LAND_BRIDGE cells (wet_fraction > 0 cells between disconnected basins) |
 | 4c-iii | Boundary cross-section matching (optional; `nudge_boundaries:` in config) |
 | 4d | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT); write `fixes.yaml` |
@@ -280,10 +280,17 @@ GSHHG (auto-downloaded via Cartopy): `"gshhg-f"` | `"gshhg-h"` | `"gshhg-i"` | `
 (full / high / intermediate / low / coarse).  GSHHG is significantly finer than
 NaturalEarth and recommended for high-resolution regional or fjord domains where
 NE 10m coastline is too coarse relative to the grid resolution.
+Use `"none"` to suppress all coastline/land features on every plot.
+
+`output.final_coastline: true` (default) — set `false` to suppress coastline on the
+step-6 final depth plots only (all diagnostic plots keep the `coastline_scale`).
+When `false`, NaN (land) cells render as solid white and the colormap `set_bad`
+colour is set to white to avoid black edge artifacts at the NaN/ocean boundary.
 
 The `_add_land_feature(ax, scale, ...)` helper in `lib/report.py` dispatches on the
 `"gshhg-"` prefix; `fill_land=False` draws only the coastline outline (used for
 diff/source-comparison/basin plots where the pcolormesh already colours the domain).
+`scale="none"` sets `ax.set_facecolor("white")` and returns immediately.
 
 #### Failed-thalweg diagnostic plot
 

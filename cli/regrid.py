@@ -584,6 +584,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     tile_cells    = int(_merge(None, cfg, "regridding", "tile_cells", default=0))
     tile_buf_deg  = float(_merge(None, cfg, "regridding", "tile_buf_deg", default=0.5))
     nkeep         = _merge(args.nkeep_basins, cfg, "analysis",   "nkeep_basins",  default=1)
+    _keep_basins_raw = (cfg.get("analysis") or {}).get("keep_basins", None)
+    keep_basins: list[int] | None = [int(b) for b in _keep_basins_raw] if _keep_basins_raw else None
     max_sections  = int(_merge(None, cfg, "analysis", "max_section_profiles", default=10))
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
@@ -613,11 +615,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     _nudge_bdy_raw      = _nb_cfg.get("boundaries", None)
     _nudge_boundaries   = list(_nudge_bdy_raw) if _nudge_bdy_raw is not None else None
     _nudge_bdy_file_raw = _nb_cfg.get("boundaries_file", None)
-    if _nudge_bdy_file_raw:
-        _cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else "."
-        _nudge_boundaries_file: str | None = os.path.join(_cfg_dir, str(_nudge_bdy_file_raw))
-    else:
-        _nudge_boundaries_file = None
+    _nudge_boundaries_file: str | None = str(_nudge_bdy_file_raw) if _nudge_bdy_file_raw else None
     _nudge_taper_width  = int(_nb_cfg.get("width", 10))
     _nudge_taper_shape  = str(_nb_cfg.get("shape", "cosine"))
     _nudge_min_depth    = float(_nb_cfg.get("min_depth", float(min_depth) if min_depth else 2.0))
@@ -686,8 +684,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                          default=f"{name}.nc")
     report_dir  = _merge(args.report_dir, cfg, "output", "report_dir",
                          default=f"./report/{name}")
-    log_depth_scale  = bool((cfg.get("output") or {}).get("log_depth_scale", False))
-    coastline_scale  = str((cfg.get("output") or {}).get("coastline_scale", "10m"))
+    log_depth_scale        = bool((cfg.get("output") or {}).get("log_depth_scale", False))
+    coastline_scale        = str((cfg.get("output") or {}).get("coastline_scale", "10m"))
+    _final_coastline       = bool((cfg.get("output") or {}).get("final_coastline", True))
+    final_coastline_scale  = coastline_scale if _final_coastline else "none"
 
     os.makedirs(report_dir, exist_ok=True)
 
@@ -1134,8 +1134,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # were forced to land by min_wet_fraction.
     # ------------------------------------------------------------------
     _pre_isolation_wf = dst["wet_fraction"].values.copy()
-    logger.info(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
-    dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep))
+    if keep_basins:
+        logger.info(f"\n[4c/6] Masking isolated ocean regions (keep basins {keep_basins}) …")
+    else:
+        logger.info(f"\n[4c/6] Masking isolated ocean regions (keep {nkeep}) …")
+    dst_clean, basin_records = analysis.mask_isolated(dst, nkeep=int(nkeep),
+                                                      keep_basins=keep_basins)
     iso_sum = analysis.isolation_summary(basin_records)
     report.print_table(iso_sum, title="Isolated cells")
     report.save_csv(basin_records, os.path.join(report_dir, pfx + "04c_basins.csv"))
@@ -1828,7 +1832,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             path=os.path.join(report_dir, fname),
             interactive=True,
             log_scale=log_depth_scale,
-            coastline_scale=coastline_scale,
+            coastline_scale=final_coastline_scale,
         )
         final_plots.append(fname)
         logger.info(f"  {fname}")
@@ -1845,7 +1849,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 title=f"{name} — depth difference: {src1_label} − {src2_label} ({label})",
                 subtitle=subtitle,
                 path=os.path.join(report_dir, diff_fname),
-                coastline_scale=coastline_scale,
+                coastline_scale=final_coastline_scale,
             )
             final_plots.append(diff_fname)
             logger.info(f"  {diff_fname}")
