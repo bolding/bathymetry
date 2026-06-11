@@ -590,7 +590,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     max_sections  = int(_merge(None, cfg, "analysis", "max_section_profiles", default=10))
     pi_max_wf     = float(_merge(None, cfg, "analysis", "phantom_island_max_wet_fraction", default=0.5))
     pi_radius     = int(_merge(None, cfg, "analysis", "phantom_island_search_radius",      default=2))
-    pi_max_size   = int(_merge(None, cfg, "analysis", "phantom_island_max_cluster_size",   default=4))
+    pi_max_size   = int(_merge(None, cfg, "analysis", "phantom_island_max_cluster_size",   default=1))
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
     sill_thr      = _merge(args.sill_ratio_threshold, cfg, "analysis", "sill_ratio_threshold",

@@ -59,6 +59,7 @@ lib/
 | 1 | Build target grid |
 | 2 | Read + clip source bathymetry |
 | 3 | xESMF conservative regrid (may take a minute; result cached as `regrid_weights/{name}_raw_regrid.nc`).  `bbox_depth_percentile` post-pass applied here and baked into the cache. |
+| 3b | Phantom island detection — ocean cells with `wet_fraction < phantom_island_max_wet_fraction` that have no coarse land neighbour within `phantom_island_search_radius` cells are candidates.  Only isolated single cells (cluster size ≤ `phantom_island_max_cluster_size`, default 1) are flagged; results written as `phantom_islands` group in `fixes.yaml`. |
 | 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
 | 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins, or explicit `keep_basins` list) |
@@ -195,14 +196,49 @@ resulting dimensions so the user can confirm before the run proceeds.
   Cartopy title).  `log_scale=True` uses `matplotlib.colors.LogNorm`; the
   interactive plotly HTML stores `log10(depth)` with original-depth tick labels.
   Enabled via `output.log_depth_scale: true` in the YAML config.
-- `update_fixes_yaml(records, path, bridge_records, thalweg_fixes)` — merges
-  strait, bridge and thalweg fix suggestions into `fixes.yaml`.  Preserves
-  existing `applied` flags (flat entries) and group-level `applied` flags
-  (thalweg groups).  When called without `thalweg_fixes` (step 4d), existing
-  thalweg groups are re-emitted verbatim so user edits are not lost.
+- `update_fixes_yaml(records, path, bridge_records, thalweg_fixes, phantom_island_fixes)` —
+  merges strait, bridge, thalweg, and phantom-island fix suggestions into `fixes.yaml`.
+  Preserves existing `applied` flags (flat entries) and group-level `applied` flags
+  (thalweg / phantom_islands groups).  When called without `thalweg_fixes` (step 4d),
+  existing thalweg groups are re-emitted verbatim so user edits are not lost.
 - `mark_all_applied(path)` — sets `applied: true` for every entry; called
   after `--apply-all-fixes`.
 - `_inset_gridlines(ax, extent)` — call this on all inset Cartopy axes.
+
+### Phantom island detection (step 3b)
+
+`detect_phantom_islands(dst, ...)` in `lib/analysis.py` finds ocean cells that
+are mostly land in the fine-resolution source — typically small islands that the
+conservative regrid kept as 2 m ocean cells instead of land.
+
+**Algorithm:**
+1. Candidate cells: ocean (mask=1) with `wet_fraction < max_wet_fraction` (default 0.5).
+2. Neighbourhood check: dilate the coarse land mask by `search_radius` cells.  Any
+   candidate that overlaps the dilated land is adjacent to the coast and is therefore
+   a poorly-resolved coastal cell, not an island — it is excluded.
+3. Connected-component labelling (4-connectivity) on the surviving candidates.
+4. Clusters with more than `max_cluster_size` cells are discarded (too large to be
+   a single island; more likely a poorly-resolved land mass).
+
+**Why `max_cluster_size` defaults to 1:**  
+Two adjacent coarse cells can each contain a separate tiny fine-grid land pixel
+(e.g. an L-shaped 3-pixel island straddling 3 coarse cells at a grid corner).
+The coarse-grid 4-connectivity would group these into a multi-cell cluster, but the
+fine-grid land pixels may belong to unrelated features that happen to be adjacent at
+the coarse scale.  Raising `max_cluster_size` above 1 is valid when the user is
+confident the cluster represents one connected island in the fine grid — but the
+default is conservative (single cells only) to avoid false positives.
+
+**`fixes.yaml` structure:**  All detected cells are written under a single
+`phantom_islands:` group with one `applied: false/true` flag controlling the whole
+group.  The `mask_cell` action (alias for `close_cell`) sets depth=NaN, mask=0.
+
+**Config keys** (under `analysis:`):`
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `phantom_island_max_wet_fraction` | 0.5 | Maximum wet_fraction to be a candidate |
+| `phantom_island_search_radius` | 2 | Cells of all-ocean neighbourhood required |
+| `phantom_island_max_cluster_size` | 1 | Max connected-component size to flag |
 
 ### Thalweg analysis
 
