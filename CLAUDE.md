@@ -59,7 +59,7 @@ lib/
 | 1 | Build target grid |
 | 2 | Read + clip source bathymetry |
 | 3 | xESMF conservative regrid (may take a minute; result cached as `regrid_weights/{name}_raw_regrid.nc`).  `bbox_depth_percentile` post-pass applied here and baked into the cache. |
-| 3b | Phantom island detection — ocean cells with `wet_fraction < phantom_island_max_wet_fraction` that have no coarse land neighbour within `phantom_island_search_radius` cells are candidates.  Only isolated single cells (cluster size ≤ `phantom_island_max_cluster_size`, default 1) are flagged; results written as `phantom_islands` group in `fixes.yaml`. |
+| 3b | Phantom island detection — ocean cells with `wet_fraction < phantom_island_max_wet_fraction` that have no coarse land neighbour within `phantom_island_search_radius` cells are candidates.  When the fine source is available, adjacent candidates are grouped by shared fine-grid land components (Union-Find); otherwise coarse 4-connectivity is used.  Clusters exceeding `phantom_island_max_cluster_size` are discarded.  Results written as `phantom_islands` group in `fixes.yaml`. |
 | 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
 | 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins, or explicit `keep_basins` list) |
@@ -220,14 +220,18 @@ conservative regrid kept as 2 m ocean cells instead of land.
 4. Clusters with more than `max_cluster_size` cells are discarded (too large to be
    a single island; more likely a poorly-resolved land mass).
 
-**Why `max_cluster_size` defaults to 1:**  
-Two adjacent coarse cells can each contain a separate tiny fine-grid land pixel
-(e.g. an L-shaped 3-pixel island straddling 3 coarse cells at a grid corner).
-The coarse-grid 4-connectivity would group these into a multi-cell cluster, but the
-fine-grid land pixels may belong to unrelated features that happen to be adjacent at
-the coarse scale.  Raising `max_cluster_size` above 1 is valid when the user is
-confident the cluster represents one connected island in the fine grid — but the
-default is conservative (single cells only) to avoid false positives.
+**Multi-cell grouping with fine-grid source (`src` provided):**  
+When the fine-resolution source is available (full run, not `--skip-regrid`),
+`_group_by_fine_components()` maps each coarse candidate cell to the set of
+connected fine-grid land-component IDs within its footprint (via `scipy.ndimage.label`
++ KDTree), then uses Union-Find to merge coarse cells that share at least one component.
+Two coarse cells containing parts of the same connected fine-grid island are grouped
+together; coarse cells whose fine land pixels belong to distinct components remain in
+separate clusters.  This correctly handles a real 3×1-pixel island straddling 2 coarse
+cells while avoiding false groupings caused by coincidentally adjacent unrelated land pixels.
+When `src` is available the effective `max_cluster_size` cap defaults to 5 (safety net
+on anomalously large groupings); without `src` (e.g. `--skip-regrid`) the fallback is
+coarse-grid 4-connectivity and the cap defaults to 1.
 
 **`fixes.yaml` structure:**  All detected cells are written under a single
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole

@@ -933,12 +933,16 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             dst["depth"].values[:] = _new_depth
 
         # Detect phantom islands from the raw regrid wet_fraction field.
+        # Pass src so multi-cell grouping uses shared fine-grid land components
+        # rather than coarse-grid adjacency (avoids false multi-cell clusters).
         # Stored here and written to fixes.yaml at step 4d.
+        _pi_max_size = pi_max_size if pi_max_size > 1 else (5 if src is not None else 1)
         _phantom_islands = analysis.detect_phantom_islands(
             dst,
+            src=src,
             max_wet_fraction=pi_max_wf,
             search_radius=pi_radius,
-            max_cluster_size=pi_max_size,
+            max_cluster_size=_pi_max_size,
         )
         if _phantom_islands:
             logger.info(f"  Phantom islands detected: {len(_phantom_islands)} cell(s) "

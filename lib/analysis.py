@@ -594,9 +594,10 @@ def strait_summary(records: list[dict]) -> dict:
 
 def detect_phantom_islands(
     dst: xr.Dataset,
+    src: Optional[xr.Dataset] = None,
     max_wet_fraction: float = 0.5,
     search_radius: int = 2,
-    max_cluster_size: int = 4,
+    max_cluster_size: int = 1,
 ) -> list[dict]:
     """Detect ocean cells that are mostly land in the fine-resolution source.
 
@@ -606,15 +607,24 @@ def detect_phantom_islands(
     isolated from the main land mass and is likely a real island that the
     conservative regrid failed to preserve as land.
 
-    Connected groups of such cells up to *max_cluster_size* are returned as
-    individual records (one per cell).  Larger connected regions are skipped
-    because they are more likely to be coastal features than isolated islands.
+    **Multi-cell grouping** (when *src* is provided):
+    Adjacent candidate cells are grouped into the same cluster only if they
+    share pixels from the **same connected fine-grid land component**.  This
+    correctly handles a real island (e.g. 3×1 fine pixels) that straddles two
+    coarse cells, while avoiding false multi-cell clusters caused by
+    coincidentally adjacent separate tiny land features.
+
+    Without *src*, grouping falls back to coarse-grid 4-connectivity, and
+    *max_cluster_size* defaults to 1 to avoid false positives.
 
     Parameters
     ----------
     dst : xr.Dataset
         Regridded dataset with ``mask``, ``wet_fraction``, ``depth``, and
         2-D ``lon``/``lat`` coordinate arrays.
+    src : xr.Dataset | None
+        Fine-resolution source dataset (``lon``, ``lat``, ``land`` arrays).
+        When provided, multi-cell grouping uses shared fine-grid components.
     max_wet_fraction : float
         Cells with wet_fraction below this are considered phantom-island
         candidates (default 0.5 — cell is majority land in fine grid).
@@ -622,8 +632,10 @@ def detect_phantom_islands(
         Square neighbourhood half-width in cells.  All cells within this
         radius must be ocean (mask=1) for the candidate to qualify.
     max_cluster_size : int
-        Connected components (4-connectivity) larger than this are not
-        flagged — they are more likely poorly-resolved coast than islands.
+        Maximum cluster size to flag.  With *src* the cluster boundary is
+        defined by shared fine-grid components so this is a safety cap on
+        anomalously large groupings (default 1 when src is None; recommend
+        raising to ~5 when src is provided).
 
     Returns
     -------
@@ -639,14 +651,11 @@ def detect_phantom_islands(
     depth_arr = dst["depth"].values
     lon_2d = dst.lon.values
     lat_2d = dst.lat.values
-    ny, nx = mask.shape
 
     # --- candidates: ocean cells with low wet_fraction ----------------------
     candidates = mask & (wf < max_wet_fraction)
 
     # --- neighbourhood check: no land within search_radius ------------------
-    # Dilate the LAND mask by search_radius; any candidate that overlaps the
-    # dilated land mask is adjacent to the coast and is therefore not an island.
     struct = np.ones((2 * search_radius + 1, 2 * search_radius + 1), dtype=bool)
     land_dilated = binary_dilation(~mask, structure=struct)
     isolated = candidates & ~land_dilated
@@ -654,12 +663,16 @@ def detect_phantom_islands(
     if not isolated.any():
         return []
 
-    # --- find connected clusters of isolated candidates ---------------------
-    labelled, n_clusters = label(isolated)
+    # --- group candidates into islands --------------------------------------
+    if src is not None:
+        cluster_map = _group_by_fine_components(isolated, dst, src)
+    else:
+        labelled, n = label(isolated)
+        cluster_map = {int(cid): list(map(tuple, np.argwhere(labelled == cid).tolist()))
+                       for cid in range(1, n + 1)}
 
     records = []
-    for cid in range(1, n_clusters + 1):
-        cells = np.argwhere(labelled == cid)
+    for cid, cells in cluster_map.items():
         if len(cells) > max_cluster_size:
             continue
         for iy, ix in cells:
@@ -674,6 +687,100 @@ def detect_phantom_islands(
             })
 
     return records
+
+
+def _group_by_fine_components(
+    isolated: npt.NDArray,
+    dst: xr.Dataset,
+    src: xr.Dataset,
+) -> dict[int, list[tuple[int, int]]]:
+    """Group isolated coarse candidate cells by shared fine-grid land component.
+
+    For each isolated coarse candidate cell, collect the fine-grid connected
+    component IDs present within its footprint.  Two coarse cells that share a
+    component ID belong to the same island — they are grouped together.
+    Coarse cells that share no fine component with any other candidate are
+    singleton clusters.
+    """
+    from scipy.ndimage import label as _label
+    from scipy.spatial import cKDTree
+
+    # Label connected components on the fine-grid land mask
+    fine_land = src["land"].values.astype(bool)
+    fine_comp, _ = _label(fine_land)   # 0 = ocean; 1,2,… = land components
+
+    fine_lon = src.lon.values
+    fine_lat = src.lat.values
+    if fine_lon.ndim == 1:
+        fine_lon, fine_lat = np.meshgrid(fine_lon, fine_lat)
+
+    # Estimate coarse cell half-widths from lon/lat spacing
+    dst_lon = dst.lon.values
+    dst_lat = dst.lat.values
+    _dlat = float(np.abs(np.diff(dst_lat.ravel()[:10])).mean()) if dst_lat.size > 1 else 1.0
+    _dlon = float(np.abs(np.diff(dst_lon.ravel()[:10])).mean()) if dst_lon.size > 1 else 1.0
+    half_lat = _dlat * 0.6   # slight oversize to catch boundary fine cells
+    half_lon = _dlon * 0.6
+
+    # Build KDTree over fine land pixels only
+    fine_land_ij = np.argwhere(fine_land)
+    if len(fine_land_ij) == 0:
+        return {}
+    fine_land_lonlat = np.column_stack([
+        fine_lon[fine_land_ij[:, 0], fine_land_ij[:, 1]],
+        fine_lat[fine_land_ij[:, 0], fine_land_ij[:, 1]],
+    ])
+    tree = cKDTree(fine_land_lonlat)
+
+    # For each isolated candidate coarse cell, query nearby fine land pixels
+    cand_ij = list(map(tuple, np.argwhere(isolated).tolist()))
+    coarse_comps: dict[tuple[int, int], set[int]] = {}
+    for iy, ix in cand_ij:
+        clat = float(dst_lat[iy, ix]) if dst_lat.ndim == 2 else float(dst_lat[iy])
+        clon = float(dst_lon[iy, ix]) if dst_lon.ndim == 2 else float(dst_lon[ix])
+        # Bounding-box query via KDTree ball in lon/lat space
+        radius = max(half_lat, half_lon) * 1.5
+        idxs = tree.query_ball_point([clon, clat], r=radius)
+        comp_ids: set[int] = set()
+        for fi in idxs:
+            fiy, fix = fine_land_ij[fi]
+            flat = float(fine_lat[fiy, fix])
+            flon = float(fine_lon[fiy, fix])
+            if abs(flat - clat) <= half_lat and abs(flon - clon) <= half_lon:
+                cid = int(fine_comp[fiy, fix])
+                if cid > 0:
+                    comp_ids.add(cid)
+        coarse_comps[(iy, ix)] = comp_ids
+
+    # Union-Find: merge coarse cells that share a fine component
+    parent: dict[tuple[int, int], tuple[int, int]] = {c: c for c in cand_ij}
+
+    def _find(x: tuple[int, int]) -> tuple[int, int]:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # Build inverse map: component → coarse cells containing it
+    comp_to_coarse: dict[int, list[tuple[int, int]]] = {}
+    for cell, comps in coarse_comps.items():
+        for c in comps:
+            comp_to_coarse.setdefault(c, []).append(cell)
+
+    # Union cells sharing a component
+    for cells_sharing in comp_to_coarse.values():
+        if len(cells_sharing) > 1:
+            root = _find(cells_sharing[0])
+            for cell in cells_sharing[1:]:
+                parent[_find(cell)] = root
+
+    # Collect clusters
+    from collections import defaultdict
+    clusters: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for cell in cand_ij:
+        clusters[_find(cell)].append(cell)
+
+    return {i + 1: cells for i, (_, cells) in enumerate(clusters.items())}
 
 
 # ---------------------------------------------------------------------------
