@@ -296,7 +296,7 @@ listed individually.
 
 ## Coastline masking
 
-GEBCO's own land mask is derived from its depth values: any cell with
+Both GEBCO and EMODnet derive their land mask from depth values: any cell with
 non-negative elevation is considered land.  For very shallow near-coastal
 cells this can be ambiguous.  Setting `regridding.coastline_mask` overlays a
 **Natural Earth** land-polygon dataset on the raw bathymetry source *before*
@@ -396,50 +396,99 @@ regridded arrays need to be recomputed, not the ESMF weights.
 
 ## Output files
 
-All files are prefixed with `name` and written to `report_dir`.
+All files are prefixed with `{name}` (the config `name:` key) unless noted otherwise.
 
 ### NetCDF (`{name}.nc`)
 
+The primary deliverable.  Every run overwrites this file in the working directory
+(or wherever `output.file:` points).  It contains the full history of the
+bathymetry through the pipeline so you can compare stages without re-running:
+
 | Variable | Description |
 |----------|-------------|
-| `depth` | Regridded bathymetry, positive-down (m) |
-| `depth_rx0_0p20` | Smoothed bathymetry for rx0≤0.2 (one variable per rx0 target) |
-| `wet_fraction` | Fraction of each coarse cell covered by ocean in the source grid |
+| `depth` | **Use this in your model.** Final bathymetry — after fixes and Haney smoothing (positive-down, m; NaN = land) |
+| `depth_raw` | Bathymetry straight out of the conservative regrid, before any fixes |
+| `depth_fixes` | After manual/suggested fixes, before Haney smoothing |
+| `depth_rx0_0p20` | Haney-smoothed to rx0 ≤ 0.20 (one variable per rx0 target; key = `depth_rx0_0pNN`) |
+| `depth_corrections_rx0_0p20` | Per-cell smoothing corrections (smoothed − fixes); useful for checking how much the LP changed the bathymetry |
+| `depth_u` | Eastern-face depth = min(T[i,j], T[i,j+1]); Arakawa C-grid U-point |
+| `depth_v` | Northern-face depth = min(T[i,j], T[i+1,j]); Arakawa C-grid V-point |
+| `wet_fraction` | Fraction of each coarse cell covered by fine-grid ocean (0–1) |
 | `mask` | Ocean mask: 1 = ocean, 0 = land |
-| `basin_labels` | Connected-component basin IDs (from step 4d) |
-| `depth_corrections` | Per-cell corrections applied by rx0 smoothing |
+| `basin_labels` | Flood-fill connected-component IDs (1 = largest basin) |
+| `depth_source2` | Second-source bathymetry on the same grid (if `source2:` given) |
+| `source_comparison` | Mask comparison between the two sources (flag variable) |
 
-Multiple smoothed bathymetries can coexist in one file — each run with a
-different `rx0` value adds a new `depth_rx0_*` variable.
+`depth`, `depth_u`, and `depth_v` are the three variables most ocean models need.
+All depth variables are NaN on land.  Multiple `depth_rx0_*` variables can coexist
+in one file — each run with a different `rx0` target appends a new variable pair.
 
 ### Report (`report_dir/`)
+
+Diagnostic plots and tables written during the run, numbered by pipeline step.
+All final depth plots share the same colour scale (derived from `depth_raw`) so
+stages can be compared visually.
 
 | File | Contents |
 |------|----------|
 | `{name}_report.md` | Markdown report linking all tables and figures |
-| `{name}_02a_source_raw.png` | Source bathymetry overview map |
-| `{name}_02b_source_coastline_masked.png` | Source after coastline masking (if used) |
-| `{name}_03_regrid_result.png` | Regridded depth (cmocean *deep_r*) |
-| `{name}_03_wet_fraction.png` | Wet fraction per coarse cell (cmocean *amp*) |
+| `{name}_01_rotated_pole.png` | Grid overview (rotated-pole grids only) |
+| `{name}_02a_source_raw.png` | Source bathymetry clipped to domain |
+| `{name}_02b_source_coastline_masked.png` | Source after coastline masking (if `coastline_mask:` set) |
+| `{name}_03_regrid_result.png` | Regridded depth after conservative regrid |
+| `{name}_03_wet_fraction.png` | Wet fraction per coarse cell |
 | `{name}_03b_source_comparison.png` | Side-by-side source comparison (if `source2:` given) |
-| `{name}_03b_depth_diff.png` | Depth difference `source − source2` on common cells |
-| `{name}_04b_mask_regions.png` | Depth after explicit masking (if used) |
-| `{name}_04c_basins.png` | Connected basin map (kept=blue, removed=red) |
-| `{name}_04c_land_bridges.csv` | Land-bridge cells (if any found) |
-| `{name}_04d_straits.png/.html` | Strait analysis map (interactive) |
-| `{name}_04d_straits.csv` | Flagged interface table |
-| `{name}_04d_section_*.png` | Cross-section profiles with map inset |
-| `fixes.yaml` | Suggested fixes grouped by cause; set `applied: true` and re-run with `--accept-fixes` |
-| `{name}_04e_thalweg_NNN_*.png` | Thalweg comparison panels (one per thalweg; step 4e) |
-| `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
-| `{name}_06_final_depth.png/.html` | Final unsmoothed bathymetry (interactive) |
-| `{name}_06_final_depth_rx0_*.png/.html` | Final smoothed bathymetry (interactive) |
+| `{name}_03b_depth_diff.png` | Depth difference source1 − source2 on common cells |
+| `{name}_04a_fixes_applied.csv` | Table of manual fixes applied (step 4a) |
+| `{name}_04b_mask_regions.png` | Depth after explicit mask regions (step 4b, if used) |
+| `{name}_04c_basins.png` | Connected-basin map — kept basins in blue, removed in red; basins numbered by size |
+| `{name}_04c_land_bridges.csv` | Land-bridge cells flagged between disconnected basins |
+| `{name}_04c3_nudge_pre/post/diff.png` | Before/after/difference maps for boundary nudging (if enabled) |
+| `{name}_04d_straits.png/.html` | Strait analysis map — flagged interfaces coloured by category |
+| `{name}_04d_straits.csv` | Full flagged-interface table (lon, lat, category, depth, deficit) |
+| `{name}_04d_section_NNN.png` | Cross-section depth profiles with map inset (one per flagged strait) |
+| `fixes.yaml` | Suggested fixes for all flagged straits and thalwegs — edit and re-run with `--accept-fixes` |
+| `{name}_04e_thalweg_NNN_<name>.png` | Fine vs coarse depth profile + map for each thalweg |
+| `{name}_04e_thalweg_NNN_<name>.csv` | Along-path depth data (fine and coarse) |
+| `{name}_05_smooth_rx0_NpNN_rx0_histogram.png` | Distribution of rx0 values before/after smoothing |
+| `{name}_05_smooth_rx0_NpNN_corrections.png` | Map of LP corrections (cells deepened by smoothing) |
+| `{name}_06_final_depth_raw.png/.html` | Final plot — raw regrid (shared colour scale baseline) |
+| `{name}_06_final_depth_fixes.png/.html` | Final plot — after fixes |
+| `{name}_06_final_depth_rx0_NpNN.png/.html` | Final plot — after Haney smoothing (interactive HTML) |
+| `{name}_06_diff_*.png` | Depth difference between source1 and source2 for each depth variant |
+
+The interactive `.html` plots (Plotly) let you hover over cells to read the exact
+depth value — useful for checking individual straits and sill depths.
+
+### Using the NetCDF in your model
+
+Most structured-grid ocean models (GETM, ROMS, MOM6, NEMO, …) need a bathymetry
+file on the model's own horizontal grid.  The recommended variable to read is
+`depth` (or `depth_rx0_*` if you ran Haney smoothing).  For Arakawa C-grid models
+`depth_u` and `depth_v` are pre-computed face depths.
+
+```python
+import xarray as xr
+ds = xr.open_dataset("northsea.nc")
+depth = ds["depth"]           # T-points — NaN on land
+depth_u = ds["depth_u"]       # U-points
+depth_v = ds["depth_v"]       # V-points
+mask = ds["mask"]             # 1=ocean, 0=land (integer)
+```
+
+If your model requires a land value other than NaN (e.g. 0 or −1) fill it after
+loading:
+
+```python
+import numpy as np
+depth_filled = depth.fillna(0.0)
+```
 
 ### Boundary coordinates (`{name}_bdy.csv`)
 
-Written alongside the output NetCDF when `--write-boundaries` is given.
-Contains all wet cells on the four outer edges in the order west (S→N),
-north (W→E), east (S→N), south (W→E).  Format:
+Written alongside the NetCDF when `--write-boundaries` is given.  Contains
+all wet T-cells on the four outer edges in order west (S→N), north (W→E),
+east (S→N), south (W→E).
 
 ```
 T-grid
@@ -449,8 +498,11 @@ lon,lat
 …
 ```
 
-The report Markdown includes a segment table showing the start/stop `(i,j)`
-indices and cell count for each contiguous wet segment per side.
+Use this file with `nudge_boundaries.boundaries_file:` in a subsequent run to
+match cross-sectional areas to an outer model, or pass it to your model's open
+boundary condition setup to identify which grid cells carry boundary conditions.
+The report Markdown includes a segment table with the start/stop `(i,j)` indices
+and cell count for each contiguous wet segment per side.
 
 ## Thalweg analysis
 
