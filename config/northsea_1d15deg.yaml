@@ -46,7 +46,7 @@ output:
   #   file       → northsea_1d15deg.nc
   #   report_dir → ./report/northsea_1d15deg/
   # log_depth_scale: true
-  # coastline_scale: "10m"   # NaturalEarth scale for thalweg maps: "10m" | "50m" | "110m" (default "10m")
+  # coastline_scale: "10m"   # NaturalEarth: "10m" | "50m" | "110m"; or GSHHG: "gshhg-f" | "gshhg-h" | "gshhg-i" | "gshhg-l" | "gshhg-c"
 
 # Fixes: re-run with --accept-fixes to apply all suggestions automatically,
 # or paste selected entries here.  Available actions: set_depth, open_cell, close_cell
@@ -125,6 +125,7 @@ thalweg:
 # soft-pinned so Haney smoothing cannot shallow them.
 #
 # nudge_boundaries:
+#   enabled: true                    # set false to keep config but skip the step
 #   outer_file: /path/to/outer_model_bathymetry.nc
 #   # Specify open boundaries by file OR by sides (or both):
 #   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries

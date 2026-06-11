@@ -241,11 +241,41 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
         dy    = _merge(args.dy,    cfg, "grid", "dy")
         crs   = _merge(args.crs,   cfg, "grid", "crs")
         rot   = _merge(args.rotation, cfg, "grid", "rotation", default=0.0)
-        for name, val in [("x-min", x_min), ("x-max", x_max),
-                          ("y-min", y_min), ("y-max", y_max),
-                          ("dx", dx), ("dy", dy), ("crs", crs)]:
+        for name, val in [("dx", dx), ("dy", dy), ("crs", crs)]:
             if val is None:
                 raise ValueError(f"Missing required grid parameter: {name}")
+        # Alternative specification: center point (geographic) + domain size in km
+        _clon  = _nested_get(cfg, "grid", "center_lon")
+        _clat  = _nested_get(cfg, "grid", "center_lat")
+        _xsize = _nested_get(cfg, "grid", "x_size")   # km
+        _ysize = _nested_get(cfg, "grid", "y_size")   # km
+        if _clon is not None or _clat is not None or _xsize is not None or _ysize is not None:
+            for name, val in [("center_lon", _clon), ("center_lat", _clat),
+                              ("x_size", _xsize), ("y_size", _ysize)]:
+                if val is None:
+                    raise ValueError(
+                        f"grid.{name} is required when using center_lon/center_lat/x_size/y_size"
+                    )
+            import pyproj  # noqa: PLC0415
+            _tf = pyproj.Transformer.from_crs("EPSG:4326", str(crs), always_xy=True)
+            _xc, _yc = _tf.transform(float(_clon), float(_clat))
+            _half_x = float(_xsize) * 500.0   # km → half-width in m
+            _half_y = float(_ysize) * 500.0
+            x_min, x_max = _xc - _half_x, _xc + _half_x
+            y_min, y_max = _yc - _half_y, _yc + _half_y
+            logger.info(
+                "  cartesian grid centre (%.4f°E, %.4f°N) → "
+                "x=[%.0f, %.0f] y=[%.0f, %.0f] m",
+                float(_clon), float(_clat), x_min, x_max, y_min, y_max,
+            )
+        else:
+            for name, val in [("x_min", x_min), ("x_max", x_max),
+                              ("y_min", y_min), ("y_max", y_max)]:
+                if val is None:
+                    raise ValueError(
+                        f"Missing required grid parameter: {name}  "
+                        "(provide x_min/x_max/y_min/y_max or center_lon/center_lat/x_size/y_size)"
+                    )
         return gridmod.CartesianGrid(x_min, x_max, y_min, y_max,
                                      float(dx), float(dy), crs, float(rot))
 
@@ -593,7 +623,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     _nudge_min_depth    = float(_nb_cfg.get("min_depth", float(min_depth) if min_depth else 2.0))
     _nudge_max_scale    = float(_nb_cfg.get("max_scale", 3.0))
     _nudge_depth_var    = _nb_cfg.get("outer_depth_var", None)
-    run_nudge = bool(_nudge_outer_file)
+    run_nudge = bool(_nudge_outer_file) and bool(_nb_cfg.get("enabled", True))
 
     # Thalweg: read from `thalweg:` section (new) or legacy `thalwegs:` list.
     _tw_cfg = _nested_get(cfg, "thalweg") or {}
@@ -817,6 +847,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 path=os.path.join(report_dir, png),
                 log_scale=log_depth_scale,
                 interactive=True,
+                coastline_scale=coastline_scale,
             )
             return png, htm
 
@@ -914,6 +945,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             path=os.path.join(report_dir, regrid_plot),
             interactive=True,
             log_scale=log_depth_scale,
+            coastline_scale=coastline_scale,
         )
         report.plot_depth(
             dst.lon.values, dst.lat.values,
@@ -922,6 +954,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             path=os.path.join(report_dir, wf_plot),
             cmap=report._cm_fraction(),
             vmin=0.0, vmax=1.0,
+            coastline_scale=coastline_scale,
         )
         rpt.add_section(
             "Conservative regridding",
@@ -978,6 +1011,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             dst["mask"].values, dst2_mask,
             name1=src1_label, name2=src2_label,
             path=os.path.join(report_dir, cmp_plot),
+            coastline_scale=coastline_scale,
         )
 
         diff_plot_3b = pfx + "03b_depth_diff.png"
@@ -991,6 +1025,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             diff_arr_3b,
             title=f"{name} — raw depth difference: {src1_label} − {src2_label}",
             path=os.path.join(report_dir, diff_plot_3b),
+            coastline_scale=coastline_scale,
         )
 
         n_both   = int(((dst["mask"].values == 1) & (dst2_mask == 1)).sum())
@@ -1071,6 +1106,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             title=f"{name} — after explicit masking",
             path=os.path.join(report_dir, mr_plot),
             log_scale=log_depth_scale,
+            coastline_scale=coastline_scale,
         )
         rpt.add_section(
             "Explicit mask regions",
@@ -1110,6 +1146,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         title="Connected ocean basins",
         path=os.path.join(report_dir, basins_plot),
         nkeep=int(nkeep),
+        coastline_scale=coastline_scale,
     )
     rpt.add_section(
         "Isolated-cell masking",
@@ -1252,6 +1289,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 dst_grid.lon_bounds[0], dst_grid.lon_bounds[1],
                 dst_grid.lat_bounds[0], dst_grid.lat_bounds[1],
             ),
+            coastline_scale=coastline_scale,
         )
 
         warn_msgs = []
@@ -1755,6 +1793,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             path=os.path.join(report_dir, fname),
             interactive=True,
             log_scale=log_depth_scale,
+            coastline_scale=coastline_scale,
         )
         final_plots.append(fname)
         logger.info(f"  {fname}")
@@ -1771,6 +1810,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 title=f"{name} — depth difference: {src1_label} − {src2_label} ({label})",
                 subtitle=subtitle,
                 path=os.path.join(report_dir, diff_fname),
+                coastline_scale=coastline_scale,
             )
             final_plots.append(diff_fname)
             logger.info(f"  {diff_fname}")

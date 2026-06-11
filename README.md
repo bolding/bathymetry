@@ -235,7 +235,8 @@ output:
 # Nudge inner depths near open boundaries toward an outer (coarser) model
 # to preserve cross-sectional area at the nesting interface (step 4c-iii).
 # nudge_boundaries:
-#   outer_file: /path/to/outer_model_bathymetry.nc   # required
+#   enabled: true                    # set false to keep config but skip (default true)
+#   outer_file: /path/to/outer_model_bathymetry.nc   # required when enabled
 #   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
 #   boundaries: [N, S, E, W]  # fallback sides; default all four if no file
 #   width: 10                  # taper width in cells
@@ -577,15 +578,21 @@ unrealistic depth.  When a percentile below 100 is used the comment in
   comment: "thalweg: Little Belt; deficit=8.5 m (29.8%) p75; fine max=64.0 m"
 ```
 
-#### Coastline resolution for thalweg maps
+#### Coastline resolution for all depth plots
 
-`output.coastline_scale` controls the NaturalEarth resolution used in thalweg
-map panels (default `"10m"`):
+`output.coastline_scale` controls the coastline dataset used in **all** depth,
+basin, strait, thalweg, diff, and source-comparison plots (default `"10m"`):
 
 ```yaml
 output:
-  coastline_scale: "10m"   # "10m" | "50m" | "110m"
+  coastline_scale: "10m"       # NaturalEarth: "10m" | "50m" | "110m"
+  # coastline_scale: "gshhg-h" # GSHHG high-res — recommended for fjord / high-res grids
+  #                             # GSHHG scales: "gshhg-f" | "gshhg-h" | "gshhg-i" | "gshhg-l" | "gshhg-c"
 ```
+
+GSHHG (Global Self-consistent Hierarchical High-resolution Geography) is auto-downloaded
+by Cartopy and is significantly finer than NaturalEarth — use `"gshhg-h"` or `"gshhg-f"`
+for grids where NE 10m coastlines are too coarse (e.g. 250 m fjord grids).
 
 ### Output
 
@@ -799,7 +806,7 @@ check.
 | Type | YAML `type:` | Key parameters |
 |------|-------------|---------------|
 | `SphericalGrid` | `spherical` | `lon_min/max`, `lat_min/max`, `dlon`, `dlat`, `rotation`, `interfaces` |
-| `CartesianGrid` | `cartesian` | `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation` |
+| `CartesianGrid` | `cartesian` | `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation` — or `center_lon`, `center_lat`, `x_size` (km), `y_size` (km) |
 | `RotatedPoleGrid` | `rotated_pole` | `pole_lon/lat`, `rlon/rlat_min/max`, `drot`, `axis_rotation` |
 | `SuperGrid` | `supergrid` | `file` path to MOM6/pyGETM ocean_hgrid.nc |
 
@@ -896,7 +903,8 @@ nudge at step 4c-iii (after basin isolation, before strait detection):
 
 ```yaml
 nudge_boundaries:
-  outer_file: /path/to/outer_model_bathymetry.nc   # required
+  enabled: true          # set false to keep config but skip the step (default true)
+  outer_file: /path/to/outer_model_bathymetry.nc   # required when enabled
   # Specify open boundary cells with a file, side names, or both:
   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
   boundaries: [N, S, E, W]   # fallback: nudge all cells on these grid edges

@@ -466,6 +466,51 @@ def _add_colorbar(fig, ax, pcm, label: str, cmap: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Coastline / land helpers
+# ---------------------------------------------------------------------------
+
+def _add_land_feature(
+    ax,
+    scale: str = "10m",
+    land_color: str = "tan",
+    land_zorder: int = 2,
+    coast_zorder: int = 3,
+    linewidth: float = 0.5,
+    fill_land: bool = True,
+) -> None:
+    """Add land polygon and coastline to a Cartopy axes.
+
+    *scale* can be a NaturalEarth resolution (``"10m"``, ``"50m"``,
+    ``"110m"``) or a GSHHG scale prefixed with ``"gshhg-"``
+    (``"gshhg-f"``, ``"gshhg-h"``, ``"gshhg-i"``, ``"gshhg-l"``,
+    ``"gshhg-c"`` for full / high / intermediate / low / coarse).
+    GSHHG is significantly finer than NaturalEarth and recommended for
+    high-resolution regional or fjord domains.
+
+    Set *fill_land=False* to draw only the coastline (no land fill).
+    """
+    import cartopy.feature as cfeature  # noqa: PLC0415
+
+    if scale.startswith("gshhg"):
+        gshhg_scale = scale.split("-", 1)[1] if "-" in scale else "h"
+        facecolor = land_color if fill_land else "none"
+        feat = cfeature.GSHHSFeature(
+            scale=gshhg_scale,
+            levels=[1],
+            facecolor=facecolor,
+            edgecolor="black",
+            linewidth=linewidth,
+        )
+        ax.add_feature(feat, zorder=land_zorder)
+    else:
+        if fill_land:
+            ax.add_feature(cfeature.LAND.with_scale(scale),
+                           facecolor=land_color, zorder=land_zorder)
+        ax.add_feature(cfeature.COASTLINE.with_scale(scale),
+                       linewidth=linewidth, zorder=coast_zorder)
+
+
+# ---------------------------------------------------------------------------
 # Static (cartopy) plots
 # ---------------------------------------------------------------------------
 
@@ -624,6 +669,7 @@ def plot_depth_diff(
     path: str | Path,
     subtitle: str = "",
     vmax: Optional[float] = None,
+    coastline_scale: str = "10m",
 ) -> None:
     """Signed depth difference map (source1 − source2) at common ocean cells.
 
@@ -661,14 +707,13 @@ def plot_depth_diff(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
         im = ax.pcolormesh(lon, lat, diff,  # type: ignore[union-attr]
                            cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
         plt.colorbar(im, ax=ax, label="Depth difference (m)", fraction=0.046, pad=0.04)
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _add_land_feature(ax, coastline_scale, fill_land=False)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
     except ImportError:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -691,6 +736,7 @@ def plot_source_comparison(
     name1: str,
     name2: str,
     path: str | Path,
+    coastline_scale: str = "10m",
 ) -> None:
     """Four-class comparison map between two regridded source masks.
 
@@ -731,13 +777,12 @@ def plot_source_comparison(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
         ax.pcolormesh(lon, lat, comp,  # type: ignore[union-attr]
                       cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _add_land_feature(ax, coastline_scale, fill_land=False)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
     except ImportError:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -768,6 +813,7 @@ def plot_depth(
     subtitle: str = "",
     colorbar_label: str = "Depth (m)",
     log_scale: bool = False,
+    coastline_scale: str = "10m",
 ) -> None:
     """Plot a scalar field.  Saves PNG; optionally also saves a plotly HTML.
 
@@ -806,13 +852,11 @@ def plot_depth(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
         pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(), **kw)  # type: ignore[union-attr]
-        ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _add_land_feature(ax, coastline_scale)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
         _add_colorbar(fig, ax, pcm, colorbar_label)
     except ImportError:
@@ -846,6 +890,7 @@ def plot_comparison(
     path: str | Path,
     cmap=None,
     label: str = "Depth (m)",
+    coastline_scale: str = "10m",
 ) -> None:
     """Side-by-side comparison — one shared colorbar on the right."""
     import matplotlib.pyplot as plt
@@ -861,7 +906,6 @@ def plot_comparison(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig, axes = plt.subplots(
             1, n, figsize=(6 * n, 5),
@@ -872,8 +916,7 @@ def plot_comparison(
         for ax, field, mask, title in zip(axes_list, fields, masks, titles):
             masked = np.where(mask, field, np.nan)
             pcm = ax.pcolormesh(lon, lat, masked, transform=ccrs.PlateCarree(), **kw)  # type: ignore[union-attr]
-            ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+            _add_land_feature(ax, coastline_scale)  # type: ignore[union-attr]
             _apply_gridlines(ax)  # type: ignore[arg-type]
             ax.set_title(title)
     except ImportError:
@@ -1133,6 +1176,7 @@ def plot_straits(
     strait_records: list[dict],
     path: str | Path,
     domain_bounds: Optional[tuple[float, float, float, float]] = None,
+    coastline_scale: str = "10m",
 ) -> None:
     """Depth map with all flagged interfaces + regional context inset + HTML.
 
@@ -1151,15 +1195,13 @@ def plot_straits(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig = plt.figure(figsize=(12, 7))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
         masked = np.where(mask, depth, np.nan)
         pcm = ax.pcolormesh(lon, lat, masked, cmap=_cm_depth(),
                             transform=ccrs.PlateCarree())
-        ax.add_feature(cfeature.LAND, facecolor="tan", zorder=2)  # type: ignore[union-attr]
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.5, zorder=3)  # type: ignore[union-attr]
+        _add_land_feature(ax, coastline_scale)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
         transform = ccrs.PlateCarree()
     except ImportError:
@@ -1208,9 +1250,8 @@ def plot_straits(
                 lon_min - pad_lon, lon_max + pad_lon,
                 lat_min - pad_lat, lat_max + pad_lat,
             )
-            ax_ins.add_feature(cfeature.LAND, facecolor="tan", zorder=1)
+            _add_land_feature(ax_ins, "50m", land_zorder=1, coast_zorder=2)
             ax_ins.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
-            ax_ins.add_feature(cfeature.COASTLINE, linewidth=0.4, zorder=2)
             # Draw domain rectangle
             rect = mpatch.Rectangle(
                 (lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
@@ -1239,6 +1280,7 @@ def plot_basins(
     title: str,
     path: str | Path,
     nkeep: int = 1,
+    coastline_scale: str = "10m",
 ) -> None:
     """Plot connected ocean basins.
 
@@ -1284,13 +1326,12 @@ def plot_basins(
 
     try:
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
 
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
         ax.pcolormesh(lon, lat, scalar,  # type: ignore[union-attr]
                       cmap=cmap, norm=norm, transform=ccrs.PlateCarree())
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.6, zorder=3)  # type: ignore[union-attr]
+        _add_land_feature(ax, coastline_scale, fill_land=False, linewidth=0.6)  # type: ignore[union-attr]
         _apply_gridlines(ax)  # type: ignore[arg-type]
     except ImportError:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -1602,8 +1643,7 @@ def _plot_thalweg_failed(record: dict[str, Any], coarse_ds: Any,
     ax.set_extent(ext, crs=geo)
 
     # Cartopy LAND goes behind all data so it fills gaps without hiding channels.
-    ax.add_feature(cfeature.LAND.with_scale(coastline_scale),      facecolor="#e8dcc8", zorder=1)
-    ax.add_feature(cfeature.COASTLINE.with_scale(coastline_scale), linewidth=0.5,        zorder=6)
+    _add_land_feature(ax, coastline_scale, land_color="#e8dcc8", land_zorder=1, coast_zorder=6)
 
     # Primary background: fine-resolution GEBCO depth when available (most
     # informative for diagnosing path failures); fall back to coarse depth.
@@ -1791,8 +1831,7 @@ def plot_thalweg_comparison(
         )
         plt.colorbar(pcm, ax=ax_map, label="Depth (m)", shrink=0.75, pad=0.02)
 
-    ax_map.add_feature(cfeature.LAND.with_scale(coastline_scale),      facecolor="#e8dcc8", zorder=2)   # type: ignore[union-attr]
-    ax_map.add_feature(cfeature.COASTLINE.with_scale(coastline_scale), linewidth=0.5,        zorder=3)  # type: ignore[union-attr]
+    _add_land_feature(ax_map, coastline_scale, land_color="#e8dcc8", land_zorder=2, coast_zorder=3)  # type: ignore[union-attr]
     _gl = ax_map.gridlines(draw_labels=True, linewidth=0.3, color="grey",   # type: ignore[union-attr]
                            alpha=0.5, x_inline=False, y_inline=False)
     _gl.top_labels   = False

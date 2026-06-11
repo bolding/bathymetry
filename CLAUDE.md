@@ -148,6 +148,9 @@ Logging format: `%(levelname)-8s %(asctime)s  %(message)s` with `datefmt="%H:%M:
 
 - `SphericalGrid`: `lon_min/max`, `lat_min/max`, `dlon`, `dlat`, `rotation_deg`
 - `CartesianGrid`: `x_min/max`, `y_min/max`, `dx`, `dy`, `crs`, `rotation_deg`
+  — or alternatively `center_lon`, `center_lat`, `x_size` (km), `y_size` (km) to
+  specify the domain by its geographic centre and extent.  `cli/regrid.py` converts
+  to `x_min/max/y_min/max` via pyproj before constructing the grid.
 - `RotatedPoleGrid`: `pole_lon/lat` or `lon/lat_center`, `rlon/rlat_min/max`, `drot`, `axis_rotation`
 - `SuperGrid`: `file` (path to supergrid NetCDF), optional `x_var`/`y_var` (auto-detected).
   Reads a `(2·ny+1) × (2·nx+1)` file (MOM6 `ocean_hgrid.nc` or pyGETM style).
@@ -267,11 +270,20 @@ producing a fix that sets the coarse cell to an unrealistically deep value.
 - For cells visited by multiple thalwegs with different percentiles the most
   conservative (lowest) percentile is used.
 
-#### Coastline resolution for thalweg maps
+#### Coastline resolution for all depth plots
 
-`output.coastline_scale: "10m"` (default) controls the NaturalEarth resolution
-used in both `plot_thalweg_comparison` and `_plot_thalweg_failed` maps.
-Values: `"10m"` | `"50m"` | `"110m"`.
+`output.coastline_scale: "10m"` (default) controls the coastline dataset used in
+**all** depth, basin, strait, thalweg, diff, and source-comparison plots.
+
+NaturalEarth values: `"10m"` | `"50m"` | `"110m"`.
+GSHHG (auto-downloaded via Cartopy): `"gshhg-f"` | `"gshhg-h"` | `"gshhg-i"` | `"gshhg-l"` | `"gshhg-c"`
+(full / high / intermediate / low / coarse).  GSHHG is significantly finer than
+NaturalEarth and recommended for high-resolution regional or fjord domains where
+NE 10m coastline is too coarse relative to the grid resolution.
+
+The `_add_land_feature(ax, scale, ...)` helper in `lib/report.py` dispatches on the
+`"gshhg-"` prefix; `fill_land=False` draws only the coastline outline (used for
+diff/source-comparison/basin plots where the pcolormesh already colours the domain).
 
 #### Failed-thalweg diagnostic plot
 
@@ -304,7 +316,8 @@ basin removal, before strait detection.
 
 ```yaml
 nudge_boundaries:
-  outer_file: /path/to/outer_bathymetry.nc   # required
+  enabled: true          # set false to keep config but skip the step (default true)
+  outer_file: /path/to/outer_bathymetry.nc   # required when enabled
   boundaries_file: northsea_1d15deg_bdy.csv  # *_bdy.csv from --write-boundaries
   boundaries: [N, S, E, W]   # fallback sides when no file; default all four
   width: 10                  # taper width in cells
