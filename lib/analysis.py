@@ -724,11 +724,19 @@ def _group_by_fine_components(
     if fine_lon.ndim == 1:
         fine_lon, fine_lat = np.meshgrid(fine_lon, fine_lat)
 
-    # Estimate coarse cell half-widths from lon/lat spacing
+    # Estimate coarse cell half-widths from lon/lat spacing.
+    # For 2-D arrays diff must be taken along the correct axis:
+    #   lat varies along axis-0 (rows); lon varies along axis-1 (cols).
+    # ravel() on a 2-D lat array yields the first row repeatedly — all same
+    # lat — so np.diff gives ~0.  Use the first column for lat, first row for lon.
     dst_lon = dst.lon.values
     dst_lat = dst.lat.values
-    _dlat = float(np.abs(np.diff(dst_lat.ravel()[:10])).mean()) if dst_lat.size > 1 else 1.0
-    _dlon = float(np.abs(np.diff(dst_lon.ravel()[:10])).mean()) if dst_lon.size > 1 else 1.0
+    if dst_lat.ndim == 2:
+        _dlat = float(np.abs(np.diff(dst_lat[:, 0])).mean()) if dst_lat.shape[0] > 1 else 1.0
+        _dlon = float(np.abs(np.diff(dst_lon[0, :])).mean()) if dst_lon.shape[1] > 1 else 1.0
+    else:
+        _dlat = float(np.abs(np.diff(dst_lat)).mean()) if dst_lat.size > 1 else 1.0
+        _dlon = float(np.abs(np.diff(dst_lon)).mean()) if dst_lon.size > 1 else 1.0
     half_lat = _dlat * 0.75   # oversize to catch fine cells near coarse-cell edges
     half_lon = _dlon * 0.75
 
