@@ -98,39 +98,30 @@ bathymetry-regrid \
     --name northsea_0p05deg \
     --grid spherical \
     --lon-min 0 --lon-max 15 --lat-min 50 --lat-max 60 \
-    --dlon 0.05 --dlat 0.05 \
+    --dlat 0.05 \
     --min-depth 2 \
     --smooth-rx0 0.2 \
     --output northsea.nc \
     --report-dir ./report/northsea/
 ```
 
-### Equidistant spherical grid
-
-By default `dlon` and `dlat` are both in degrees, so cells become narrower
-towards the poles.  Use `--equidistant` to compute `dlon` automatically from
-`dlat` and the central latitude, giving approximately square cells in physical
-distance:
-
-```bash
-bathymetry-regrid \
-    --source /server/data/GEBCO/GEBCO_2023.nc \
-    --name northsea_equidist \
-    --grid spherical \
-    --lon-min 0 --lon-max 15 --lat-min 50 --lat-max 60 \
-    --dlat 0.05 --equidistant \
-    --min-depth 2 --output northsea.nc
-```
-
-At a central latitude of 55 °N, `cos(55°) ≈ 0.574`, so `dlon ≈ 0.05 / 0.574 ≈ 0.0872°`.
-The grid will have fewer longitude points than latitude points (≈ 172 × 200 instead of
-300 × 200 for `dlon = dlat = 0.05°`).  The computed values are printed at startup:
+By default (`equidistant=true`) `dlon` is derived from `dlat` and the central
+latitude so that cells are approximately square in physical distance.  At a
+central latitude of 55 °N, `cos(55°) ≈ 0.574`, so `dlon ≈ 0.05 / 0.574 ≈ 0.0872°`.
+The computed values are printed at startup:
 
 ```
 [equidistant] lat_center=55.00°  dlon=0.087126°  dlat=0.05°  → grid 172 × 200 (lon × lat)
 ```
 
-In YAML:
+To use an explicit equal-degree grid instead (cells narrowing towards the poles),
+supply both spacings and disable equidistant:
+
+```bash
+bathymetry-regrid ... --dlon 0.05 --dlat 0.05 --no-equidistant
+```
+
+In YAML (equidistant is the default — just omit `dlon`):
 
 ```yaml
 grid:
@@ -139,8 +130,8 @@ grid:
   lon_max: 15.0
   lat_min: 50.0
   lat_max: 60.0
-  dlat: 0.05          # dlon is computed automatically
-  equidistant: true
+  dlat: 0.05          # dlon computed automatically from dlat / cos(lat_center)
+  # dlon: 0.05        # uncomment + equidistant: false for an explicit equal-degree grid
 ```
 
 ### Rotated spherical grid
@@ -186,13 +177,13 @@ grid:
   lon_max: 15.0
   lat_min: 50.0
   lat_max: 60.0
-  dlon: 0.05
-  dlat: 0.05
+  dlat: 0.05             # dlon computed automatically (equidistant=true is the default)
+  # dlon: 0.05           # set dlon explicitly only when equidistant: false
   rotation: 0.0          # degrees CCW (non-zero → rotated curvilinear grid)
   # interfaces: false    # true → lon/lat bounds are cell corners (interfaces)
   #                      # false (default) → T-point positions; lon_max/lat_max
   #                      #   are the last T-points, so the grid includes them exactly.
-  equidistant: false     # true → dlon = dlat / cos(lat_center) for square cells
+  # equidistant: false   # uncomment to supply both dlon and dlat explicitly
 
 regridding:
   cache_dir: ./regrid_weights   # xESMF weight files cached here

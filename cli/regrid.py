@@ -13,9 +13,8 @@ Example YAML (``north_sea.yaml``)::
       lon_max: 10.0
       lat_min: 50.0
       lat_max: 60.0
-      dlon: 0.05        # omit dlon (or dlat) and set equidistant: true
-      dlat: 0.05        # to compute the missing spacing from the central latitude
-      equidistant: false  # true → dlon = dlat / cos(lat_center) for square cells
+      dlat: 0.05        # dlon is computed automatically (equidistant=true is the default)
+      # dlon: 0.05      # set dlon explicitly only for a non-square grid (+ equidistant: false)
       rotation: 0.0
       interfaces: false   # true → lon/lat bounds are cell corners; false (default) → T-points
 
@@ -201,22 +200,22 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
         dlon    = _merge(args.dlon,    cfg, "grid", "dlon")
         dlat    = _merge(args.dlat,    cfg, "grid", "dlat")
         rot     = _merge(args.rotation, cfg, "grid", "rotation", default=0.0)
-        equidist   = _merge(args.equidistant, cfg, "grid", "equidistant", default=False)
+        equidist   = _merge(args.equidistant, cfg, "grid", "equidistant", default=True)
         interfaces = _merge(args.interfaces,  cfg, "grid", "interfaces",  default=False)
         for name, val in [("lon-min", lon_min), ("lon-max", lon_max),
                           ("lat-min", lat_min), ("lat-max", lat_max)]:
             if val is None:
                 raise ValueError(f"Missing required grid parameter: {name}")
-        if equidist:
-            if dlat is None and dlon is None:
-                raise ValueError("--equidistant requires dlat (or dlon) to be set")
+        if dlat is None and dlon is None:
+            raise ValueError("At least one of dlat or dlon must be specified")
+        if equidist and not (dlon is not None and dlat is not None):
+            # Equidistant: compute the missing spacing from the other.
+            # If both are already provided the user chose explicit values — skip.
             lat_center = (float(lat_min) + float(lat_max)) / 2.0
             cos_lat = math.cos(math.radians(lat_center))
             if dlat is not None:
-                # dlat is the authoritative spacing; always derive dlon
                 dlon = round(float(dlat) / cos_lat, 6)
             else:
-                # only dlon given — derive dlat
                 dlat = round(float(dlon) * cos_lat, 6)
             nx_eq = round((float(lon_max) - float(lon_min)) / float(dlon))
             ny_eq = round((float(lat_max) - float(lat_min)) / float(dlat))
@@ -224,9 +223,10 @@ def _build_grid(cfg: dict, args: argparse.Namespace) -> gridmod.BaseGrid:
                   f"dlon={float(dlon):.6g}°  dlat={float(dlat):.6g}°  "
                   f"→ grid {nx_eq} × {ny_eq} (lon × lat)")
         else:
-            for name, val in [("dlon", dlon), ("dlat", dlat)]:
-                if val is None:
-                    raise ValueError(f"Missing required grid parameter: {name}")
+            if dlon is None or dlat is None:
+                raise ValueError(
+                    "Both dlon and dlat must be provided when equidistant=false"
+                )
         return gridmod.SphericalGrid(lon_min, lon_max, lat_min, lat_max,
                                      float(dlon), float(dlat), float(rot),
                                      interfaces=bool(interfaces))
@@ -404,10 +404,13 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     sph.add_argument("--lat-max", type=float, default=None)
     sph.add_argument("--dlon", type=float, default=None)
     sph.add_argument("--dlat", type=float, default=None)
-    sph.add_argument("--equidistant", action="store_true", default=None,
+    sph.add_argument("--equidistant", action=argparse.BooleanOptionalAction, default=None,
                      help="Compute the missing dlon (or dlat) from the other using the "
-                          "central latitude so that grid cells are approximately square "
-                          "in physical distance.  Specify exactly one of --dlon / --dlat.")
+                          "central latitude so cells are approximately square in physical "
+                          "distance.  Default: true.  Provide only dlat (or only dlon) "
+                          "and the other is derived automatically.  Use --no-equidistant "
+                          "together with both --dlon and --dlat for an explicit "
+                          "non-square grid.")
     sph.add_argument("--interfaces", action="store_true", default=None,
                      help="Treat lon_min/lat_min/lon_max/lat_max as cell-corner (interface) "
                           "positions.  Default: they are T-point (cell-centre) positions, "

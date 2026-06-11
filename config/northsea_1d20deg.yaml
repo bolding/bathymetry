@@ -17,11 +17,8 @@ grid:
   lon_max: 15.0
   lat_min: 50.0
   lat_max: 60.0
-  dlon: 0.05
-  dlat: 0.05
-  # equidistant: true   # omit dlon (keep dlat) to compute dlon = dlat / cos(lat_center)
-  #                     # so cells are approximately square in physical distance;
-  #                     # this reduces the number of longitude grid points
+  dlat: 0.05            # dlon computed automatically (equidistant=true is the default)
+  # dlon: 0.05          # uncomment + add equidistant: false for an explicit equal-degree grid
   rotation: 0.0     # degrees CCW; non-zero produces a rotated curvilinear grid
   # interfaces: false  # true → lon/lat bounds are cell corners; false (default) → T-points
 

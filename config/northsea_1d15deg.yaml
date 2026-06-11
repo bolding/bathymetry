@@ -13,15 +13,12 @@ source: /server/data/GEBCO/GEBCO_2023.nc
 
 grid:
   type: spherical
-  lon_min: 0.0
-  lon_max: 15.0
-  lat_min: 50.0
+  lon_min: -5.75
+  lon_max: 13.25
+  lat_min: 48.5
   lat_max: 60.0
-  dlon: 0.05
-  dlat: 0.066666667
-  # equidistant: true   # omit dlon (keep dlat) to compute dlon = dlat / cos(lat_center)
-  #                     # so cells are approximately square in physical distance;
-  #                     # this reduces the number of longitude grid points
+  dlat: 0.066666667     # dlon computed automatically (equidistant=true is the default)
+  # dlon: 0.05          # uncomment + add equidistant: false for an explicit equal-degree grid
   rotation: 0.0     # degrees CCW; non-zero produces a rotated curvilinear grid
   # interfaces: false  # true → lon/lat bounds are cell corners; false (default) → T-points
 
@@ -61,7 +58,7 @@ output:
 # Explicit mask regions: force wet cells to land after regridding.
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
-# mask_regions:
+#mask_regions:
 #   - type: rectangle
 #     lon_min: 9.0
 #     lon_max: 10.5
@@ -86,10 +83,10 @@ output:
 #     j_min: 5
 #     j_max: 15
 #     name: Index-based rectangle
-#   - type: ij_point
-#     i: 15
-#     j: 8
-#     name: Single cell by index
+#  - type: ij_point
+#    i: 71
+#    j: 100
+#    name: Limfjorden
 #
 thalweg:
   boundary_thalwegs: false   # set to true to enable boundary auto-detection
