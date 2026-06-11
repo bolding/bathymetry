@@ -1211,6 +1211,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         assert _nudge_outer_file is not None
         _lon_c = dst_grid.center_lon if hasattr(dst_grid, "center_lon") else dst["lon"].values
         _lat_c = dst_grid.center_lat if hasattr(dst_grid, "center_lat") else dst["lat"].values
+        _depth_pre_nudge = dst["depth"].values.copy()
         _depth_nudged, nudge_pin_mask = interpolate.apply_boundary_crosssection_match(
             depth=dst["depth"].values,
             lon_centers=np.asarray(_lon_c),
@@ -1231,6 +1232,39 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             else ", ".join(_nudge_boundaries) if _nudge_boundaries
             else "N, S, E, W"
         )
+        # ---- nudge plots ----
+        _nudge_pre_plot  = pfx + "04c3_nudge_pre.png"
+        _nudge_post_plot = pfx + "04c3_nudge_post.png"
+        _nudge_diff_plot = pfx + "04c3_nudge_diff.png"
+        _mask_arr = dst["mask"].values
+        report.plot_depth(
+            dst.lon.values, dst.lat.values,
+            _depth_pre_nudge, _mask_arr,
+            title=f"{name} — depth before boundary nudge",
+            path=os.path.join(report_dir, _nudge_pre_plot),
+            log_scale=log_depth_scale,
+            coastline_scale=coastline_scale,
+        )
+        report.plot_depth(
+            dst.lon.values, dst.lat.values,
+            _depth_nudged, _mask_arr,
+            title=f"{name} — depth after boundary nudge",
+            path=os.path.join(report_dir, _nudge_post_plot),
+            log_scale=log_depth_scale,
+            coastline_scale=coastline_scale,
+        )
+        _nudge_diff = np.where(
+            _mask_arr.astype(bool),
+            _depth_nudged - _depth_pre_nudge,
+            np.nan,
+        )
+        report.plot_depth_diff(
+            dst.lon.values, dst.lat.values,
+            _nudge_diff,
+            title=f"{name} — boundary nudge correction (after − before)",
+            path=os.path.join(report_dir, _nudge_diff_plot),
+            coastline_scale=coastline_scale,
+        )
         rpt.add_section(
             "Boundary cross-section matching",
             text=(
@@ -1239,6 +1273,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 f"Taper: {_nudge_taper_shape}, width={_nudge_taper_width} cells.  "
                 f"{_n_nudged} cell(s) deepened (soft-pinned for Haney smoothing)."
             ),
+            images=[_nudge_pre_plot, _nudge_post_plot, _nudge_diff_plot],
         )
     # ------------------------------------------------------------------
     # Step 4d – Strait detection

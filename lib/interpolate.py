@@ -760,10 +760,20 @@ def apply_boundary_crosssection_match(
 
     # Build flat (lon, lat) → depth lookup for outer model using KDTree
     if _outer_lon.ndim == 1 and _outer_lat.ndim == 1:
-        _olon2d, _olat2d = np.meshgrid(_outer_lon, _outer_lat)
+        _olon2d, _olat2d = np.meshgrid(_outer_lon, _outer_lat)  # shape (ny, nx)
     else:
         _olon2d, _olat2d = _outer_lon, _outer_lat
     _outer_depth_2d = outer_depth_raw if outer_depth_raw.ndim == 2 else outer_depth_raw
+    # NetCDF may store depth as (nx, ny) instead of (ny, nx) — normalise to match coords
+    if _outer_depth_2d.shape != _olon2d.shape:
+        if _outer_depth_2d.shape == (_olon2d.shape[1], _olon2d.shape[0]):
+            _outer_depth_2d = _outer_depth_2d.T
+        else:
+            raise ValueError(
+                f"nudge_boundaries: outer depth shape {_outer_depth_2d.shape} does not match "
+                f"coordinate grid {_olon2d.shape} (even transposed). "
+                "Check that the outer file has compatible dimensions."
+            )
     # Flip sign: outer model may store positive = wet depth
     if np.nanmedian(_outer_depth_2d[np.isfinite(_outer_depth_2d)]) > 0:
         _outer_depth_2d = np.where(_outer_depth_2d > 0, _outer_depth_2d, np.nan)
