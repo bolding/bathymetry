@@ -945,8 +945,18 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             max_cluster_size=_pi_max_size,
         )
         if _phantom_islands:
-            logger.info(f"  Phantom islands detected: {len(_phantom_islands)} cell(s) "
-                        f"(wf < {pi_max_wf}, radius={pi_radius}) → see fixes.yaml")
+            n_clusters = len(set(r["cluster_id"] for r in _phantom_islands))
+            n_cells    = len(_phantom_islands)
+            logger.info(
+                f"  Phantom islands: {n_clusters} island(s), {n_cells} cell(s) "
+                f"(wf < {pi_max_wf}, radius={pi_radius}) → fixes.yaml"
+            )
+            for r in _phantom_islands:
+                logger.info(
+                    f"    lon={r['lon']:.4f}  lat={r['lat']:.4f}  "
+                    f"wf={r['wet_fraction']:.2f}  depth={r['depth']:.1f} m"
+                    + (f"  [{r['cluster_size']}-cell cluster]" if r["cluster_size"] > 1 else "")
+                )
         else:
             logger.info("  No phantom islands detected.")
 
@@ -989,6 +999,45 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             table=dst_sum,
             images=[regrid_plot, wf_plot],
         )
+
+        # Phantom island report section
+        if _phantom_islands:
+            n_clusters = len(set(r["cluster_id"] for r in _phantom_islands))
+            n_cells    = len(_phantom_islands)
+            pi_rows = [
+                {
+                    "lon": f"{r['lon']:.4f}",
+                    "lat": f"{r['lat']:.4f}",
+                    "wet_fraction": f"{r['wet_fraction']:.2f}",
+                    "depth (m)": f"{r['depth']:.1f}",
+                    "cluster_size": r["cluster_size"],
+                }
+                for r in _phantom_islands
+            ]
+            rpt.add_section(
+                "Phantom island detection",
+                text=(
+                    f"{n_clusters} phantom island(s) detected ({n_cells} coarse cell(s)). "
+                    "These are ocean cells that are majority land in the fine-resolution source "
+                    f"(wet_fraction < {pi_max_wf}) and isolated from the main coastline "
+                    f"(no land within {pi_radius} cells). "
+                    "Set `applied: true` in the `phantom_islands:` group of `fixes.yaml` "
+                    "and re-run with `--accept-fixes` to mask them."
+                ),
+                table_rows=pi_rows,
+                warnings=[
+                    f"{n_clusters} phantom island(s) will remain as spurious shallow ocean "
+                    "cells unless masked via fixes.yaml."
+                ],
+            )
+        else:
+            rpt.add_section(
+                "Phantom island detection",
+                text=(
+                    f"No phantom islands detected "
+                    f"(wet_fraction threshold: {pi_max_wf}, search radius: {pi_radius} cells)."
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Step 3b – Second source comparison (optional)
