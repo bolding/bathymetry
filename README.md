@@ -65,6 +65,14 @@ This tool uses xESMF first-order conservative regridding with FRACAREA
 normalisation, followed by automated diagnostics that flag both geometric
 narrowing and sill-depth under-representation.
 
+> **Reproducibility.**  Every run is fully reproducible from the YAML config
+> and the source bathymetry file alone.  All manual interventions (cell fixes,
+> mask regions, thalweg depth adjustments) are recorded in `fixes.yaml` and the
+> config file — re-running with the same inputs always produces bit-identical
+> output.  The regrid weights and raw-regrid result are cached so the expensive
+> ESMF step does not need to be repeated when iterating on fixes or smoothing.
+> Delete the cache (`regrid_weights/`) to force a full recompute from scratch.
+
 ## Installation
 
 The project requires `esmpy` / `xesmf` and optionally `rioxarray` (for
