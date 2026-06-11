@@ -95,30 +95,64 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(fh) or {}
 
 
-def _resolve_fix_keys(fixes: list[dict], suggested_yaml: str) -> list[dict]:
-    """Expand key-only fix references against fixes_suggested.yaml.
+def _load_fixes_yaml(path: str) -> list[dict]:
+    """Load fixes from fixes.yaml (dict format) or fixes_suggested.yaml (list format).
+
+    Dict format (new): ``fixes: {b001: {lon: ..., applied: true}, ...}``
+    Nested thalweg group: ``fixes: {tw_great_belt: {applied: false, "001": {lon: ...}}}``
+    List format (old): ``fixes: [{lon: ..., action: ...}, ...]``
+
+    Returns a flat list of fix dicts, each guaranteed to have ``lon`` and ``lat``.
+    For thalweg groups the group-level ``applied`` flag is propagated to each sub-entry.
+    """
+    raw = _load_yaml(path).get("fixes") or {}
+    if isinstance(raw, dict):
+        result = []
+        for key, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            if "lon" in entry and "lat" in entry:
+                # Regular flat fix entry
+                d = dict(entry)
+                d.setdefault("key", key)
+                result.append(d)
+            elif key.startswith("tw_") and "applied" in entry:
+                # Thalweg group: expand numbered sub-entries; propagate group applied flag
+                group_applied = bool(entry.get("applied", False))
+                for subkey, subentry in entry.items():
+                    if subkey == "applied":
+                        continue
+                    if isinstance(subentry, dict) and "lon" in subentry and "lat" in subentry:
+                        d = dict(subentry)
+                        d.setdefault("key", f"{key}_{subkey}")
+                        d["applied"] = group_applied
+                        result.append(d)
+        return result
+    if isinstance(raw, list):
+        return [dict(f) for f in raw if isinstance(f, dict)]
+    return []
+
+
+def _resolve_fix_keys(fixes: list[dict], fixes_yaml: str) -> list[dict]:
+    """Expand key-only fix references against fixes.yaml.
 
     A fix entry with only a ``key:`` field (no ``lon``/``lat``) is looked up
-    in *suggested_yaml* and replaced with the full fix dict from that file.
-    Entries that already have ``lon``/``lat`` are passed through unchanged —
-    the ``key`` field, if present, is kept as a label but has no effect.
+    in *fixes_yaml* and replaced with the full fix dict.
+    Entries that already have ``lon``/``lat`` are passed through unchanged.
 
-    Raises ``KeyError`` if a referenced key is not found in the suggested file.
+    Raises ``KeyError`` if a referenced key is not found in the file.
     """
-    # Short-circuit: no key-only entries
     if not any("key" in f and "lon" not in f for f in fixes):
         return fixes
 
-    if not os.path.exists(suggested_yaml):
+    if not os.path.exists(fixes_yaml):
         raise FileNotFoundError(
-            f"Fix key resolution requires '{suggested_yaml}' but the file does not exist.\n"
+            f"Fix key resolution requires '{fixes_yaml}' but the file does not exist.\n"
             "Run without --skip-regrid first to generate it."
         )
 
-    all_suggested = _load_yaml(suggested_yaml).get("fixes") or []
-    key_db: dict[str, dict] = {
-        f["key"]: f for f in all_suggested if "key" in f
-    }
+    all_fixes = _load_fixes_yaml(fixes_yaml)
+    key_db: dict[str, dict] = {f["key"]: f for f in all_fixes if "key" in f}
 
     resolved = []
     for fix in fixes:
@@ -126,10 +160,10 @@ def _resolve_fix_keys(fixes: list[dict], suggested_yaml: str) -> list[dict]:
             k = fix["key"]
             if k not in key_db:
                 raise KeyError(
-                    f"Fix key '{k}' not found in '{suggested_yaml}'.\n"
+                    f"Fix key '{k}' not found in '{fixes_yaml}'.\n"
                     f"Available keys: {sorted(key_db)}"
                 )
-            resolved.append(dict(key_db[k]))   # copy so original is untouched
+            resolved.append(dict(key_db[k]))
         else:
             resolved.append(fix)
     return resolved
@@ -442,13 +476,17 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Fixes
     fx = parser.add_argument_group("Fixes")
     fx.add_argument("--fixes-file", default=None, metavar="FILE",
-                    help="YAML file containing a 'fixes:' list to apply "
-                         "(e.g. the generated fixes_suggested.yaml). "
-                         "Merged with any 'fixes:' already in the config.")
+                    help="YAML file of fixes to apply (merged with config 'fixes:' section).")
     fx.add_argument("--accept-fixes", action="store_true",
-                    help="Automatically load fixes_suggested.yaml from the "
-                         "report directory (equivalent to "
-                         "--fixes-file <report_dir>/fixes_suggested.yaml).")
+                    help="Load fixes.yaml from the report directory and apply entries "
+                         "marked 'applied: true'. Marks them as applied in the file. "
+                         "Edit fixes.yaml to set applied: true for the entries you want, "
+                         "then re-run with this flag. Use --apply-all-fixes to apply "
+                         "everything regardless of the applied flag.")
+    fx.add_argument("--apply-all-fixes", action="store_true",
+                    help="Like --accept-fixes but applies ALL entries in fixes.yaml "
+                         "regardless of the applied flag. Useful to accept all suggestions "
+                         "in one shot without editing the file.")
 
     tw = parser.add_argument_group("Thalweg analysis")
     tw.add_argument("--thalweg", action="store_true", default=None,
@@ -484,7 +522,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(message)s",
+        format="%(levelname)-8s %(asctime)s  %(message)s",
+        datefmt="%H:%M:%S",
         stream=sys.stdout,
         force=True,  # override any handlers set by imported libraries
     )
@@ -554,6 +593,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         # Resolve path relative to config file
         _cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else "."
         _thalweg_boundaries_csv = os.path.join(_cfg_dir, _thalweg_boundaries_csv)
+    _bbox_pct_raw = _tw_cfg.get("bbox_depth_percentile")
+    bbox_depth_percentile = float(_bbox_pct_raw) if _bbox_pct_raw is not None else None
     _thalweg_default = bool(_tw_cfg.get("enabled", bool(user_waypoints_cfg)))
     run_thalweg = (not args.no_thalweg) and (args.thalweg or _thalweg_default)
     # Mode B (boundary auto-detection) is off by default — it relies on
@@ -588,23 +629,32 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     os.makedirs(report_dir, exist_ok=True)
 
-    # Path to the auto-generated suggestions file (needed for key resolution)
-    _suggested_yaml = os.path.join(report_dir, "fixes_suggested.yaml")
+    # Path to the fixes file (new dict format with applied: true/false)
+    _fixes_yaml = os.path.join(report_dir, "fixes.yaml")
 
-    # Load extra fixes from --fixes-file or --accept-fixes
+    # Load extra fixes from --fixes-file / --accept-fixes / --apply-all-fixes
     fixes_file = args.fixes_file
-    if not fixes_file and args.accept_fixes:
-        fixes_file = _suggested_yaml
+    _accept_selected = args.accept_fixes        # only applied: true entries
+    _apply_all       = getattr(args, "apply_all_fixes", False)  # all entries
+    if not fixes_file and (_accept_selected or _apply_all):
+        fixes_file = _fixes_yaml
     if fixes_file:
         if not os.path.exists(fixes_file):
             parser.error(f"fixes file not found: {fixes_file}")
-        extra = _load_yaml(fixes_file).get("fixes") or []
+        _all_extra = _load_fixes_yaml(fixes_file)
+        if _accept_selected and not _apply_all:
+            # Respect the applied flag: only load entries marked applied: true
+            extra = [f for f in _all_extra if f.get("applied", False)]
+            logger.info("  Loaded %d fix(es) with applied:true from %s (skipped %d)",
+                        len(extra), fixes_file, len(_all_extra) - len(extra))
+        else:
+            extra = _all_extra
+            logger.info("  Loaded %d fix(es) from %s", len(extra), fixes_file)
         fixes_list = fixes_list + extra
-        logger.info(f"Loaded {len(extra)} fix(es) from {fixes_file}")
 
-    # Resolve key-only entries (e.g. - key: b001) against fixes_suggested.yaml
+    # Resolve key-only entries (e.g. - key: b001) against fixes.yaml
     try:
-        fixes_list = _resolve_fix_keys(fixes_list, _suggested_yaml)
+        fixes_list = _resolve_fix_keys(fixes_list, _fixes_yaml)
     except (FileNotFoundError, KeyError) as exc:
         parser.error(str(exc))
 
@@ -786,6 +836,28 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             tile_cells=tile_cells,
             tile_buf_deg=tile_buf_deg,
         )
+        # Bbox percentile post-pass: deepen coarse cells inside waypoint bboxes
+        if bbox_depth_percentile is not None and user_waypoints_cfg:
+            _wp_bboxes = [
+                (float(wp["bbox"][0]), float(wp["bbox"][1]),
+                 float(wp["bbox"][2]), float(wp["bbox"][3]))
+                for wp in user_waypoints_cfg if wp.get("bbox")
+            ]
+            if _wp_bboxes:
+                logger.info(
+                    "  Applying %.0f%% depth percentile in %d waypoint bbox(es) …",
+                    bbox_depth_percentile, len(_wp_bboxes),
+                )
+                _pct_min_wf = max(0.3, float(min_wf))
+                _new_depth = interpolate.apply_bbox_percentile(
+                    dst["depth"].values,
+                    dst["wet_fraction"].values,
+                    src, dst_grid, _wp_bboxes,
+                    percentile=bbox_depth_percentile,
+                    min_wet_fraction=_pct_min_wf,
+                )
+                dst["depth"].values[:] = _new_depth
+
         # Save raw post-regrid result for --skip-regrid on subsequent runs
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         dst.to_netcdf(raw_regrid_cache)
@@ -914,9 +986,19 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # Run first so fixes affect which cells are kept by basin removal and
     # which interfaces are checked by strait detection.
     # ------------------------------------------------------------------
+    # Save pre-fix depths so thalweg plots can show the original raw profile.
+    _depth_before_fixes: np.ndarray | None = None
+    _set_depth_overrides: list[tuple[int, int, float]] = []  # (row, col, value)
+
     if fixes_list:
         logger.info(f"\n[4a] Applying {len(fixes_list)} fix(es) from config …")
+        _depth_before_fixes = dst["depth"].values.copy()
         dst, applied_fixes = analysis.apply_fixes(dst, fixes_list)
+        # Collect set_depth/open_cell overrides so the LP smoother can be told
+        # not to shallow these cells (pin_mask passed to smooth_rx0).
+        for af in applied_fixes:
+            if af.get("action") in ("set_depth", "open_cell") and np.isfinite(af.get("value", float("nan"))):
+                _set_depth_overrides.append((int(af["row"]), int(af["col"]), float(af["value"])))
         report.print_table({"fixes applied": len(applied_fixes)}, title="User fixes")
         report.save_csv(applied_fixes, os.path.join(report_dir, pfx + "04a_fixes_applied.csv"))
         rpt.add_section(
@@ -924,6 +1006,11 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             text=f"{len(applied_fixes)} fix(es) applied from configuration.",
             table_rows=applied_fixes,
         )
+        # When --apply-all-fixes is used, mark every entry as applied: true.
+        # For --accept-fixes, entries were already applied: true — no action needed.
+        if _apply_all and os.path.exists(_fixes_yaml):
+            n_marked = report.mark_all_applied(_fixes_yaml)
+            logger.info("      marked %d fix(es) as applied in %s", n_marked, _fixes_yaml)
     else:
         logger.info("\n[4a] No fixes configured — skipping.")
 
@@ -1029,7 +1116,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "sit between two or more disconnected wet basins.  "
                 "These were forced to land by `regridding.min_wet_fraction`.  "
                 "Applying an `open_cell` fix restores the connection.  "
-                "Suggested fixes are included in `fixes_suggested.yaml`."
+                "Suggested fixes are included in `fixes.yaml`."
             ),
             table=bridge_sum,
         )
@@ -1043,7 +1130,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # basins or enclosed seas.
     # ------------------------------------------------------------------
     logger.info("\n[4d/6] Detecting narrow straits …")
-    fixes_yaml_path = os.path.join(report_dir, "fixes_suggested.yaml")
+    fixes_yaml_path = os.path.join(report_dir, "fixes.yaml")
     if src is None:
         logger.info("      Skipped (--skip-regrid: fine source not available; see previous report).")
         strait_records = []
@@ -1091,7 +1178,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         if strait_sum.get("BLOCKED", 0):
             warn_msgs.append(
                 f"{strait_sum['BLOCKED']} BLOCKED interface(s) — no fine wet path found. "
-                "Review `fixes_suggested.yaml` in the report directory, then re-run with --accept-fixes."
+                "Review `fixes.yaml` in the report directory, then re-run with --accept-fixes."
             )
         if strait_sum.get("SILL_DEFICIT", 0):
             warn_msgs.append(
@@ -1105,8 +1192,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 "sill-depth deficit, and connectivity breaks. "
                 "Runs after basin removal so only connected-ocean interfaces are checked.\n\n"
                 f"Suggested fixes written to `{fixes_yaml_path}`. "
-                "To adopt: copy the relevant entries into the `fixes:` section of your YAML "
-                "config and re-run."
+                "To adopt: re-run with ``--accept-fixes`` to apply all suggestions, "
+                "or copy selected entries into the ``fixes:`` section of your YAML config."
             ),
             table=strait_sum,
             images=[straits_plot],
@@ -1169,7 +1256,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             text=(
                 f"Set `analysis.max_section_profiles: {n_total_straits}` in your YAML "
                 "config to generate profiles for all flagged interfaces. "
-                "All interfaces are listed in the straits CSV and `fixes_suggested.yaml`."
+                "All interfaces are listed in the straits CSV and `fixes.yaml`."
             ),
         )
 
@@ -1195,12 +1282,23 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
             np.pad(rx0_u_b, ((0, 0), (0, 1))),
             np.pad(rx0_v_b, ((0, 1), (0, 0))),
         )
+        # Pin mask: cells deepened by set_depth/open_cell fixes must not be
+        # shallowed by the LP — it must deepen their neighbours instead.
+        _pin_mask: np.ndarray | None = None
+        if _set_depth_overrides:
+            _pin_mask = np.zeros(mask_arr.shape, dtype=bool)
+            for _row, _col, _ in _set_depth_overrides:
+                _pin_mask[_row, _col] = True
+            logger.info("  Pinning %d fixed cell(s) against LP shallowing",
+                        len(_set_depth_overrides))
+
         for rx0_val in sorted(rx0_list, reverse=True):   # coarsest first
             smooth_var = _smooth_var_name(rx0_val)
             logger.info(f"\n[5/6] rx0 smoothing (target={rx0_val}, variable → '{smooth_var}') …")
             t0 = time.time()
             depth_smooth, corrections = smoothmod.smooth_rx0(depth_arr, mask_arr,
-                                                              rx0=rx0_val)
+                                                              rx0=rx0_val,
+                                                              pin_mask=_pin_mask)
             rx0_u_a, rx0_v_a = smoothmod.compute_rx0(depth_smooth, mask_arr)
             smooth_sum = smoothmod.smooth_summary(
                 depth_arr, depth_smooth, mask_arr, corrections, rx0_val
@@ -1311,10 +1409,14 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                     _thalweg_src, dst, user_waypoints_cfg,
                 )
                 thalweg_records.extend(tw_c)
-                logger.info("      waypoints:     %d thalweg(s)", len(tw_c))
+                _tw_c_ok   = sum(1 for t in tw_c if not t.get("failed"))
+                _tw_c_fail = len(tw_c) - _tw_c_ok
+                logger.info("      waypoints:     %d thalweg(s)%s",
+                            _tw_c_ok,
+                            f", {_tw_c_fail} failed" if _tw_c_fail else "")
 
             # Add one smoothed-coarse profile per rx0 variant.
-            # dst still holds raw depths; smooth depths are in smooth_variants.
+            # dst still holds raw (fixed) depths; smooth depths are in smooth_variants.
             if smooth_variants and thalweg_records:
                 _sm_pairs = [(_smooth_var_name(rv), ds)
                              for rv, ds, _ in smooth_variants]
@@ -1322,12 +1424,22 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 logger.info("      added %d smooth variant(s) to each thalweg",
                             len(_sm_pairs))
 
-        logger.info("      total: %d thalweg(s) in %.1f s",
-                    len(thalweg_records), time.time() - t0)
+            # Add pre-fix raw profile so the plot shows what changed.
+            if _depth_before_fixes is not None and thalweg_records:
+                thalwegmod.add_prefixes_coarse(thalweg_records, dst,
+                                               _depth_before_fixes, label="pre-fix raw")
+                logger.info("      added pre-fix raw profile to each thalweg")
+
+        _tw_ok_total   = sum(1 for t in thalweg_records if not t.get("failed"))
+        _tw_fail_total = len(thalweg_records) - _tw_ok_total
+        logger.info("      total: %d thalweg(s)%s in %.1f s",
+                    _tw_ok_total,
+                    f" + {_tw_fail_total} failed" if _tw_fail_total else "",
+                    time.time() - t0)
 
         thalwegmod.print_thalweg_table(thalweg_records)
 
-        # Suggest set_depth fixes; merge into fixes_suggested.yaml with tw### keys
+        # Suggest set_depth fixes; merge into fixes.yaml with tw### keys
         _depth_fixes = thalwegmod.suggest_depth_fixes(thalweg_records, dst)
         if _depth_fixes:
             _clean = [{k: v for k, v in r.items() if not k.startswith("_")}
@@ -1346,7 +1458,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
         _fixes_note = (
             f"  {len(_depth_fixes)} set_depth suggestion(s) (keys ``tw001``…) "
-            f"appended to ``fixes_suggested.yaml``."
+            f"appended to ``fixes.yaml``."
             if _depth_fixes else ""
         )
         rpt.add_section(
@@ -1371,6 +1483,15 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 tw, _thalweg_src, dst,
                 png_path=os.path.join(report_dir, img),
             )
+            if tw.get("failed"):
+                rpt.add_section(
+                    f"Thalweg: {tw_name}",
+                    text=(f"Category: {cat}.  **FAILED** — {tw.get('failed_reason', '')}.\n"
+                          "Adjust the bbox or add via points and re-run."),
+                    images=[img],
+                    warnings=[f"No thalweg computed: {tw.get('failed_reason', '')}"],
+                )
+                continue
             _tw_detail: list[dict] = []
             _fine_sill = _fmt(tw["fine"]["sill_depth"])
             _tw_detail.append({
@@ -1580,6 +1701,22 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
 
     report_md = os.path.join(report_dir, pfx + "report.md")
     rpt.write(report_md)
+
+    # rx0 summary table — raw fixed field + all smoothed variants.
+    _rx0_mask = dst["mask"].values
+    _rx0_raw_u, _rx0_raw_v = smoothmod.compute_rx0(
+        np.where(_rx0_mask, dst["depth"].values, 0.0), _rx0_mask
+    )
+    _rx0_summary: dict[str, str] = {
+        "depth (fixed raw)": f"{max(float(_rx0_raw_u.max()), float(_rx0_raw_v.max())):.4f}",
+    }
+    for rx0_val, d_smooth, _ in smooth_variants:
+        _var = _smooth_var_name(rx0_val)
+        _ru, _rv = smoothmod.compute_rx0(d_smooth, _rx0_mask)
+        _max = max(float(_ru.max()), float(_rv.max()))
+        _ok = "OK" if _max <= rx0_val + 1e-6 else "VIOLATED"
+        _rx0_summary[_var] = f"{_max:.4f}  (target <= {rx0_val:.2f})  [{_ok}]"
+    report.print_table(_rx0_summary, title="rx0 summary")
 
     logger.info(f"\nDone.")
     logger.info(f"  Output NetCDF : {output_file}")

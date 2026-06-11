@@ -173,116 +173,245 @@ def save_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
         writer.writerows(rows)
 
 
-def save_fixes_yaml(
+def update_fixes_yaml(
     records: list[dict],
     path: str | Path,
     bridge_records: list[dict] | None = None,
     thalweg_fixes: list[dict] | None = None,
 ) -> None:
-    """Write suggested fixes grouped by cause (BLOCKED → SILL_DEFICIT → AREA_DEFICIT → LAND_BRIDGE → THALWEG).
+    """Merge new fix suggestions into fixes.yaml, preserving applied flags.
 
-    Each entry gets a short ``key:`` field (e.g. ``b001``, ``s001``, ``a001``,
-    ``lb001``, ``tw001``).  Keys can be referenced directly from the ``fixes:``
-    section of your config YAML — the full fix is resolved automatically at run
-    time:
+    Each entry has an ``applied`` field (default ``false``).  Set it to
+    ``true`` in the file to have the fix applied on the next run.  Entries
+    with ``applied: true`` are kept permanently as an audit trail even when
+    the underlying deficit is resolved.  Unapplied entries that are no longer
+    suggested are removed automatically.
 
-    .. code-block:: yaml
+    Example fixes.yaml entry::
 
-        fixes:
-          - key: b001    # resolved from fixes_suggested.yaml at run time
-          - key: tw001
-
-    ``_note`` lines are prefixed with ``#`` so they are treated as YAML
-    comments and are ignored by the loader.
+        b001:
+          lon: 10.123
+          lat: 55.456
+          action: open_cell
+          depth: 15.0
+          applied: false
+          comment: "BLOCKED — no fine wet path"
     """
+    import yaml as _yaml
+    import re as _re
+    import unicodedata as _ud
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Key prefix per category
-    _key_prefix = {"BLOCKED": "b", "SILL_DEFICIT": "s", "AREA_DEFICIT": "a",
-                   "LAND_BRIDGE": "lb", "THALWEG": "tw"}
+    def _slug(name: str) -> str:
+        ascii_name = _ud.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+        return _re.sub(r"[^a-z0-9]+", "_", ascii_name.lower()).strip("_")
 
-    # Build per-category lists in priority order (each entry gets a key)
-    groups: dict[str, list[dict]] = {
-        "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [],
-        "LAND_BRIDGE": [], "THALWEG": [],
+    _key_prefix = {"BLOCKED": "b", "SILL_DEFICIT": "s", "AREA_DEFICIT": "a",
+                   "LAND_BRIDGE": "lb"}
+    _cat_desc = {
+        "BLOCKED":      "No fine wet path — open_cell to reconnect",
+        "SILL_DEFICIT": "Coarse sill too shallow — set_depth to fine-grid sill",
+        "AREA_DEFICIT": "Cross-section under-represented — deepen to improve transport",
+        "LAND_BRIDGE":  "Land cell (wet_frac > 0) between disconnected basins — open_cell",
+    }
+
+    # ── flat suggestions (strait / bridge fixes) ─────────────────────────────
+    flat_groups: dict[str, list[dict]] = {
+        "BLOCKED": [], "SILL_DEFICIT": [], "AREA_DEFICIT": [], "LAND_BRIDGE": [],
     }
     for r in records:
         cat = r["category"]
         if cat == "BLOCKED":
-            groups["BLOCKED"].append({"lon": r["lon"], "lat": r["lat"],
-                                      "action": "open_cell", "depth": r["sill_depth_fine"],
-                                      "_note": "BLOCKED — no fine wet path"})
+            flat_groups["BLOCKED"].append({"lon": r["lon"], "lat": r["lat"],
+                                           "action": "open_cell", "depth": r["sill_depth_fine"],
+                                           "comment": "BLOCKED — no fine wet path"})
         elif cat == "SILL_DEFICIT":
-            groups["SILL_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
-                                           "action": "set_depth", "value": r["sill_depth_fine"],
-                                           "_note": f"SILL_DEFICIT — sill_ratio={r['sill_ratio']}"})
+            flat_groups["SILL_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
+                                                "action": "set_depth", "value": r["sill_depth_fine"],
+                                                "comment": f"SILL_DEFICIT — sill_ratio={r['sill_ratio']:.2f}"})
         elif cat == "AREA_DEFICIT":
-            groups["AREA_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
-                                           "action": "set_depth",
-                                           "value": round(r["sill_depth_fine"] * 0.9, 1),
-                                           "_note": f"AREA_DEFICIT — area_ratio={r['area_ratio']}"})
-
+            flat_groups["AREA_DEFICIT"].append({"lon": r["lon"], "lat": r["lat"],
+                                                "action": "set_depth",
+                                                "value": round(r["sill_depth_fine"] * 0.9, 1),
+                                                "comment": f"AREA_DEFICIT — area_ratio={r['area_ratio']:.2f}"})
     for r in (bridge_records or []):
-        groups["LAND_BRIDGE"].append({
+        flat_groups["LAND_BRIDGE"].append({
             "lon": r["lon"], "lat": r["lat"],
             "action": "open_cell", "depth": r["estimated_depth"],
-            "_note": (
-                f"LAND_BRIDGE — wet_fraction={r['wet_fraction']}, "
-                f"bridges {r['n_components']} basin(s), "
-                f"estimated depth {r['estimated_depth']} m"
-            ),
+            "comment": (f"LAND_BRIDGE — wet_fraction={r['wet_fraction']:.2f}, "
+                        f"bridges {r['n_components']} basin(s), "
+                        f"estimated depth {r['estimated_depth']} m"),
         })
 
+    new_flat: dict[str, dict] = {}
+    for cat, fixes in flat_groups.items():
+        pfx = _key_prefix[cat]
+        for idx, fix in enumerate(fixes, start=1):
+            new_flat[f"{pfx}{idx:03d}"] = fix
+
+    # ── thalweg suggestions: nested by waypoint ───────────────────────────────
+    # new_tw[group_key] = {"wp_name": ..., "entries": [fix, ...]}
+    new_tw: dict[str, dict] = {}
     for r in (thalweg_fixes or []):
-        groups["THALWEG"].append({
-            "lon":    r["lon"],
-            "lat":    r["lat"],
-            "action": r["action"],
-            "value":  r["value"],
-            "_note":  r.get("comment", "THALWEG — coarse cell too shallow along thalweg path"),
+        wp_name = r.get("thalweg_name", "thalweg")
+        gk = f"tw_{_slug(wp_name)}"
+        if gk not in new_tw:
+            new_tw[gk] = {"wp_name": wp_name, "entries": []}
+        new_tw[gk]["entries"].append({
+            "lon":     r["lon"],
+            "lat":     r["lat"],
+            "action":  r["action"],
+            "value":   r["value"],
+            "comment": r.get("comment", "THALWEG — coarse cell too shallow"),
         })
 
-    def _write_fix(fh, key: str, fix: dict) -> None:
-        fh.write(f"  - key: {key}\n")
-        fh.write(f"    lon: {fix['lon']}\n")
-        fh.write(f"    lat: {fix['lat']}\n")
-        fh.write(f"    action: {fix['action']}\n")
-        if "value" in fix:
-            fh.write(f"    value: {fix['value']}\n")
-        if "depth" in fix:
-            fh.write(f"    depth: {fix['depth']}\n")
-        fh.write(f"    # {fix['_note']}\n")
+    # ── read existing file ────────────────────────────────────────────────────
+    existing_flat: dict[str, dict] = {}
+    # Full existing thalweg group data — preserved verbatim when a group is
+    # not regenerated (e.g. step-4d call without thalweg_fixes), so that
+    # user-set applied flags and entries are never silently dropped.
+    existing_tw: dict[str, dict] = {}  # gk → {applied, wp_name, entries}
+    if path.exists():
+        with open(path) as f:
+            data = _yaml.safe_load(f) or {}
+        raw = data.get("fixes") or {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if not isinstance(v, dict):
+                    continue
+                if "lon" in v and "lat" in v:
+                    existing_flat[str(k)] = dict(v)
+                elif str(k).startswith("tw_") and "applied" in v:
+                    # Reconstruct entry list from numbered sub-keys
+                    _entries = [dict(sv) for sk, sv in v.items()
+                                if sk != "applied" and isinstance(sv, dict)
+                                and "lon" in sv and "lat" in sv]
+                    # Recover a display name by un-slugging the key
+                    _wp_display = str(k)[3:].replace("_", " ").title()
+                    existing_tw[str(k)] = {
+                        "applied": bool(v.get("applied", False)),
+                        "wp_name": _wp_display,
+                        "entries": _entries,
+                    }
 
-    category_desc = {
-        "BLOCKED":      "No fine wet path — open_cell to reconnect",
-        "SILL_DEFICIT": "Coarse sill too shallow — set_depth to fine-grid sill",
-        "AREA_DEFICIT": "Cross-section under-represented — deepen to improve transport",
-        "LAND_BRIDGE":  "Land cell (wet_frac > 0) between disconnected basins — open_cell to reconnect",
-        "THALWEG":      "Coarse cell too shallow along thalweg path — set_depth to fine-grid max",
-    }
+    # ── merge flat entries ────────────────────────────────────────────────────
+    _tol = 0.05
+    matched_new: set[str] = set()
+    merged_flat: dict[str, dict] = {}
+
+    for ex_key, ex_entry in existing_flat.items():
+        ex_lon = float(ex_entry.get("lon", 0))
+        ex_lat = float(ex_entry.get("lat", 0))
+        best_key: str | None = None
+        best_d = _tol
+        for new_key, new_entry in new_flat.items():
+            if new_key in matched_new:
+                continue
+            d = abs(float(new_entry["lon"]) - ex_lon) + abs(float(new_entry["lat"]) - ex_lat)
+            if d < best_d:
+                best_d, best_key = d, new_key
+        if best_key:
+            merged_flat[ex_key] = {**new_flat[best_key],
+                                   "applied": bool(ex_entry.get("applied", False))}
+            matched_new.add(best_key)
+        elif ex_entry.get("applied", False):
+            merged_flat[ex_key] = ex_entry
+    for new_key, new_entry in new_flat.items():
+        if new_key not in matched_new:
+            merged_flat[new_key] = {**new_entry, "applied": False}
+
+    # ── write ─────────────────────────────────────────────────────────────────
+    def _write_flat_entry(fh, key: str, entry: dict) -> None:
+        fh.write(f"  {key}:\n")
+        fh.write(f"    lon:     {entry['lon']}\n")
+        fh.write(f"    lat:     {entry['lat']}\n")
+        fh.write(f"    action:  {entry['action']}\n")
+        if "value" in entry:
+            fh.write(f"    value:   {entry['value']}\n")
+        if "depth" in entry:
+            fh.write(f"    depth:   {entry['depth']}\n")
+        fh.write(f"    applied: {'true' if entry.get('applied') else 'false'}\n")
+        fh.write(f"    comment: \"{entry.get('comment', '')}\"\n")
+
+    def _write_tw_group(fh, gk: str, wp_name: str,
+                        entries: list[dict], applied: bool) -> None:
+        fh.write(f"\n  # --- THALWEG: {wp_name} ---\n")
+        fh.write(f"  {gk}:\n")
+        fh.write(f"    applied: {'true' if applied else 'false'}"
+                 f"   # set true to apply all {wp_name} fixes\n")
+        for idx, e in enumerate(entries, start=1):
+            fh.write(f"    \"{idx:03d}\":\n")
+            fh.write(f"      lon:     {e['lon']}\n")
+            fh.write(f"      lat:     {e['lat']}\n")
+            fh.write(f"      action:  {e['action']}\n")
+            if "value" in e:
+                fh.write(f"      value:   {e['value']}\n")
+            if "depth" in e:
+                fh.write(f"      depth:   {e['depth']}\n")
+            fh.write(f"      comment: \"{e.get('comment', '')}\"\n")
 
     with open(path, "w") as fh:
-        fh.write("# Suggested fixes — generated automatically; do not edit keys.\n")
-        fh.write("# Option A: apply all at once:\n")
-        fh.write("#   bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes\n")
-        fh.write("# Option B: paste selected keys into your config 'fixes:' section:\n")
-        fh.write("#   fixes:\n")
-        fh.write("#     - key: b001\n")
-        fh.write("#     - key: lb001\n")
-        fh.write("#     - key: tw001\n")
-        fh.write("# Keys are resolved from this file at run time.\n")
-        fh.write("# '_note' lines are comments and are ignored by the loader.\n\n")
+        fh.write("# fixes.yaml — edit applied: true/false, then re-run with --accept-fixes.\n")
+        fh.write("# Thalweg groups: set applied: true on the group key to apply all fixes in it.\n\n")
         fh.write("fixes:\n")
-        for cat, fixes in groups.items():
-            if not fixes:
-                continue
-            pfx = _key_prefix[cat]
-            item_word = "interface(s)" if cat != "LAND_BRIDGE" else "cell(s)"
-            fh.write(f"\n  # --- {cat}: {category_desc[cat]} ({len(fixes)} {item_word}) ---\n")
-            for idx, fix in enumerate(fixes, start=1):
-                key = f"{pfx}{idx:03d}"
-                _write_fix(fh, key, fix)
+
+        cur_cat: str | None = None
+        for key, entry in merged_flat.items():
+            cat = next((c for c, p in _key_prefix.items() if key.startswith(p)), "OTHER")
+            if cat != cur_cat:
+                fh.write(f"\n  # --- {cat}: {_cat_desc.get(cat, '')} ---\n")
+                cur_cat = cat
+            _write_flat_entry(fh, key, entry)
+
+        # Write fresh thalweg groups (with preserved applied flags).
+        for gk, grp in new_tw.items():
+            applied = existing_tw.get(gk, {}).get("applied", False)
+            _write_tw_group(fh, gk, grp["wp_name"], grp["entries"], applied)
+
+        # Re-emit existing groups not in new_tw so user edits are never lost.
+        for gk, grp in existing_tw.items():
+            if gk not in new_tw:
+                _write_tw_group(fh, gk, grp["wp_name"], grp["entries"],
+                                grp["applied"])
+
+
+save_fixes_yaml = update_fixes_yaml  # backward-compat alias
+
+
+def mark_all_applied(path: str | Path) -> int:
+    """Set applied: true for every entry in fixes.yaml and write back.
+
+    Called after --accept-fixes so the audit trail reflects which fixes
+    were actually applied in this run.  Returns the number of entries updated.
+    """
+    import yaml as _yaml
+
+    path = Path(path)
+    if not path.exists():
+        return 0
+    with open(path) as f:
+        data = _yaml.safe_load(f) or {}
+    raw = data.get("fixes") or {}
+    if not isinstance(raw, dict):
+        return 0
+    # Re-read via update_fixes_yaml to preserve all formatting logic,
+    # but we need a simpler in-place rewrite here.
+    count = 0
+    with open(path) as f:
+        lines = f.readlines()
+    out: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("applied:"):
+            indent = len(line) - len(line.lstrip())
+            out.append(" " * indent + "applied: true\n")
+            count += 1
+        else:
+            out.append(line)
+    with open(path, "w") as f:
+        f.writelines(out)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -1408,6 +1537,105 @@ def _save_straits_html(
     fig.write_html(str(png_path.with_suffix(".html")))
 
 
+def _plot_thalweg_failed(record: dict[str, Any], coarse_ds: Any,
+                         png_path: str | Path) -> None:
+    """Single-panel map showing the bbox and detected stops for a failed thalweg."""
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        import cmocean
+    except ImportError:
+        return
+
+    name   = record.get("name", "Thalweg")
+    bbox   = record.get("bbox")         # [lo_min, lo_max, la_min, la_max] or None
+    stops  = record.get("stops_lonlat") or []
+    reason = record.get("failed_reason", "unknown reason")
+
+    def _get_coord(ds: Any, candidates: list[str]) -> Any:
+        for c in candidates:
+            if c in ds.coords or c in ds:
+                arr = ds[c].values if hasattr(ds[c], "values") else ds[c]
+                if arr.ndim >= 1:
+                    return arr
+        return None
+
+    _clon_raw = _get_coord(coarse_ds, ["lon", "longitude", "lont", "nav_lon"])
+    _clat_raw = _get_coord(coarse_ds, ["lat", "latitude", "latt", "nav_lat"])
+    _cdepth   = coarse_ds["depth"].values if hasattr(coarse_ds["depth"], "values") else coarse_ds["depth"]
+    _cmask    = coarse_ds["mask"].values  if hasattr(coarse_ds["mask"],  "values") else coarse_ds["mask"]
+    coarse_depth_bg = np.where(_cmask.astype(bool), _cdepth, np.nan)
+    if _clon_raw is not None and _clat_raw is not None:
+        if _clon_raw.ndim == 1 and _clat_raw.ndim == 1:
+            coarse_lon2d, coarse_lat2d = np.meshgrid(_clon_raw, _clat_raw)
+        else:
+            coarse_lon2d, coarse_lat2d = _clon_raw, _clat_raw
+    else:
+        coarse_lon2d = coarse_lat2d = None
+
+    geo = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(8, 6))
+    ax  = fig.add_subplot(1, 1, 1, projection=geo)
+
+    # extent: use bbox if given, else full coarse domain
+    if bbox is not None:
+        lo0, lo1, la0, la1 = bbox
+        margin = max((lo1 - lo0) * 0.25, (la1 - la0) * 0.25, 0.3)
+        ext = [lo0 - margin, lo1 + margin, la0 - margin, la1 + margin]
+    elif coarse_lon2d is not None:
+        ext = [float(coarse_lon2d.min()), float(coarse_lon2d.max()),
+               float(coarse_lat2d.min()), float(coarse_lat2d.max())]
+    else:
+        ext = [-180, 180, -90, 90]
+    ax.set_extent(ext, crs=geo)
+
+    if coarse_lon2d is not None:
+        vmax = float(np.nanmax(coarse_depth_bg)) if np.isfinite(coarse_depth_bg).any() else 1.0
+        pcm = ax.pcolormesh(coarse_lon2d, coarse_lat2d, coarse_depth_bg,
+                            cmap=cmocean.cm.deep, vmin=0, vmax=vmax,
+                            shading="auto", transform=geo)
+        plt.colorbar(pcm, ax=ax, label="Depth (m)", shrink=0.75, pad=0.02)
+
+    ax.add_feature(cfeature.LAND,      facecolor="#e8dcc8", zorder=2)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.5,        zorder=3)
+    _gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="grey",
+                       alpha=0.5, x_inline=False, y_inline=False)
+    _gl.top_labels   = False
+    _gl.right_labels = False
+
+    # bbox rectangle
+    if bbox is not None:
+        lo0, lo1, la0, la1 = bbox
+        rect = mpatches.FancyBboxPatch(
+            (lo0, la0), lo1 - lo0, la1 - la0,
+            boxstyle="square,pad=0", linewidth=2, edgecolor="crimson",
+            facecolor="none", linestyle="--", transform=geo, zorder=5,
+        )
+        ax.add_patch(rect)
+
+    # stops
+    colours = ["limegreen", "dodgerblue", "gold", "magenta"]
+    markers = ["^", "s", "D", "o"]
+    for si, (slo, sla) in enumerate(stops):
+        ax.plot(slo, sla, marker=markers[si % len(markers)], ms=9,
+                color=colours[si % len(colours)], markeredgecolor="k",
+                markeredgewidth=0.5, linestyle="none",
+                transform=geo, zorder=9,
+                label=f"Stop {si+1}: ({slo:.2f},{sla:.2f})")
+
+    ax.set_title(f"{name} — FAILED\n{reason}", fontsize=10, color="crimson")
+    if stops:
+        ax.legend(fontsize=7, loc="best", framealpha=0.85)
+    fig.tight_layout()
+    png_path = Path(png_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_thalweg_comparison(
     record: dict[str, Any],
     fine_ds: Any,
@@ -1436,9 +1664,14 @@ def plot_thalweg_comparison(
     import cartopy.feature as cfeature
     import cmocean
 
+    name  = record.get("name", "Thalweg")
+
+    if record.get("failed"):
+        _plot_thalweg_failed(record, coarse_ds, png_path)
+        return
+
     fine  = record["fine"]
     coarse = record["coarse"]
-    name  = record.get("name", "Thalweg")
 
     # ── helper ──────────────────────────────────────────────────────────────
     def _get_coord(ds: Any, candidates: list[str]) -> Any:
@@ -1584,15 +1817,29 @@ def plot_thalweg_comparison(
     # ── right panel: depth profile ───────────────────────────────────────────
     ax_prof.plot(fine["dist_km"],   fine["depth"],   color="steelblue",
                  lw=1.5, label="Fine")
+
+    # Pre-fix raw coarse (only present when fixes have been applied)
+    _prefixes = record.get("prefixes_coarse")
+    if _prefixes is not None:
+        ax_prof.scatter(
+            np.asarray(_prefixes["dist_km"], dtype=float),
+            np.asarray(_prefixes["depth"],   dtype=float),
+            color="lightcoral", s=3, zorder=3,
+            label=f"{_prefixes.get('label', 'pre-fix raw')} coarse",
+        )
+
+    # Raw coarse after fixes (always present)
+    _raw_label = "Fixed raw coarse" if _prefixes is not None else "Raw coarse"
     ax_prof.scatter(coarse["dist_km"], coarse["depth"], color="darkorange",
-                    s=4, zorder=4, label="Raw coarse")
+                    s=4, zorder=4, label=_raw_label)
 
     _smooth_colors = ["forestgreen", "crimson", "purple", "saddlebrown"]
     for _si, (_lbl, _sc) in enumerate(record.get("smooth_coarse", {}).items()):
         _sc_dep = np.asarray(_sc["depth"], dtype=float)
         _sc_dist = np.asarray(_sc["dist_km"], dtype=float)
         _col = _smooth_colors[_si % len(_smooth_colors)]
-        ax_prof.plot(_sc_dist, _sc_dep, color=_col, lw=1.2,
+        ax_prof.plot(_sc_dist, _sc_dep, color=_col, lw=1.4,
+                     linestyle="--", zorder=5,
                      label=f"{_lbl} coarse")
 
     sill_d = record.get("sill_depth_m")

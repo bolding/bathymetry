@@ -214,9 +214,10 @@ output:
   file: northsea_0p05deg.nc
   report_dir: ./report/northsea_0p05deg
 
-# After the first run, re-run with --accept-fixes to apply all suggested fixes,
-# or --fixes-file <path> for an explicit fixes file.
-# To hand-pick fixes, paste selected entries here.
+# After the first run, fixes.yaml is written to the report directory.
+# Set applied: true on entries you want, then re-run with --accept-fixes.
+# Use --apply-all-fixes to accept everything at once.
+# To hand-pick individual fixes, embed them here directly.
 # Actions: set_depth, open_cell, close_cell
 # fixes:
 #   - lon: 5.3
@@ -390,7 +391,7 @@ different `rx0` value adds a new `depth_rx0_*` variable.
 | `{name}_04d_straits.png/.html` | Strait analysis map (interactive) |
 | `{name}_04d_straits.csv` | Flagged interface table |
 | `{name}_04d_section_*.png` | Cross-section profiles with map inset |
-| `fixes_suggested.yaml` | All suggested fixes grouped by cause (BLOCKED / SILL_DEFICIT / AREA_DEFICIT / LAND_BRIDGE) |
+| `fixes.yaml` | Suggested fixes grouped by cause; set `applied: true` and re-run with `--accept-fixes` |
 | `{name}_04e_thalweg_NNN_*.png` | Thalweg comparison panels (one per thalweg; step 4e) |
 | `{name}_05_smooth_*.png` | rx0 histogram + depth-correction map |
 | `{name}_06_final_depth.png/.html` | Final unsmoothed bathymetry (interactive) |
@@ -455,29 +456,31 @@ Paths whose fine-resolution sill is shallower than 5 m are discarded.
 
 #### Mode C — User waypoints
 
-Specify one or more named start→end pairs in your config file:
+Specify one or more named start→end pairs under the `thalweg.waypoints` key:
 
 ```yaml
-thalwegs:
-  - name: "Great Belt"
-    begin: [10.2, 55.3]
-    end:   [11.0, 55.9]
-  - name: "Little Belt"
-    begin: [9.5, 55.0]
-    via:
-      - [9.8, 55.5]   # force path through the narrow strait
-    end: [10.5, 56.5]
-  - name: "Öresund"
-    begin: [12.6, 55.4]
-    end:   [12.9, 56.1]
+thalweg:
+  boundary_thalwegs: false   # set true to enable Mode B auto-detection
+  waypoints:
+    - name: "Great Belt"
+      begin: [10.2, 55.3]
+      end:   [11.0, 55.9]
+      bbox:  [10.0, 12.0, 54.5, 56.0]   # optional bounding box for fix suggestions
+    - name: "Little Belt"
+      begin: [9.5, 55.0]
+      via:
+        - [9.8, 55.5]   # force path through the narrow strait
+      end: [10.5, 56.5]
+    - name: "Öresund"
+      begin: [12.6, 55.4]
+      end:   [12.9, 56.1]
 ```
 
 Each endpoint is snapped to the nearest wet fine-grid cell.  The
 max-bottleneck Dijkstra algorithm then finds the deepest route between the
 points.  Optional `via` points force the path through a specific location,
 useful when the deepest detour would bypass a narrow strait entirely.
-The presence of any `thalwegs:` entry in the config is sufficient to enable
-step 4e automatically.
+The presence of any `thalweg:` section in the config enables step 4e automatically.
 
 ### Output
 
@@ -486,10 +489,17 @@ Each thalweg produces a two-panel figure (`04e_thalweg_NNN_<name>.png`):
 - **Left panel — map**: fine-resolution depth as a background pcolormesh,
   the thalweg path overlaid in blue, coarse-resolution depths as a coloured
   scatter, and a triangle marker at the sill position.
-- **Right panel — depth profile**: fine-resolution depth (solid blue line) and
-  coarse-resolution depth (orange dots) plotted against along-path distance
-  (km), with dashed horizontal lines at the fine and coarse sill depths and an
-  inverted y-axis.
+- **Right panel — depth profile**: four series plotted against along-path
+  distance (km) with an inverted y-axis:
+
+  | Series | Style | When shown |
+  |--------|-------|-----------|
+  | Fine | Solid blue line | Always |
+  | Pre-fix raw coarse | Light coral dots | Only when fixes were applied in this run |
+  | Fixed raw coarse (or Raw coarse) | Orange dots | Always; labelled "Fixed" when fixes were applied |
+  | `depth_rx0_*` coarse | Dashed green line | When rx0 smoothing is enabled |
+
+  Dashed horizontal lines mark the fine and coarse sill depths.
 
 The thalweg name in the figure title and report section encodes the detection
 mode:
@@ -504,7 +514,7 @@ mode:
 ## Strait categories and land bridges
 
 The pipeline identifies four categories of connectivity problems and writes
-every suggested fix to `fixes_suggested.yaml` in the report directory.
+every suggested fix to `fixes.yaml` in the report directory.
 
 | Category | Detected at step | Meaning | Suggested fix |
 |----------|-----------------|---------|--------------|
@@ -529,27 +539,84 @@ After the first run the raw post-regrid result is cached as
 
 ```
 First run (full)
-  ↓  inspect  fixes_suggested.yaml  +  04d_straits.csv  +  04c_land_bridges.csv
+  ↓  inspect  fixes.yaml  +  04d_straits.csv  +  04c_land_bridges.csv
   ↓  choose which fixes to apply
-Re-run (fast, skip expensive regrid)
+Re-run with --skip-regrid (fast — no regrid)
   ↓  inspect result
-Re-run again (fast) until satisfied
+Re-run again until satisfied
 ```
 
-### Option A — automatic: accept all suggestions
+### `fixes.yaml` format
+
+After the first run `fixes.yaml` is written to the report directory.
+It uses a **dict** format with one entry per fix, each with an `applied` flag:
+
+```yaml
+fixes:
+
+  # --- BLOCKED: No fine wet path ---
+  b001:
+    lon: 10.751275
+    lat: 54.933333
+    action: open_cell
+    depth: 0.0
+    applied: false
+    comment: "BLOCKED — no fine wet path"
+
+  # --- THALWEG: Great Belt ---
+  tw_great_belt:
+    applied: false   # set true to apply all Great Belt fixes
+    "001":
+      lon: 10.92562
+      lat: 54.6
+      action: set_depth
+      value: 32.0
+      comment: "thalweg: Great Belt; deficit=12.1 m (37.9%)"
+```
+
+Flat entries (`b`, `s`, `a`, `lb` prefixes) each have their own `applied` flag.
+Thalweg fixes are grouped by waypoint name under a `tw_<slug>:` key with a
+single `applied` flag controlling the whole group.
+
+Entries with `applied: true` survive re-runs as an audit trail even when the
+underlying deficit is no longer detected.  Thalweg groups are preserved verbatim
+across runs so manual edits to `applied` flags are never overwritten.
+
+### Option A — apply all suggestions at once
+
+```bash
+bathymetry-regrid --config my_run.yaml --skip-regrid --apply-all-fixes
+```
+
+Applies every entry in `fixes.yaml` regardless of its `applied` flag and marks
+all entries `applied: true` in the file as an audit trail.
+
+### Option B — selective: mark entries in fixes.yaml
+
+Open `fixes.yaml` and set `applied: true` on the entries or thalweg groups you
+want.  Setting the group flag on a `tw_` entry enables all fixes in that group:
+
+```yaml
+tw_great_belt:
+  applied: true   # apply all Great Belt thalweg fixes
+  ...
+b001:
+  applied: true   # apply this specific blocked-strait fix
+  ...
+```
+
+Then re-run with `--accept-fixes`:
 
 ```bash
 bathymetry-regrid --config my_run.yaml --skip-regrid --accept-fixes
 ```
 
-Reads every entry in `fixes_suggested.yaml` (all categories, including
-LAND_BRIDGE) and applies them.
+Only the entries / groups marked `applied: true` are applied.
 
-### Option B — selective: reference chosen keys in your config
+### Option C — reference chosen keys in your config
 
-Every entry in `fixes_suggested.yaml` carries a short `key:` label
-(`b001`, `s001`, `a001`, `lb001`, …).  Open the file, pick the keys you
-want, and paste just those keys into the `fixes:` section of your config:
+Every flat entry in `fixes.yaml` carries a short key (`b001`, `s001`, `lb001`, …).
+Paste just the keys you want into the `fixes:` section of your config:
 
 ```yaml
 fixes:
@@ -558,7 +625,7 @@ fixes:
 ```
 
 The full fix (lon, lat, action, depth) is resolved automatically from
-`fixes_suggested.yaml` at run time — no need to copy coordinates.
+`fixes.yaml` at run time — no need to copy coordinates.
 
 Then re-run:
 
@@ -566,9 +633,9 @@ Then re-run:
 bathymetry-regrid --config my_run.yaml --skip-regrid
 ```
 
-### Option C — explicit file
+### Option D — explicit file
 
-Point to any YAML file that has a top-level `fixes:` list:
+Point to any YAML file that has a top-level `fixes:` dict or list:
 
 ```bash
 bathymetry-regrid --config my_run.yaml --skip-regrid --fixes-file my_fixes.yaml
@@ -579,10 +646,17 @@ bathymetry-regrid --config my_run.yaml --skip-regrid --fixes-file my_fixes.yaml
 | Action | Effect |
 |--------|--------|
 | `open_cell` | Force the cell ocean at the given depth (m); use for BLOCKED / LAND_BRIDGE |
-| `set_depth` | Force the cell ocean at the given depth (m); use for SILL_DEFICIT |
+| `set_depth` | Force the cell ocean at the given depth (m); use for SILL_DEFICIT / thalweg |
 | `close_cell` | Force the cell to land (depth=NaN, mask=0); removes a spurious wet cell |
 
 Both `open_cell` and `set_depth` accept `depth:` or `value:` as the depth key.
+
+**Haney smoothing and fixed cells:** when fixes are applied, every
+`set_depth`/`open_cell` cell is passed to `smooth_rx0()` as a `pin_mask`.
+The LP lower-bounds those corrections to ≥ 0, so the solver deepens
+neighbours rather than shallowing fixed cells.  The smoothed field therefore
+satisfies rx0 ≤ target at every interface, verified by a logged post-smooth
+check.
 
 ## Grid types
 

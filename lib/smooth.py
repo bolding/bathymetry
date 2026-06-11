@@ -76,6 +76,7 @@ def smooth_rx0(
     depth: npt.NDArray[np.float64],
     mask: npt.NDArray,
     rx0: float = 0.2,
+    pin_mask: npt.NDArray | None = None,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Smooth bathymetry by reducing the slope factor to *rx0* everywhere.
 
@@ -91,6 +92,10 @@ def smooth_rx0(
         Ocean mask (1 = ocean, 0 = land).
     rx0 : float
         Target maximum slope factor.
+    pin_mask : ndarray [ny, nx] bool, optional
+        Cells that must not be shallowed (e.g. set_depth / open_cell fixes).
+        The LP correction for these cells is constrained to >= 0, so the
+        solver deepens their neighbours rather than undoing the fix.
 
     Returns
     -------
@@ -146,13 +151,13 @@ def smooth_rx0(
 
     b[: 2 * n] = -(A_values[: 2 * n] * H[A_j[: 2 * n]]).sum(axis=1)
 
-    # Minimise sum of absolute corrections via auxiliary variable M_i >= |H'_i|
-    # LP variables: [H'_0, …, H'_{nwet-1}, M_0, …, M_{nwet-1}]
+    # Minimise sum of absolute corrections via auxiliary variable M_i >= |delta_i|
+    # LP variables: [delta_0, …, delta_{nwet-1}, M_0, …, M_{nwet-1}]
     A_j[2 * n : 2 * n + nwet, 0] = np.arange(nwet)
     A_j[2 * n : 2 * n + nwet, 1] = np.arange(nwet, 2 * nwet)
     A_j[2 * n + nwet :, :] = A_j[2 * n : 2 * n + nwet, :]
-    A_values[2 * n : 2 * n + nwet, 0] = 1.0   # H'_i - M_i <= 0
-    A_values[2 * n + nwet :, 0] = -1.0          # -H'_i - M_i <= 0
+    A_values[2 * n : 2 * n + nwet, 0] = 1.0   # delta_i - M_i <= 0
+    A_values[2 * n + nwet :, 0] = -1.0          # -delta_i - M_i <= 0
     A_values[2 * n :, 1] = -1.0
 
     c = np.zeros(2 * nwet)
@@ -162,7 +167,17 @@ def smooth_rx0(
         (A_values.ravel(), (A_i.ravel(), A_j.ravel())),
         shape=(nconstraints, 2 * nwet),
     )
-    res = scipy.optimize.linprog(c=c, A_ub=A, b_ub=b, bounds=(None, None))
+
+    # Lower bounds: pinned cells cannot be shallowed (delta >= 0);
+    # all others are unconstrained.  M variables are bounded below by 0.
+    lb_delta = np.full(nwet, None, dtype=object)
+    if pin_mask is not None:
+        pinned_flat = pin_mask[wet]
+        lb_delta[pinned_flat] = 0.0
+    bounds = [(float(lb) if lb is not None else None, None) for lb in lb_delta]
+    bounds += [(0.0, None)] * nwet   # M_i >= 0
+
+    res = scipy.optimize.linprog(c=c, A_ub=A, b_ub=b, bounds=bounds)
     if not res.success:
         raise RuntimeError(f"rx0 smoothing LP failed: {res.message}")
 

@@ -62,7 +62,7 @@ output:
 # Applied at step 4b — before basin removal and strait detection.
 # Supported types: rectangle, polygon, point, ij_rectangle, ij_point.
 thalweg:
-  boundary_thalwegs: false   # set to true to enable boundary auto-detection
+  boundary_thalwegs: true
 
 mask_regions:
   - type: ij_point

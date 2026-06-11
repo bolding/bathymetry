@@ -389,6 +389,10 @@ def print_thalweg_table(records: list[dict], title: str = "Thalweg analysis") ->
     print(sep)
 
     for i, (rec, name, mode) in enumerate(zip(records, names, modes)):
+        if rec.get("failed"):
+            print(f"  {i:>3}  {mode:<{w_mode}}  {name:<{w_name}}  {'FAILED':>10}  {'':>11}  {'':>8}"
+                  f"  ({rec.get('failed_reason', '')})")
+            continue
         fine_sill   = rec["fine"]["sill_depth"]
         coarse_sill = rec["coarse"]["sill_depth"]
         deficit     = rec.get("sill_deficit_m", float("nan"))
@@ -406,13 +410,18 @@ def thalweg_summary(records: list[dict]) -> dict:
     """Return an aggregate summary dict for a list of thalweg records."""
     if not records:
         return {"thalwegs computed": 0}
-    deficits = [r["sill_deficit_m"] for r in records if np.isfinite(r.get("sill_deficit_m", float("nan")))]
-    return {
-        "thalwegs computed":       len(records),
+    ok_recs = [r for r in records if not r.get("failed")]
+    failed  = len(records) - len(ok_recs)
+    deficits = [r["sill_deficit_m"] for r in ok_recs if np.isfinite(r.get("sill_deficit_m", float("nan")))]
+    result: dict = {
+        "thalwegs computed":       len(ok_recs),
         "max sill deficit (m)":    f"{max(deficits):.1f}" if deficits else "n/a",
         "mean sill deficit (m)":   f"{np.mean(deficits):.1f}" if deficits else "n/a",
         "with coarse > fine sill": sum(1 for d in deficits if d < 0),
     }
+    if failed:
+        result["failed (no path found)"] = failed
+    return result
 
 
 def write_thalweg_csv(record: dict, csv_path: str | None = None) -> str:
@@ -1256,6 +1265,8 @@ def add_smooth_coarse(
         depth_masked = np.where(mask2d, depth_arr, 0.0)
         tree, dep_vals = _build_coarse_tree(lon2d, lat2d, depth_masked, mask2d)
         for rec in records:
+            if rec.get("failed"):
+                continue
             fine = rec["fine"]
             c_dep = _sample_coarse(
                 fine["lon"], fine["lat"], tree, dep_vals,  # type: ignore[arg-type]
@@ -1282,6 +1293,50 @@ def add_smooth_coarse(
             }
 
 
+def add_prefixes_coarse(
+    records: list[dict],
+    dst,
+    depth_arr: npt.NDArray,
+    label: str = "pre-fix raw",
+) -> None:
+    """Sample a pre-fix (or any alternative) depth array along thalweg paths.
+
+    Stores results as ``record["prefixes_coarse"]`` so the plot can show
+    what the coarse grid looked like before fixes were applied.
+    """
+    if not records:
+        return
+
+    lon_raw = dst.lon.values
+    lat_raw = dst.lat.values
+    if lon_raw.ndim == 1 and lat_raw.ndim == 1:
+        lon2d, lat2d = np.meshgrid(lon_raw, lat_raw)
+        max_lookup = float(max(abs(np.diff(lon_raw)).mean(),
+                               abs(np.diff(lat_raw)).mean()) * 25)
+    else:
+        lon2d, lat2d = lon_raw, lat_raw
+        max_lookup = float(max(abs(np.diff(lon2d, axis=1)).mean(),
+                               abs(np.diff(lat2d, axis=0)).mean()) * 25)
+
+    mask2d    = dst["mask"].values.astype(bool)
+    depth_msk = np.where(mask2d, depth_arr, 0.0)
+    tree, dep_vals = _build_coarse_tree(lon2d, lat2d, depth_msk, mask2d)
+
+    for rec in records:
+        if rec.get("failed"):
+            continue
+        fine  = rec["fine"]
+        c_dep = _sample_coarse(
+            fine["lon"], fine["lat"], tree, dep_vals,  # type: ignore[arg-type]
+            max_dist_deg=max_lookup,
+        )
+        rec["prefixes_coarse"] = {
+            "label":   label,
+            "dist_km": fine["dist_km"],
+            "depth":   c_dep,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Depth-fix suggestions from thalweg comparison
 # ---------------------------------------------------------------------------
@@ -1292,7 +1347,7 @@ def suggest_depth_fixes(
     min_deficit_m: float = 2.0,
     min_rel_deficit: float = 0.05,
 ) -> list[dict]:
-    """Suggest deepen_by fixes for coarse cells that are too shallow along thalwegs.
+    """Suggest set_depth fixes for coarse cells that are too shallow along thalwegs.
 
     For every unique coarse cell the thalweg path visits, the maximum fine-grid
     depth among the fine path points that fall in that cell is compared to the
@@ -1341,6 +1396,8 @@ def suggest_depth_fixes(
     cell_names:   dict[int, list[str]]    = {}
 
     for rec in records:
+        if rec.get("failed"):
+            continue
         fine     = rec["fine"]
         fine_lon = np.asarray(fine["lon"],   dtype=float)
         fine_lat = np.asarray(fine["lat"],   dtype=float)
@@ -1378,16 +1435,17 @@ def suggest_depth_fixes(
             comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
                        f"blocked in coarse — fine sill={fine_max:.1f} m")
         else:
-            action  = "deepen_by"
-            value   = round(deficit, 1)
+            action  = "set_depth"
+            value   = round(fine_max, 1)
             comment = (f"thalweg: {', '.join(cell_names[uidx])}; "
                        f"deficit={deficit:.1f} m ({rel_deficit*100:.1f}%)")
         fixes.append({
-            "lon":    round(float(lon2d[row, col]), 6),
-            "lat":    round(float(lat2d[row, col]), 6),
-            "action": action,
-            "value":  value,
-            "comment": comment,
+            "lon":          round(float(lon2d[row, col]), 6),
+            "lat":          round(float(lat2d[row, col]), 6),
+            "action":       action,
+            "value":        value,
+            "comment":      comment,
+            "thalweg_name": cell_names[uidx][0],  # primary waypoint for grouping
         })
 
     logger.info("      suggest_depth_fixes: %d fix(es) with deficit >= %.0f%%",
@@ -1530,6 +1588,10 @@ def waypoint_thalwegs(
             raw_bdy    = _boundary_starts(depth_sub, domain_sub, lon_sub, lat_sub)
             if len(raw_bdy) < 2:
                 logger.warning("thalweg '%s': fewer than 2 boundary starts in bbox — skipped", name)
+                results.append({"name": name, "failed": True,
+                                 "failed_reason": "fewer than 2 boundary starts in bbox",
+                                 "bbox": [_blo0, _blo1, _bla0, _bla1],
+                                 "stops_lonlat": [], "category": "WAYPOINT"})
                 continue
             bdy_starts = [{**s, "ij": (r0b + s["ij"][0], c0b + s["ij"][1])}
                           for s in raw_bdy]
@@ -1544,6 +1606,9 @@ def waypoint_thalwegs(
                             + [(p1["lon"], p1["lat"])])
         else:
             logger.warning("thalweg '%s': needs begin/end or bbox — skipped", name)
+            results.append({"name": name, "failed": True,
+                             "failed_reason": "needs begin/end or bbox",
+                             "bbox": None, "stops_lonlat": [], "category": "WAYPOINT"})
             continue
 
         # --- 3. Build bbox mask (fall back to corridor around stops if no bbox) ---
@@ -1563,17 +1628,22 @@ def waypoint_thalwegs(
         wp_mst, wp_node_id, wp_wet_rc = _build_bottleneck_mst(src_depth, wp_mask)
 
         # --- 4. Snap stops to nearest wet fine-grid cell ---
+        _bbox_for_rec = [mlo0, mlo1, mla0, mla1]
         stop_ijs: list[tuple[int, int]] = []
         ok = True
+        _fail_reason = ""
         for slo, sla in stops_lonlat:
             ij = _nearest_ij(slo, sla)
             if ij is None:
-                logger.warning("thalweg '%s': no wet cell near (%.3f, %.3f) — skipped",
-                               name, slo, sla)
+                _fail_reason = f"no wet cell near ({slo:.3f}, {sla:.3f})"
+                logger.warning("thalweg '%s': %s — skipped", name, _fail_reason)
                 ok = False
                 break
             stop_ijs.append(ij)
         if not ok:
+            results.append({"name": name, "failed": True, "failed_reason": _fail_reason,
+                             "bbox": _bbox_for_rec, "stops_lonlat": stops_lonlat,
+                             "category": "WAYPOINT"})
             continue
 
         full_path: list[tuple[int, int]] = []
@@ -1583,13 +1653,19 @@ def waypoint_thalwegs(
         ):
             seg = _mst_path(wp_mst, wp_node_id, wp_wet_rc, a_ij, b_ij)
             if seg is None or len(seg) < 2:
-                logger.warning("thalweg '%s': no wet path between (%.3f,%.3f)→(%.3f,%.3f) "
-                               "— skipped (adjust bbox or corridor_margin)",
-                               name, a_lo, a_la, b_lo, b_la)
+                _fail_reason = (f"no wet path between ({a_lo:.3f},{a_la:.3f})"
+                                f"→({b_lo:.3f},{b_la:.3f})")
+                logger.warning("thalweg '%s': %s — skipped (adjust bbox or corridor_margin)",
+                               name, _fail_reason)
                 ok = False
                 break
             full_path.extend(seg if not full_path else seg[1:])
         if not ok or len(full_path) < 3:
+            if ok:
+                _fail_reason = "path too short (< 3 cells)"
+            results.append({"name": name, "failed": True, "failed_reason": _fail_reason,
+                             "bbox": _bbox_for_rec, "stops_lonlat": stops_lonlat,
+                             "category": "WAYPOINT"})
             continue
 
         fine = _path_to_profile(full_path, src_depth, lon2d_f, lat2d_f)

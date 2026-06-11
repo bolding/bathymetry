@@ -93,14 +93,23 @@ output:
 #
 thalweg:
   boundary_thalwegs: false   # set to true to enable boundary auto-detection
+  # bbox_depth_percentile: 75  # deepen coarse cells inside waypoint bboxes to the
+  #                             # 75th percentile of fine-grid depths (only deepens,
+  #                             # never shallows; baked into the raw-regrid cache)
   waypoints:
     - name: "Great Belt"
-      bbox: [10.0, 13.0, 54.0, 56.5]
+      begin: [11.0, 55.8]   # Kattegat, north of Funen
+      end:   [11.0, 54.7]   # Baltic approach, south of Langeland
+      bbox:  [10.5, 12.0, 54.5, 56.0]
     - name: "Little Belt"
+      begin: [9.7, 56.2]    # Kattegat, north end of Lillebælt
+      end:   [9.9, 55.1]    # south end of Lillebælt
       via:
-        - [9.8, 55.5]
-      bbox: [9.0, 11.0, 54.5, 57.0]
+        - [9.8, 55.5]       # narrow section
+      bbox: [9.0, 10.5, 55.0, 56.5]
     - name: "Öresund"
+      begin: [12.6, 56.1]   # Kattegat north of strait
+      end:   [12.8, 55.65]  # Baltic south of Malmö
       via:
-        - [12.65, 55.9]
-      bbox: [12.0, 13.5, 55.0, 56.5]
+        - [12.65, 56.04]    # Helsingborg/Helsingør narrows
+      bbox: [12.4, 13.0, 55.5, 56.2]

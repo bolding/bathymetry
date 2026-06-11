@@ -17,9 +17,17 @@ bathymetry-regrid --config example_northsea.yaml --smooth-rx0 0.15 --name v2
 # Dry-run: check what files exist, no download
 bathymetry-regrid --config example_northsea.yaml --dryrun
 
-# Apply suggested strait fixes automatically
-bathymetry-regrid --config example_northsea.yaml --accept-fixes
-bathymetry-regrid --config example_northsea.yaml --fixes-file report/my/fixes_suggested.yaml
+# Skip the expensive regrid step (uses cached raw result from first run)
+bathymetry-regrid --config example_northsea.yaml --skip-regrid
+
+# Apply fixes from fixes.yaml:
+#   --apply-all-fixes  applies ALL entries regardless of applied flag
+#   --accept-fixes     applies only entries / groups with applied: true
+bathymetry-regrid --config example_northsea.yaml --skip-regrid --apply-all-fixes
+bathymetry-regrid --config example_northsea.yaml --skip-regrid --accept-fixes
+
+# Explicit fixes file (any path)
+bathymetry-regrid --config example_northsea.yaml --fixes-file report/my/fixes.yaml
 
 # Equidistant cells: provide dlat, let dlon be computed from cos(lat_center)
 # e.g. dlat=0.05° at 55°N → dlon≈0.0872°, grid 172×200 instead of 300×200
@@ -39,7 +47,9 @@ lib/
   interpolate.py       xESMF conservative regridding; weight-file caching
   analysis.py          find_straits(), apply_fixes(), mask_regions(), flood-fill
   smooth.py            rx0 slope-factor smoothing via linprog
+  thalweg.py           fine-vs-coarse thalweg extraction, depth-fix suggestions
   report.py            Markdown report, ASCII tables, Cartopy + plotly plots
+  boundary.py          open-boundary T-grid coordinate CSV writer
 ```
 
 ### Pipeline steps (cli/regrid.py)
@@ -48,20 +58,80 @@ lib/
 |------|------|
 | 1 | Build target grid |
 | 2 | Read + clip source bathymetry |
-| 3 | xESMF conservative regrid (may take a minute) |
-| 4a | Detect narrow straits → writes `fixes_suggested.yaml` sorted by cause |
-| 4b | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--fixes-file`) |
-| 4c | Apply `mask_regions:` |
-| 4d | Remove isolated ocean cells (flood-fill) |
-| 5 | rx0 smoothing (optional) |
-| 6 | Write NetCDF + final plots |
+| 3 | xESMF conservative regrid (may take a minute; result cached as `{name}_raw_regrid.nc`) |
+| 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
+| 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
+| 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins) |
+| 4c-ii | Detect LAND_BRIDGE cells (wet_fraction > 0 cells between disconnected basins) |
+| 4d | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT); write `fixes.yaml` |
+| 4e | Thalweg analysis — fine-vs-coarse depth profiles, depth-fix suggestions (optional) |
+| 5 | rx0 Haney slope smoothing via linear programming (optional) |
+| 6 | Write output NetCDF + final plots |
 
 ### Fixes workflow
 
-After step 4a, `fixes_suggested.yaml` is written to the report directory.
-Entries are grouped and sorted by category (BLOCKED → SILL_DEFICIT → AREA_DEFICIT).
-On the next run, load them with `--accept-fixes` (reads from the default path)
-or `--fixes-file <path>` (explicit). No manual copy-paste needed.
+After step 4d and 4e, `fixes.yaml` is written to the report directory.
+It is a **dict** (not a list), with one entry per suggested fix:
+
+```yaml
+fixes:
+
+  # --- BLOCKED: No fine wet path ---
+  b001:
+    lon: 10.751275
+    lat: 54.933333
+    action: open_cell
+    depth: 0.0
+    applied: false
+    comment: "BLOCKED — no fine wet path"
+
+  # --- THALWEG: Great Belt ---
+  tw_great_belt:
+    applied: false   # set true to apply all Great Belt fixes
+    "001":
+      lon: 10.92562
+      lat: 54.6
+      action: set_depth
+      value: 32.0
+      comment: "thalweg: Great Belt; deficit=12.1 m (37.9%)"
+```
+
+Flat entries (b/s/a/lb prefixes) each have their own `applied` flag.
+Thalweg entries are grouped by waypoint under a `tw_<slug>:` key; a single
+`applied: true/false` controls the whole group.
+
+**Two-run workflow:**
+1. Full run → produces `fixes.yaml` with all entries `applied: false`
+2. Open `fixes.yaml`, set `applied: true` on entries/groups you want
+3. `--accept-fixes --skip-regrid` → applies only those marked true
+
+Or: `--apply-all-fixes --skip-regrid` to apply everything at once.
+
+**Traceability:** `update_fixes_yaml` never drops an existing entry.  Flat
+entries with `applied: true` survive even when no longer suggested.  Thalweg
+groups (including their sub-entries) are preserved verbatim when the step-4d
+call writes the file without thalweg data (e.g. during `--skip-regrid`).
+
+### Protecting fixed cells during Haney smoothing
+
+When fixes are applied, every `set_depth` / `open_cell` cell is recorded in a
+boolean `pin_mask`.  This mask is passed to `smooth_rx0()` as a lower-bound
+constraint on the LP variables (correction ≥ 0 for pinned cells), so the LP
+solver cannot shallow a fixed cell — it must instead deepen the neighbours to
+satisfy rx0.  This guarantees the smoothed field satisfies rx0 ≤ target
+everywhere, which is verified by an rx0 summary table printed just before "Done":
+
+```
+INFO     17:23:55  ── rx0 summary ──────────────────────────────────────────────────
+INFO     17:23:55  depth (fixed raw)  │ 0.8312
+INFO     17:23:55  depth_rx0_0p20     │ 0.2000  (target <= 0.20)  [OK]
+INFO     17:23:55  ─────────────────────────────────────────────────────────────────
+```
+
+The raw field rx0 can be large (fixed cells have steep neighbours before
+smoothing — that is what the LP resolves).  The smoothed field must show `[OK]`.
+
+Logging format: `%(levelname)-8s %(asctime)s  %(message)s` with `datefmt="%H:%M:%S"`.
 
 ### lib/ vs cli/ convention (same as stats repo)
 
@@ -118,14 +188,33 @@ resulting dimensions so the user can confirm before the run proceeds.
   Cartopy title).  `log_scale=True` uses `matplotlib.colors.LogNorm`; the
   interactive plotly HTML stores `log10(depth)` with original-depth tick labels.
   Enabled via `output.log_depth_scale: true` in the YAML config.
-- `save_fixes_yaml(records, path)` — groups entries by category, writes one
-  comment-block header per group so the user sees BLOCKED / SILL_DEFICIT /
-  AREA_DEFICIT in priority order.
+- `update_fixes_yaml(records, path, bridge_records, thalweg_fixes)` — merges
+  strait, bridge and thalweg fix suggestions into `fixes.yaml`.  Preserves
+  existing `applied` flags (flat entries) and group-level `applied` flags
+  (thalweg groups).  When called without `thalweg_fixes` (step 4d), existing
+  thalweg groups are re-emitted verbatim so user edits are not lost.
+- `mark_all_applied(path)` — sets `applied: true` for every entry; called
+  after `--apply-all-fixes`.
 - `_inset_gridlines(ax, extent)` — call this on all inset Cartopy axes.
+
+### Thalweg depth profile plot (4 series)
+
+Each thalweg panel shows:
+
+| Series | Colour | Description |
+|--------|--------|-------------|
+| Fine | Solid blue | Fine-resolution depth along the thalweg path |
+| Pre-fix raw coarse | Light coral dots | Coarse depth before any fixes (only when `--accept-fixes` / `--apply-all-fixes` was used) |
+| Fixed raw coarse | Orange dots | Coarse depth after fixes, before Haney smoothing |
+| `depth_rx0_*` coarse | Dashed green | Coarse depth after Haney smoothing (one series per rx0 variant) |
+
+The dashed style and higher z-order (5) ensure the smoothed line is visible
+even where it overlaps the orange dots (which occurs when re-pinning kept the
+fixed depth unchanged through smoothing).
 
 ## Known issues / invariants
 
 - xESMF weight files are cached in `regrid_weights/` — delete to force recompute.
-- `fixes_suggested.yaml` `_note` keys are silently ignored by `apply_fixes()`;
-  no need to strip them before passing via `--accept-fixes`.
 - `tqdm` is **not** a dependency — progress bar was removed (strait detection is fast).
+- Pyright reports false positives on `set_title`, `tight_layout`, `savefig` and
+  `vmin`/`vmax` in `report.py` — these are pre-existing stubs issues, not real bugs.

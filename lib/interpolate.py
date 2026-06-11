@@ -508,3 +508,155 @@ def _regrid_tiled(
                 logger.debug("      (%d wet cells)", n_wet)
 
     return depth_out, wetfrac_out
+
+
+# ---------------------------------------------------------------------------
+# Bbox-restricted percentile post-pass
+# ---------------------------------------------------------------------------
+
+def apply_bbox_percentile(
+    depth_out: npt.NDArray,
+    wet_fraction: npt.NDArray,
+    src: xr.Dataset,
+    dst_grid: BaseGrid,
+    bboxes: list[tuple[float, float, float, float]],
+    percentile: float = 75,
+    min_wet_fraction: float = 0.3,
+) -> npt.NDArray:
+    """Replace area-weighted mean depth with a percentile inside bbox regions.
+
+    Only deepens cells — never makes a cell shallower than the conservative mean.
+    Cells with ``wet_fraction`` below *min_wet_fraction* are left unchanged.
+
+    The result is baked into the raw-regrid cache so ``--skip-regrid`` runs
+    automatically use the adjusted depths.
+
+    Parameters
+    ----------
+    depth_out : [ny, nx] array
+        Conservative mean depths as returned by ``regrid()``.  NaN for land.
+    wet_fraction : [ny, nx] array
+        Ocean fraction per coarse cell.
+    src : xr.Dataset
+        Fine-resolution source (``depth``, ``land``, 1-D ``lat``/``lon``).
+    dst_grid : BaseGrid
+        Coarse destination grid with ``corner_lat``/``corner_lon`` [ny+1, nx+1].
+    bboxes : list of (lon_min, lon_max, lat_min, lat_max)
+        Geographic boxes where the percentile is applied.
+    percentile : float
+        Depth percentile to use (default 75 — biased toward deeper values).
+    min_wet_fraction : float
+        Minimum ocean fraction to apply the percentile (default 0.3).
+
+    Returns
+    -------
+    [ny, nx] array — depth_out with percentile applied inside bboxes.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.warning("apply_bbox_percentile: pandas not available — skipping")
+        return depth_out
+
+    if not bboxes:
+        return depth_out
+
+    ny, nx = dst_grid.ny, dst_grid.nx
+    depth_out = depth_out.copy()
+
+    # ---- Which coarse cells are inside any bbox? -------------------------
+    c_lat = dst_grid.center_lat   # [ny, nx]
+    c_lon = dst_grid.center_lon
+    coarse_in_bbox = np.zeros((ny, nx), dtype=bool)
+    for (lo0, lo1, la0, la1) in bboxes:
+        coarse_in_bbox |= (
+            (c_lon >= lo0) & (c_lon <= lo1) &
+            (c_lat >= la0) & (c_lat <= la1)
+        )
+
+    n_target = int(coarse_in_bbox.sum())
+    if n_target == 0:
+        logger.info("  bbox_depth_percentile: no coarse cells inside any bbox — skipped")
+        return depth_out
+
+    # ---- Fine-grid arrays ------------------------------------------------
+    src_lat = src.lat.values   # 1-D [n_fine_lat], increasing
+    src_lon = src.lon.values   # 1-D [n_fine_lon], increasing
+    depth_src = np.where(src["land"].values, np.nan,
+                         src["depth"].values.astype(float))
+
+    # ---- Coarse cell lat/lon edges (works for regular spherical grids) ---
+    # corner_lat[:, 0] gives monotone lat edges; corner_lon[0, :] lon edges.
+    lat_edges = dst_grid.corner_lat[:, 0]   # [ny+1]
+    lon_edges = dst_grid.corner_lon[0, :]   # [nx+1]
+
+    # ---- Restrict fine-grid to bbox union extent (+ 1 fine cell margin) -
+    rows_b, cols_b = np.where(coarse_in_bbox)
+    dlat_f = float(abs(np.diff(src_lat).mean()))
+    dlon_f = float(abs(np.diff(src_lon).mean()))
+    lat_min_b = float(lat_edges[rows_b.min()]) - dlat_f
+    lat_max_b = float(lat_edges[rows_b.max() + 1]) + dlat_f
+    lon_min_b = float(lon_edges[cols_b.min()]) - dlon_f
+    lon_max_b = float(lon_edges[cols_b.max() + 1]) + dlon_f
+
+    lat_mask = (src_lat >= lat_min_b) & (src_lat <= lat_max_b)
+    lon_mask = (src_lon >= lon_min_b) & (src_lon <= lon_max_b)
+    sub_lat   = src_lat[lat_mask]
+    sub_lon   = src_lon[lon_mask]
+    if sub_lat.size == 0 or sub_lon.size == 0:
+        logger.info("  bbox_depth_percentile: no fine-grid data in bbox extent — skipped")
+        return depth_out
+    sub_depth = depth_src[np.ix_(lat_mask, lon_mask)]   # [n_sub_lat, n_sub_lon]
+
+    # ---- Bin fine cells into coarse cells --------------------------------
+    j_bins = np.digitize(sub_lat, lat_edges) - 1   # 0-based coarse row
+    i_bins = np.digitize(sub_lon, lon_edges) - 1   # 0-based coarse col
+
+    # Broadcast to [n_sub_lat, n_sub_lon]
+    j_2d = np.broadcast_to(j_bins[:, None], sub_depth.shape)
+    i_2d = np.broadcast_to(i_bins[None, :], sub_depth.shape)
+
+    flat_j = j_2d.ravel()
+    flat_i = i_2d.ravel()
+    flat_d = sub_depth.ravel()
+
+    # Safe index for coarse_in_bbox lookup (clamped to valid range)
+    j_clip = np.clip(flat_j, 0, ny - 1)
+    i_clip = np.clip(flat_i, 0, nx - 1)
+
+    valid = (
+        np.isfinite(flat_d) &
+        (flat_j >= 0) & (flat_j < ny) &
+        (flat_i >= 0) & (flat_i < nx) &
+        coarse_in_bbox[j_clip, i_clip]
+    )
+
+    if not valid.any():
+        logger.info("  bbox_depth_percentile: no valid fine cells in bbox region — skipped")
+        return depth_out
+
+    # ---- Groupby (j, i) → percentile ------------------------------------
+    df = pd.DataFrame({
+        'j': flat_j[valid].astype(np.int32),
+        'i': flat_i[valid].astype(np.int32),
+        'depth': flat_d[valid],
+    })
+    pct_series = df.groupby(['j', 'i'])['depth'].quantile(percentile / 100.0)
+
+    # ---- Apply: only deepen; skip marginal and land cells ---------------
+    n_deepened = 0
+    for (j, i), pct_val in pct_series.items():  # type: ignore[misc]
+        cur = depth_out[j, i]
+        if not np.isfinite(cur):                   # land → skip
+            continue
+        if wet_fraction[j, i] < min_wet_fraction:
+            continue
+        if pct_val > cur:
+            depth_out[j, i] = float(pct_val)
+            n_deepened += 1
+
+    logger.info(
+        "  bbox_depth_percentile (%.0f%%): %d / %d bbox cell(s) deepened",
+        percentile, n_deepened, n_target,
+    )
+    return depth_out

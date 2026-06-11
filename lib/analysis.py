@@ -654,6 +654,10 @@ def apply_fixes(
             "actual_lon": float(lon_2d[iy, ix]),
             "actual_lat": float(lat_2d[iy, ix]),
             "distance_deg": float(np.sqrt(dist[iy, ix])),
+            "row": iy,
+            "col": ix,
+            "value": float(fix.get("value", fix.get("depth", 10.0)))
+                     if action in ("set_depth", "open_cell") else float("nan"),
         })
 
     dst_fixed = xr.Dataset(
