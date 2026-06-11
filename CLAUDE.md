@@ -233,9 +233,21 @@ When `src` is available the effective `max_cluster_size` cap defaults to 5 (safe
 on anomalously large groupings); without `src` (e.g. `--skip-regrid`) the fallback is
 coarse-grid 4-connectivity and the cap defaults to 1.
 
+Candidates with zero fine land pixels in their footprint (low `wet_fraction` for
+other reasons) are silently excluded — only cells with at least one fine land pixel
+qualify as phantom islands.
+
 **`fixes.yaml` structure:**  All detected cells are written under a single
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
 group.  The `mask_cell` action (alias for `close_cell`) sets depth=NaN, mask=0.
+The comment includes `wet_fraction`, depth, fine pixel count, and cluster size.
+
+**Report and log:**  Each detected island is listed in the log with lon, lat,
+wet_fraction, depth, and fine pixel count.  A "Phantom island detection" section
+is written to the Markdown report (table of all flagged cells + warning if any found).
+Phantom islands appear on the straits/connectivity plot (step 4d) as cyan diamonds —
+both in the static PNG and the zoomable plotly HTML — alongside BLOCKED/SILL_DEFICIT
+markers.  Hover text shows lon, lat, wet_fraction, depth, and fine cell count.
 
 **Config keys** (under `analysis:`):`
 | Key | Default | Meaning |

@@ -743,10 +743,10 @@ def _group_by_fine_components(
     tree = cKDTree(fine_land_lonlat)
 
     # For each isolated candidate coarse cell, query nearby fine land pixels
-    cand_ij = list(map(tuple, np.argwhere(isolated).tolist()))
+    all_cand_ij = list(map(tuple, np.argwhere(isolated).tolist()))
     coarse_comps: dict[tuple[int, int], set[int]] = {}
     fine_pixel_count: dict[tuple[int, int], int] = {}
-    for iy, ix in cand_ij:
+    for iy, ix in all_cand_ij:
         clat = float(dst_lat[iy, ix]) if dst_lat.ndim == 2 else float(dst_lat[iy])
         clon = float(dst_lon[iy, ix]) if dst_lon.ndim == 2 else float(dst_lon[ix])
         # Bounding-box query via KDTree ball in lon/lat space
@@ -763,8 +763,15 @@ def _group_by_fine_components(
                 cid = int(fine_comp[fiy, fix])
                 if cid > 0:
                     comp_ids.add(cid)
+        if n_fine == 0:
+            continue   # no fine land pixels → not a real phantom island
         coarse_comps[(iy, ix)] = comp_ids
         fine_pixel_count[(iy, ix)] = n_fine
+
+    # Work only with cells that have at least one fine land pixel
+    cand_ij = list(coarse_comps.keys())
+    if not cand_ij:
+        return ({}, {})
 
     # Union-Find: merge coarse cells that share a fine component
     parent: dict[tuple[int, int], tuple[int, int]] = {c: c for c in cand_ij}

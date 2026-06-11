@@ -1240,6 +1240,7 @@ def plot_straits(
     path: str | Path,
     domain_bounds: Optional[tuple[float, float, float, float]] = None,
     coastline_scale: str = "10m",
+    phantom_island_records: Optional[list[dict]] = None,
 ) -> None:
     """Depth map with all flagged interfaces + regional context inset + HTML.
 
@@ -1281,11 +1282,26 @@ def plot_straits(
         else:
             ax.plot(rec["lon"], rec["lat"], **kw)  # type: ignore[union-attr]
 
+    pi_colour = "cyan"
+    if phantom_island_records:
+        pi_kw: dict = dict(color=pi_colour, marker="D", markersize=7,
+                           linewidth=0, markeredgecolor="navy",
+                           markeredgewidth=0.8, zorder=6)
+        for rec in phantom_island_records:
+            if transform is not None:
+                ax.plot(rec["lon"], rec["lat"], transform=transform, **pi_kw)  # type: ignore[union-attr]
+            else:
+                ax.plot(rec["lon"], rec["lat"], **pi_kw)  # type: ignore[union-attr]
+
     patches = [mpatches.Patch(color=c, label=k) for k, c in colours.items()]
+    if phantom_island_records:
+        patches.append(mpatches.Patch(color=pi_colour, label="PHANTOM_ISLAND"))
     ax.legend(handles=patches, loc="upper right")  # type: ignore[union-attr]
     _add_colorbar(fig, ax, pcm, "Depth (m)")
+    pi_note = (f", {len(phantom_island_records)} phantom island(s)"
+               if phantom_island_records else "")
     ax.set_title(
-        f"Strait / connectivity concerns — {len(strait_records)} flagged interface(s)"
+        f"Strait / connectivity concerns — {len(strait_records)} flagged interface(s){pi_note}"
     )
 
     # Regional context inset: shows the domain as a red box on a wider map
@@ -1333,7 +1349,8 @@ def plot_straits(
     plt.close(fig)
 
     # Interactive version
-    _save_straits_html(lon, lat, masked, strait_records, colours, path)
+    _save_straits_html(lon, lat, masked, strait_records, colours, path,
+                       phantom_island_records=phantom_island_records)
 
 
 def plot_basins(
@@ -1589,6 +1606,7 @@ def _save_straits_html(
     records: list[dict],
     colours: dict[str, str],
     png_path: Path,
+    phantom_island_records: Optional[list[dict]] = None,
 ) -> None:
     """Write a zoomable plotly map of the strait analysis."""
     try:
@@ -1630,9 +1648,30 @@ def _save_straits_html(
             hovertemplate="%{text}<extra></extra>",
         ))
 
+    if phantom_island_records:
+        hover_pi = [
+            f"lon={p['lon']:.4f}, lat={p['lat']:.4f}<br>"
+            f"wf={p.get('wet_fraction', '?'):.2f}, depth={p.get('depth', '?'):.1f} m<br>"
+            f"fine cells={p.get('fine_cells', '?')}"
+            + (f", cluster_size={p['cluster_size']}" if p.get("cluster_size", 1) > 1 else "")
+            for p in phantom_island_records
+        ]
+        traces.append(go.Scatter(
+            x=[p["lon"] for p in phantom_island_records],
+            y=[p["lat"] for p in phantom_island_records],
+            mode="markers",
+            marker=dict(symbol="diamond", size=10, color="cyan",
+                        line=dict(width=1, color="navy")),
+            name="PHANTOM_ISLAND",
+            text=hover_pi,
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    n_pi = len(phantom_island_records) if phantom_island_records else 0
+    pi_note = f", {n_pi} phantom island(s)" if n_pi else ""
     fig = go.Figure(traces)
     fig.update_layout(
-        title="Strait / connectivity analysis (interactive)",
+        title=f"Strait / connectivity analysis (interactive){pi_note}",
         xaxis_title="Longitude", yaxis_title="Latitude",
         yaxis_scaleanchor="x",
         legend=dict(orientation="h", y=-0.12),

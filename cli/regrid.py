@@ -1406,6 +1406,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 dst_grid.lat_bounds[0], dst_grid.lat_bounds[1],
             ),
             coastline_scale=coastline_scale,
+            phantom_island_records=_phantom_islands or None,
         )
 
         warn_msgs = []
