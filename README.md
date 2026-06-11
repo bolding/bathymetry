@@ -4,6 +4,52 @@ Conservative interpolation of fine-resolution bathymetry (GEBCO, EMODnet) onto
 coarser model grids, with automated diagnostics for narrow straits and isolated
 ocean cells.
 
+## Table of contents
+
+- [Motivation](#motivation)
+- [Installation](#installation)
+  - [Dependencies](#dependencies)
+- [Project layout](#project-layout)
+- [Quick start](#quick-start)
+  - [From a YAML config (recommended)](#from-a-yaml-config-recommended)
+  - [Spherical grid — North Sea, command-line only](#spherical-grid--north-sea-command-line-only)
+  - [Rotated spherical grid](#rotated-spherical-grid)
+  - [Cartesian grid — UTM zone 32N from EMODnet](#cartesian-grid--utm-zone-32n-from-emodnet)
+- [YAML configuration](#yaml-configuration)
+- [Pipeline steps](#pipeline-steps)
+- [Coastline masking](#coastline-masking)
+- [GEBCO auto-download](#gebco-auto-download)
+- [Grid coordinate convention (`interfaces`)](#grid-coordinate-convention-interfaces)
+- [Wet-fraction thresholds](#wet-fraction-thresholds)
+- [Output files](#output-files)
+  - [NetCDF (`{name}.nc`)](#netcdf-namenc)
+  - [Report (`report_dir/`)](#report-report_dir)
+  - [Using the NetCDF in your model](#using-the-netcdf-in-your-model)
+  - [Boundary coordinates (`{name}_bdy.csv`)](#boundary-coordinates-name_bdycsv)
+- [Thalweg analysis](#thalweg-analysis)
+  - [Three detection modes](#three-detection-modes)
+  - [Output](#output)
+- [Strait categories and land bridges](#strait-categories-and-land-bridges)
+- [Fixing workflow](#fixing-workflow)
+  - [Iterating on `bbox_depth_percentile` and thalweg fixes](#iterating-on-bbox_depth_percentile-and-thalweg-fixes)
+  - [`fixes.yaml` format](#fixesyaml-format)
+  - [Option A — apply all suggestions at once](#option-a--apply-all-suggestions-at-once)
+  - [Option B — selective: mark entries in fixes.yaml](#option-b--selective-mark-entries-in-fixesyaml)
+  - [Option C — reference chosen keys in your config](#option-c--reference-chosen-keys-in-your-config)
+  - [Option D — explicit file](#option-d--explicit-file)
+  - [Fix actions](#fix-actions)
+- [Grid types](#grid-types)
+- [rx0 smoothing](#rx0-smoothing)
+- [Mask region workflow](#mask-region-workflow)
+- [Colormaps](#colormaps)
+- [Open boundaries](#open-boundaries)
+- [Boundary cross-section matching](#boundary-cross-section-matching)
+  - [Identifying open boundary cells](#identifying-open-boundary-cells)
+  - [How it works](#how-it-works)
+  - [Outer file format](#outer-file-format)
+- [References](#references)
+
+
 ## Motivation
 
 Simple averaging of a fine bathymetry onto a coarser grid destroys the volume
