@@ -490,9 +490,30 @@ def _add_land_feature(
     Set *fill_land=False* to draw only the coastline (no land fill).
     """
     import cartopy.feature as cfeature  # noqa: PLC0415
+    import cartopy.io.shapereader as shapereader  # noqa: PLC0415
 
     if scale.startswith("gshhg"):
         gshhg_scale = scale.split("-", 1)[1] if "-" in scale else "h"
+        # Pre-check the data is available — falls back to NE 10m if not.
+        # The NGDC download mirror is sometimes offline; the SOEST mirror at
+        # https://www.soest.hawaii.edu/pwessel/gshhg/ is a reliable fallback.
+        # To install manually: download gshhg-shp-2.3.7.zip from SOEST and
+        # extract its GSHHS_shp/ tree into ~/.local/share/cartopy/shapefiles/gshhs/
+        try:
+            shapereader.gshhs(gshhg_scale, 1)  # raises if not cached and download fails
+        except Exception:
+            logger.warning(
+                "GSHHG '%s' not available (download failed?) — "
+                "falling back to NaturalEarth 10m coastline.  "
+                "Install manually from https://www.soest.hawaii.edu/pwessel/gshhg/",
+                scale,
+            )
+            if fill_land:
+                ax.add_feature(cfeature.LAND.with_scale("10m"),
+                               facecolor=land_color, zorder=land_zorder)
+            ax.add_feature(cfeature.COASTLINE.with_scale("10m"),
+                           linewidth=linewidth, zorder=coast_zorder)
+            return
         facecolor = land_color if fill_land else "none"
         feat = cfeature.GSHHSFeature(
             scale=gshhg_scale,
