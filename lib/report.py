@@ -502,11 +502,14 @@ def _add_land_feature(
         try:
             shapereader.gshhs(gshhg_scale, 1)  # raises if not cached and download fails
         except Exception:
-            logger.warning(
-                "GSHHG '%s' not available (download failed?) — "
+            import warnings  # noqa: PLC0415
+            warnings.warn(
+                f"GSHHG '{scale}' not available (download failed?) — "
                 "falling back to NaturalEarth 10m coastline.  "
-                "Install manually from https://www.soest.hawaii.edu/pwessel/gshhg/",
-                scale,
+                "Install manually: download gshhg-shp-2.3.7.zip from "
+                "https://www.soest.hawaii.edu/pwessel/gshhg/ and extract "
+                "GSHHS_shp/ into ~/.local/share/cartopy/shapefiles/gshhs/",
+                stacklevel=3,
             )
             if fill_land:
                 ax.add_feature(cfeature.LAND.with_scale("10m"),
