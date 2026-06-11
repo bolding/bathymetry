@@ -178,6 +178,7 @@ def update_fixes_yaml(
     path: str | Path,
     bridge_records: list[dict] | None = None,
     thalweg_fixes: list[dict] | None = None,
+    phantom_island_fixes: list[dict] | None = None,
 ) -> None:
     """Merge new fix suggestions into fixes.yaml, preserving applied flags.
 
@@ -273,6 +274,7 @@ def update_fixes_yaml(
     # not regenerated (e.g. step-4d call without thalweg_fixes), so that
     # user-set applied flags and entries are never silently dropped.
     existing_tw: dict[str, dict] = {}  # gk → {applied, wp_name, entries}
+    existing_pi_applied: bool = False   # preserve user's applied flag for pi group
     if path.exists():
         with open(path) as f:
             data = _yaml.safe_load(f) or {}
@@ -283,6 +285,8 @@ def update_fixes_yaml(
                     continue
                 if "lon" in v and "lat" in v:
                     existing_flat[str(k)] = dict(v)
+                elif str(k) == "phantom_islands" and "applied" in v:
+                    existing_pi_applied = bool(v.get("applied", False))
                 elif str(k).startswith("tw_") and "applied" in v:
                     # Reconstruct entry list from numbered sub-keys
                     _entries = [dict(sv) for sk, sv in v.items()
@@ -352,9 +356,27 @@ def update_fixes_yaml(
                 fh.write(f"      depth:   {e['depth']}\n")
             fh.write(f"      comment: \"{e.get('comment', '')}\"\n")
 
+    def _write_pi_group(fh, entries: list[dict], applied: bool) -> None:
+        fh.write("\n  # --- PHANTOM ISLANDS: ocean cells that are mostly land in the fine grid ---\n")
+        fh.write("  phantom_islands:\n")
+        fh.write(f"    applied: {'true' if applied else 'false'}"
+                 "   # set true to mask all detected phantom island cells\n")
+        for idx, e in enumerate(entries, start=1):
+            cluster_note = (f"; {e['cluster_size']}-cell cluster"
+                            if e.get("cluster_size", 1) > 1 else "")
+            fh.write(f"    \"{idx:03d}\":\n")
+            fh.write(f"      lon:          {e['lon']}\n")
+            fh.write(f"      lat:          {e['lat']}\n")
+            fh.write(f"      action:       mask_cell\n")
+            fh.write(f"      wet_fraction: {e['wet_fraction']:.3f}\n")
+            fh.write(f"      comment: \"phantom island — "
+                     f"wf={e['wet_fraction']:.2f}, depth={e['depth']:.1f} m"
+                     f"{cluster_note}\"\n")
+
     with open(path, "w") as fh:
         fh.write("# fixes.yaml — edit applied: true/false, then re-run with --accept-fixes.\n")
-        fh.write("# Thalweg groups: set applied: true on the group key to apply all fixes in it.\n\n")
+        fh.write("# Thalweg groups: set applied: true on the group key to apply all fixes in it.\n")
+        fh.write("# phantom_islands: set applied: true on the group key to mask all flagged cells.\n\n")
         fh.write("fixes:\n")
 
         cur_cat: str | None = None
@@ -375,6 +397,10 @@ def update_fixes_yaml(
             if gk not in new_tw:
                 _write_tw_group(fh, gk, grp["wp_name"], grp["entries"],
                                 grp["applied"])
+
+        # Phantom islands group — always rewritten from fresh detection.
+        if phantom_island_fixes:
+            _write_pi_group(fh, phantom_island_fixes, existing_pi_applied)
 
 
 save_fixes_yaml = update_fixes_yaml  # backward-compat alias

@@ -589,6 +589,94 @@ def strait_summary(records: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phantom island detection
+# ---------------------------------------------------------------------------
+
+def detect_phantom_islands(
+    dst: xr.Dataset,
+    max_wet_fraction: float = 0.5,
+    search_radius: int = 2,
+    max_cluster_size: int = 4,
+) -> list[dict]:
+    """Detect ocean cells that are mostly land in the fine-resolution source.
+
+    A *phantom island* is a coarse ocean cell (mask=1) whose fine-grid
+    wet-fraction is below *max_wet_fraction*, AND that has no coarse land
+    cell (mask=0) within *search_radius* cells — meaning the cell is
+    isolated from the main land mass and is likely a real island that the
+    conservative regrid failed to preserve as land.
+
+    Connected groups of such cells up to *max_cluster_size* are returned as
+    individual records (one per cell).  Larger connected regions are skipped
+    because they are more likely to be coastal features than isolated islands.
+
+    Parameters
+    ----------
+    dst : xr.Dataset
+        Regridded dataset with ``mask``, ``wet_fraction``, ``depth``, and
+        2-D ``lon``/``lat`` coordinate arrays.
+    max_wet_fraction : float
+        Cells with wet_fraction below this are considered phantom-island
+        candidates (default 0.5 — cell is majority land in fine grid).
+    search_radius : int
+        Square neighbourhood half-width in cells.  All cells within this
+        radius must be ocean (mask=1) for the candidate to qualify.
+    max_cluster_size : int
+        Connected components (4-connectivity) larger than this are not
+        flagged — they are more likely poorly-resolved coast than islands.
+
+    Returns
+    -------
+    list[dict]
+        One record per phantom-island cell with keys:
+        ``lon``, ``lat``, ``wet_fraction``, ``depth``, ``cluster_id``,
+        ``cluster_size``.
+    """
+    from scipy.ndimage import label, binary_dilation
+
+    mask = dst["mask"].values.astype(bool)          # True = ocean
+    wf   = dst["wet_fraction"].values
+    depth_arr = dst["depth"].values
+    lon_2d = dst.lon.values
+    lat_2d = dst.lat.values
+    ny, nx = mask.shape
+
+    # --- candidates: ocean cells with low wet_fraction ----------------------
+    candidates = mask & (wf < max_wet_fraction)
+
+    # --- neighbourhood check: no land within search_radius ------------------
+    # Dilate the LAND mask by search_radius; any candidate that overlaps the
+    # dilated land mask is adjacent to the coast and is therefore not an island.
+    struct = np.ones((2 * search_radius + 1, 2 * search_radius + 1), dtype=bool)
+    land_dilated = binary_dilation(~mask, structure=struct)
+    isolated = candidates & ~land_dilated
+
+    if not isolated.any():
+        return []
+
+    # --- find connected clusters of isolated candidates ---------------------
+    labelled, n_clusters = label(isolated)
+
+    records = []
+    for cid in range(1, n_clusters + 1):
+        cells = np.argwhere(labelled == cid)
+        if len(cells) > max_cluster_size:
+            continue
+        for iy, ix in cells:
+            records.append({
+                "lon":          float(lon_2d[iy, ix]),
+                "lat":          float(lat_2d[iy, ix]),
+                "wet_fraction": float(wf[iy, ix]),
+                "depth":        float(depth_arr[iy, ix])
+                                if np.isfinite(depth_arr[iy, ix]) else 0.0,
+                "cluster_id":   int(cid),
+                "cluster_size": int(len(cells)),
+            })
+
+    return records
+
+
+# ---------------------------------------------------------------------------
 # Fix application
 # ---------------------------------------------------------------------------
 
@@ -656,7 +744,7 @@ def apply_fixes(
             depth[iy, ix] = max(float(depth[iy, ix]) + delta, 0.0)
             mask[iy, ix] = 1
             wf[iy, ix] = max(float(wf[iy, ix]), 0.01)
-        elif action == "close_cell":
+        elif action in ("close_cell", "mask_cell"):
             depth[iy, ix] = np.nan
             mask[iy, ix] = 0
             wf[iy, ix] = 0.0

@@ -116,8 +116,9 @@ def _load_fixes_yaml(path: str) -> list[dict]:
                 d = dict(entry)
                 d.setdefault("key", key)
                 result.append(d)
-            elif key.startswith("tw_") and "applied" in entry:
-                # Thalweg group: expand numbered sub-entries; propagate group applied flag
+            elif (key.startswith("tw_") or key == "phantom_islands") and "applied" in entry:
+                # Grouped fix (thalweg / phantom_islands): expand sub-entries;
+                # propagate group-level applied flag to each cell.
                 group_applied = bool(entry.get("applied", False))
                 for subkey, subentry in entry.items():
                     if subkey == "applied":
@@ -587,6 +588,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     _keep_basins_raw = (cfg.get("analysis") or {}).get("keep_basins", None)
     keep_basins: list[int] | None = [int(b) for b in _keep_basins_raw] if _keep_basins_raw else None
     max_sections  = int(_merge(None, cfg, "analysis", "max_section_profiles", default=10))
+    pi_max_wf     = float(_merge(None, cfg, "analysis", "phantom_island_max_wet_fraction", default=0.5))
+    pi_radius     = int(_merge(None, cfg, "analysis", "phantom_island_search_radius",      default=2))
+    pi_max_size   = int(_merge(None, cfg, "analysis", "phantom_island_max_cluster_size",   default=4))
     wf_thr        = _merge(args.wet_frac_threshold,  cfg, "analysis", "wet_frac_threshold",
                            default=0.3)
     sill_thr      = _merge(args.sill_ratio_threshold, cfg, "analysis", "sill_ratio_threshold",
@@ -772,6 +776,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     # ------------------------------------------------------------------
     # Steps 2 + 3 – Read source and regrid  (skipped by --skip-regrid)
     # ------------------------------------------------------------------
+    _phantom_islands: list[dict] = []   # populated after regrid; empty on --skip-regrid
     src = None   # populated in the else branch; None signals skip_regrid to callers
     if skip_regrid:
         if not os.path.exists(raw_regrid_cache):
@@ -926,6 +931,20 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 min_wet_fraction=_pct_min_wf,
             )
             dst["depth"].values[:] = _new_depth
+
+        # Detect phantom islands from the raw regrid wet_fraction field.
+        # Stored here and written to fixes.yaml at step 4d.
+        _phantom_islands = analysis.detect_phantom_islands(
+            dst,
+            max_wet_fraction=pi_max_wf,
+            search_radius=pi_radius,
+            max_cluster_size=pi_max_size,
+        )
+        if _phantom_islands:
+            logger.info(f"  Phantom islands detected: {len(_phantom_islands)} cell(s) "
+                        f"(wf < {pi_max_wf}, radius={pi_radius}) → see fixes.yaml")
+        else:
+            logger.info("  No phantom islands detected.")
 
         # Save raw post-regrid result for --skip-regrid on subsequent runs
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
@@ -1290,8 +1309,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
     if src is None:
         logger.info("      Skipped (--skip-regrid: fine source not available; see previous report).")
         strait_records = []
-        if bridge_records:
-            report.save_fixes_yaml([], fixes_yaml_path, bridge_records=bridge_records)
+        if bridge_records or _phantom_islands:
+            report.save_fixes_yaml([], fixes_yaml_path, bridge_records=bridge_records,
+                                   phantom_island_fixes=_phantom_islands or None)
         rpt.add_section(
             "Strait and connectivity analysis",
             text="Skipped (`--skip-regrid`): fine-resolution source not loaded. "
@@ -1316,7 +1336,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
         report.save_csv(clean_records, csv_path)
 
         report.save_fixes_yaml(clean_records, fixes_yaml_path,
-                               bridge_records=bridge_records)
+                               bridge_records=bridge_records,
+                               phantom_island_fixes=_phantom_islands or None)
 
         straits_plot = pfx + "04d_straits.png"
         report.plot_straits(
@@ -1628,6 +1649,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 fixes_yaml_path,
                 bridge_records=bridge_records,
                 thalweg_fixes=_depth_fixes,
+                phantom_island_fixes=_phantom_islands or None,
             )
             logger.info("      %d thalweg fix suggestion(s) added to %s",
                         len(_depth_fixes), fixes_yaml_path)
