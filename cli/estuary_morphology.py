@@ -232,6 +232,84 @@ def _plot_profiles(
 
 
 # ---------------------------------------------------------------------------
+# Markdown report
+# ---------------------------------------------------------------------------
+
+def _write_report(
+    all_stations: list[tuple[str, list[dict]]],
+    grand_total: float,
+    cfg: dict,
+    report_dir: str,
+    name: str,
+) -> str:
+    import datetime
+
+    map_png      = f"{name}_morphology_map.png"
+    profiles_png = f"{name}_morphology_profiles.png"
+    csv_file     = f"{name}_morphology.csv"
+    nc_path      = cfg.get("bathymetry", "—")
+    morph_cfg    = cfg.get("morphology", {})
+    sample_ds    = morph_cfg.get("sample_ds", 50.0)
+    max_hw       = morph_cfg.get("max_half_width_m", 10_000.0)
+    now          = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines: list[str] = []
+    lines.append(f"# {name} — estuary morphology\n")
+    lines.append(f"Generated: {now}\n")
+    lines.append("")
+    lines.append("## Configuration\n")
+    lines.append(f"| Parameter | Value |")
+    lines.append(f"|-----------|-------|")
+    lines.append(f"| Bathymetry | `{nc_path}` |")
+    lines.append(f"| sample_ds | {sample_ds} m |")
+    lines.append(f"| max_half_width | {max_hw} m |")
+    lines.append("")
+
+    lines.append("## Cross-section map\n")
+    lines.append(f"![Cross-section map]({map_png})\n")
+
+    lines.append("## Morphology profiles\n")
+    lines.append(f"![Morphology profiles]({profiles_png})\n")
+
+    for branch_name, stations in all_stations:
+        bvol = stations[-1]["cumvol_m3"]
+        lines.append(f"## Branch: {branch_name}\n")
+        lines.append(f"Total thalweg length: {stations[-1]['s_m']/1000:.2f} km  |  "
+                     f"Total volume: **{bvol/1e6:.3f} Mm³**\n")
+        lines.append("| # | lon | lat | s (km) | width (m) | area (m²) | dx (m) | volume (Mm³) | Σ volume (Mm³) |")
+        lines.append("|---|-----|-----|--------|-----------|-----------|--------|--------------|----------------|")
+        for k, st in enumerate(stations):
+            lines.append(
+                f"| {k+1} "
+                f"| {st['lon']:.4f} "
+                f"| {st['lat']:.4f} "
+                f"| {st['s_m']/1000:.2f} "
+                f"| {st['width_m']:.0f} "
+                f"| {st['area_m2']:.0f} "
+                f"| {st['dx_m']:.0f} "
+                f"| {st['volume_m3']/1e6:.4f} "
+                f"| {st['cumvol_m3']/1e6:.4f} |"
+            )
+        lines.append("")
+
+    if len(all_stations) > 1:
+        lines.append("## Volume summary\n")
+        lines.append("| Branch | Volume (Mm³) |")
+        lines.append("|--------|-------------|")
+        for branch_name, stations in all_stations:
+            lines.append(f"| {branch_name} | {stations[-1]['cumvol_m3']/1e6:.3f} |")
+        lines.append(f"| **Grand total** | **{grand_total/1e6:.3f}** |")
+        lines.append("")
+
+    lines.append(f"*Full per-station data: [{csv_file}]({csv_file})*\n")
+
+    md_path = os.path.join(report_dir, f"{name}_morphology_report.md")
+    with open(md_path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return md_path
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -308,6 +386,10 @@ def main() -> None:
     # Plots
     _plot_map(all_stations, lon_2d, lat_2d, depth_2d, report_dir, name)
     _plot_profiles(all_stations, report_dir, name)
+
+    # Markdown report
+    md_path = _write_report(all_stations, grand_total, cfg, report_dir, name)
+    logger.info(f"Report:   {md_path}")
 
     logger.info("Done.")
 
