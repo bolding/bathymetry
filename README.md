@@ -29,6 +29,7 @@ ocean cells.
 - [Thalweg analysis](#thalweg-analysis)
   - [Three detection modes](#three-detection-modes)
   - [Output](#output)
+- [Phantom islands](#phantom-islands)
 - [Strait categories and land bridges](#strait-categories-and-land-bridges)
 - [Fixing workflow](#fixing-workflow)
   - [Iterating on `bbox_depth_percentile` and thalweg fixes](#iterating-on-bbox_depth_percentile-and-thalweg-fixes)
@@ -745,6 +746,49 @@ mode:
 | `south[1]→north[0]` | Mode B, island on boundary (segment indices shown) |
 | `Little Belt` | Mode C, user-specified waypoint |
 | Strait category + lat/lon | Mode A, derived from strait record |
+
+## Phantom islands
+
+A **phantom island** is a coarse ocean cell that is mostly land in the
+fine-resolution source — typically a small real island that the conservative
+regridding kept as a 2 m ocean cell instead of masking as land.
+
+The pipeline detects these automatically at step 4c-i (after basin removal so
+that isolated open-water areas are already excluded).  The key discriminator is
+the size of the fine-grid connected land component inside the cell: cells whose
+fine pixels belong only to small components (< `phantom_island_max_fine_cells`,
+default 1000 fine pixels) are flagged.  Cells touching the mainland or a large
+island are left alone.
+
+Detected islands are listed in the log with lon, lat, wet_fraction, depth, and
+fine pixel count, and appear as cyan diamond markers on the straits/connectivity
+plot (both PNG and interactive HTML).  A summary table is written to the Markdown
+report.
+
+**Workflow:**  Detection writes entries to `fixes.yaml` with `applied: false`.
+The cell depth stays unchanged (typically 2 m, the `min_depth` floor) until you
+explicitly accept the fix:
+
+```bash
+# 1. Full run → phantom islands detected, fixes.yaml written
+bathymetry-regrid --config my.yaml
+
+# 2. Open report/<name>/fixes.yaml and set the group flag:
+#    phantom_islands:
+#      applied: true   ← change this
+
+# 3. Re-run to mask the cells (depth → NaN, mask → 0):
+bathymetry-regrid --config my.yaml --skip-regrid --accept-fixes
+```
+
+**Config keys** (under `analysis:`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `phantom_island_max_wet_fraction` | 0.5 | Candidate if wet_fraction below this |
+| `phantom_island_max_fine_cells` | 1000 | Fine-grid component size above which a feature is mainland |
+| `phantom_island_search_radius` | 2 | Coarse neighbourhood radius (fallback only, used when `--skip-regrid`) |
+| `phantom_island_max_cluster_size` | 1 | Max coarse-cell cluster size (auto-raised to 5 when fine source available) |
 
 ## Strait categories and land bridges
 

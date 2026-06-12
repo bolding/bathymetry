@@ -206,7 +206,7 @@ resulting dimensions so the user can confirm before the run proceeds.
   after `--apply-all-fixes`.
 - `_inset_gridlines(ax, extent)` — call this on all inset Cartopy axes.
 
-### Phantom island detection (step 3b)
+### Phantom island detection (step 4c-i)
 
 `detect_phantom_islands(dst, ...)` in `lib/analysis.py` finds ocean cells that
 are mostly land in the fine-resolution source — typically small islands that the
@@ -236,6 +236,22 @@ it is the wrong discriminator for fjords where every ocean cell is near land at 
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
 group.  The `mask_cell` action (alias for `close_cell`) sets depth=NaN, mask=0.
 The comment includes `wet_fraction`, depth, fine pixel count, and cluster size.
+
+**Workflow:**  Detected islands are written to `fixes.yaml` with `applied: false`
+— the cell depth stays at 2 m (the min_depth floor) until the fix is explicitly
+accepted.  Detection alone does not modify the bathymetry.
+
+```
+# 1. Full run → fixes.yaml written with applied: false
+bathymetry-regrid --config my.yaml
+
+# 2. Open report/<name>/fixes.yaml, set applied: true on phantom_islands group:
+#    phantom_islands:
+#      applied: true
+
+# 3. Re-run to apply the mask:
+bathymetry-regrid --config my.yaml --skip-regrid --accept-fixes
+```
 
 **Report and log:**  Each detected island is listed in the log with lon, lat,
 wet_fraction, depth, and fine pixel count.  A "Phantom island detection" section
