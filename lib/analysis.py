@@ -860,8 +860,12 @@ def apply_fixes(
     open_cell
         Same as set_depth but communicates intent to open a blocked passage.
         Uses ``depth`` key (alias for ``value``).
-    close_cell
+    close_cell / mask_cell
         Force the cell to land (mask=0, depth=NaN).
+    blend_cell
+        Set depth to the mean of surrounding ocean-cell depths (3×3 window).
+        Keeps the cell as ocean; useful for phantom islands in deep water where
+        mask_cell would create an unrealistic isolated island.
 
     Parameters
     ----------
@@ -912,6 +916,21 @@ def apply_fixes(
             depth[iy, ix] = np.nan
             mask[iy, ix] = 0
             wf[iy, ix] = 0.0
+        elif action == "blend_cell":
+            # Replace depth with mean of surrounding ocean-cell depths (3×3 window).
+            # Useful for phantom islands in deep water (e.g. small seamount) where
+            # mask_cell would produce an unrealistic island; this keeps the cell as
+            # ocean at the ambient depth rather than the min_depth floor.
+            ny_d, nx_d = depth.shape
+            iy0, iy1 = max(0, iy - 1), min(ny_d, iy + 2)
+            ix0, ix1 = max(0, ix - 1), min(nx_d, ix + 2)
+            win_depth = depth[iy0:iy1, ix0:ix1].copy()
+            win_mask  = mask[iy0:iy1, ix0:ix1].astype(bool).copy()
+            win_mask[iy - iy0, ix - ix0] = False  # exclude the cell itself
+            ocean_depths = win_depth[win_mask & np.isfinite(win_depth)]
+            if len(ocean_depths) > 0:
+                depth[iy, ix] = float(np.mean(ocean_depths))
+            # mask and wf unchanged — the cell stays as ocean
         else:
             raise ValueError(f"Unknown fix action {action!r}")
 

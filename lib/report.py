@@ -364,6 +364,9 @@ def update_fixes_yaml(
 
     def _write_pi_group(fh, entries: list[dict], applied: bool) -> None:
         fh.write("\n  # --- PHANTOM ISLANDS: ocean cells that are mostly land in the fine grid ---\n")
+        fh.write("  # action: mask_cell  → close the cell (creates a land island)\n")
+        fh.write("  # action: blend_cell → set depth to mean of surrounding ocean cells\n")
+        fh.write("  #                      (better for deep-water seamounts / oceanic islands)\n")
         fh.write("  phantom_islands:\n")
         fh.write(f"    applied: {'true' if applied else 'false'}"
                  "   # set true to mask all detected phantom island cells\n")

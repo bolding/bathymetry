@@ -238,7 +238,11 @@ it is the wrong discriminator for fjords where every ocean cell is near land at 
 
 **`fixes.yaml` structure:**  All detected cells are written under a single
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
-group.  The `mask_cell` action (alias for `close_cell`) sets depth=NaN, mask=0.
+group.  The suggested action is `mask_cell` (alias for `close_cell`), which sets
+depth=NaN, mask=0.  Change to `blend_cell` to instead set the depth to the mean
+of surrounding ocean-cell depths (3×3 window), keeping the cell as ocean — better
+for seamounts or oceanic islands (e.g. Hawaii) where creating a tiny island would
+be unrealistic.
 The comment includes `wet_fraction`, depth, fine pixel count, and cluster size.
 The table also includes the coarse-grid `i,j` indices for easy location lookup.
 
