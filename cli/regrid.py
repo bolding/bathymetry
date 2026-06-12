@@ -1204,8 +1204,6 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901
                 + fine_str
                 + (f"  [{r['cluster_size']}-cell cluster]" if r["cluster_size"] > 1 else "")
             )
-        n_clusters = len(set(r["cluster_id"] for r in _phantom_islands))
-        n_cells    = len(_phantom_islands)
         pi_rows = [
             {
                 "lon": f"{r['lon']:.4f}",

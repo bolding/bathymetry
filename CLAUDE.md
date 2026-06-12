@@ -59,11 +59,11 @@ lib/
 | 1 | Build target grid |
 | 2 | Read + clip source bathymetry |
 | 3 | xESMF conservative regrid (may take a minute; result cached as `regrid_weights/{name}_raw_regrid.nc`).  `bbox_depth_percentile` post-pass applied here and baked into the cache. |
-| 3b | (Second source comparison, optional) |
-| 4c-i | Phantom island detection — runs **after basin removal** so isolated open-water cells are already masked.  Ocean cells with `wet_fraction < phantom_island_max_wet_fraction` whose fine-grid land pixels belong only to small components (< `phantom_island_max_fine_cells`) are flagged.  Multi-cell clusters grouped by shared fine-grid component (Union-Find).  Results written as `phantom_islands` group in `fixes.yaml`. |
+| 3b | Second source comparison (optional) |
 | 4a | Apply user fixes (`fixes:` in config, `--accept-fixes`, `--apply-all-fixes`, `--fixes-file`) |
 | 4b | Apply explicit `mask_regions:` (rectangle, polygon, point, ij_rectangle, ij_point) |
 | 4c | Remove isolated ocean cells (flood-fill; keep *nkeep* largest basins, or explicit `keep_basins` list) |
+| 4c-i | Phantom island detection — runs after basin removal so isolated open-water cells are already masked.  Ocean cells with `wet_fraction < phantom_island_max_wet_fraction` whose fine-grid land pixels belong only to small components (< `phantom_island_max_fine_cells`) are flagged.  Multi-cell clusters grouped by shared fine-grid component (Union-Find).  Results written as `phantom_islands` group in `fixes.yaml`. |
 | 4c-ii | Detect LAND_BRIDGE cells (wet_fraction > 0 cells between disconnected basins) |
 | 4c-iii | Boundary cross-section matching (optional; `nudge_boundaries:` in config) |
 | 4d | Flag narrow / blocked interfaces (BLOCKED, SILL_DEFICIT, AREA_DEFICIT); write `fixes.yaml` |

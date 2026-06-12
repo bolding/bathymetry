@@ -766,7 +766,7 @@ def apply_boundary_crosssection_match(
         _olon2d, _olat2d = np.meshgrid(_outer_lon, _outer_lat)  # shape (ny, nx)
     else:
         _olon2d, _olat2d = _outer_lon, _outer_lat
-    _outer_depth_2d = outer_depth_raw if outer_depth_raw.ndim == 2 else outer_depth_raw
+    _outer_depth_2d = outer_depth_raw
     # NetCDF may store depth as (nx, ny) instead of (ny, nx) — normalise to match coords
     if _outer_depth_2d.shape != _olon2d.shape:
         if _outer_depth_2d.shape == (_olon2d.shape[1], _olon2d.shape[0]):

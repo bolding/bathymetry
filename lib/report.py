@@ -1477,6 +1477,12 @@ def plot_rx0_diagnostics(
 
 # ---------------------------------------------------------------------------
 # Interactive (plotly) helpers
+
+def _1d_axes(lon: npt.NDArray, lat: npt.NDArray) -> tuple[npt.NDArray, npt.NDArray]:
+    """Extract 1-D lon/lat axes from 1-D or 2-D coordinate arrays."""
+    lon_axis = lon[0, :] if lon.ndim == 2 else lon
+    lat_axis = lat[:, 0] if lat.ndim == 2 else lat
+    return lon_axis, lat_axis
 # ---------------------------------------------------------------------------
 
 def _save_diff_html(
@@ -1493,8 +1499,7 @@ def _save_diff_html(
     except ImportError:
         return
 
-    lon_axis = lon[0, :] if lon.ndim == 2 else lon
-    lat_axis = lat[:, 0] if lat.ndim == 2 else lat
+    lon_axis, lat_axis = _1d_axes(lon, lat)
 
     abs_max = float(np.nanmax(np.abs(diff[np.isfinite(diff)]))) if np.isfinite(diff).any() else 1.0
     z_range = vmax if vmax is not None else abs_max
@@ -1538,13 +1543,7 @@ def _save_depth_html(
     except ImportError:
         return
 
-    # For 2D lon/lat grids extract 1D axes (or use the 2D arrays directly)
-    if lon.ndim == 2:
-        lon_axis = lon[0, :]
-        lat_axis = lat[:, 0]
-    else:
-        lon_axis = lon
-        lat_axis = lat
+    lon_axis, lat_axis = _1d_axes(lon, lat)
 
     if log_scale:
         # Plotly Heatmap doesn't support LogNorm natively; store log10 values
@@ -1614,8 +1613,7 @@ def _save_straits_html(
     except ImportError:
         return
 
-    lon_axis = lon[0, :] if lon.ndim == 2 else lon
-    lat_axis = lat[:, 0] if lat.ndim == 2 else lat
+    lon_axis, lat_axis = _1d_axes(lon, lat)
 
     traces = [go.Heatmap(
         z=depth_masked, x=lon_axis, y=lat_axis,
@@ -1651,7 +1649,7 @@ def _save_straits_html(
     if phantom_island_records:
         hover_pi = [
             f"lon={p['lon']:.4f}, lat={p['lat']:.4f}<br>"
-            f"wf={p.get('wet_fraction', '?'):.2f}, depth={p.get('depth', '?'):.1f} m<br>"
+            f"wf={float(p.get('wet_fraction', 0)):.2f}, depth={float(p.get('depth', 0)):.1f} m<br>"
             f"fine cells={p.get('fine_cells', '?')}"
             + (f", cluster_size={p['cluster_size']}" if p.get("cluster_size", 1) > 1 else "")
             for p in phantom_island_records

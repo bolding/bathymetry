@@ -756,7 +756,7 @@ def _group_by_fine_components(
     # Build KDTree over fine land pixels only
     fine_land_ij = np.argwhere(fine_land)
     if len(fine_land_ij) == 0:
-        return {}
+        return ({}, {})
     fine_land_lonlat = np.column_stack([
         fine_lon[fine_land_ij[:, 0], fine_land_ij[:, 1]],
         fine_lat[fine_land_ij[:, 0], fine_land_ij[:, 1]],
