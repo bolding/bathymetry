@@ -765,6 +765,19 @@ fine pixel count, and appear as cyan diamond markers on the straits/connectivity
 plot (both PNG and interactive HTML).  A summary table is written to the Markdown
 report.
 
+**Two fix actions** — edit the `action:` field in `fixes.yaml` before accepting:
+
+| Action | Effect | When to use |
+|--------|--------|-------------|
+| `mask_cell` (default) | depth=NaN, mask=0 — creates a land cell | The island is real and the model should have land there (coastal shelf, fjord) |
+| `blend_cell` | depth = mean of surrounding ocean cells, mask=1 — stays ocean | Surrounded by deep water; creating a tiny isolated island is unrealistic (seamount, oceanic island such as Hawaii) |
+
+A practical rule: check the `depth (m)` column in the detection table.  If
+surrounding cells are shallow, use `mask_cell`.  If depth is large and the cell
+sits in a deep-water context, the 2 m min_depth floor is misleading — use
+`blend_cell` to blend the cell into the ambient depth.  The `i,j` indices in
+the table let you locate the cell in a plot or NetCDF viewer before deciding.
+
 **Workflow:**  Detection writes entries to `fixes.yaml` with `applied: false`.
 The cell depth stays unchanged (typically 2 m, the `min_depth` floor) until you
 explicitly accept the fix:
@@ -773,11 +786,12 @@ explicitly accept the fix:
 # 1. Full run → phantom islands detected, fixes.yaml written
 bathymetry-regrid --config my.yaml
 
-# 2. Open report/<name>/fixes.yaml and set the group flag:
+# 2. Open report/<name>/fixes.yaml; optionally change action: mask_cell → blend_cell,
+#    then set the group flag:
 #    phantom_islands:
 #      applied: true   ← change this
 
-# 3. Re-run to mask the cells (depth → NaN, mask → 0):
+# 3. Re-run to apply the fix:
 bathymetry-regrid --config my.yaml --skip-regrid --accept-fixes
 ```
 

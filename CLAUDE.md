@@ -239,12 +239,29 @@ it is the wrong discriminator for fjords where every ocean cell is near land at 
 **`fixes.yaml` structure:**  All detected cells are written under a single
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
 group.  The suggested action is `mask_cell` (alias for `close_cell`), which sets
-depth=NaN, mask=0.  Change to `blend_cell` to instead set the depth to the mean
-of surrounding ocean-cell depths (3×3 window), keeping the cell as ocean — better
-for seamounts or oceanic islands (e.g. Hawaii) where creating a tiny island would
-be unrealistic.
+depth=NaN, mask=0.  The alternative `blend_cell` sets the depth to the mean
+of surrounding ocean-cell depths (3×3 window), keeping the cell as ocean.
 The comment includes `wet_fraction`, depth, fine pixel count, and cluster size.
 The table also includes the coarse-grid `i,j` indices for easy location lookup.
+
+**Choosing between `mask_cell` and `blend_cell`:**
+
+- **`mask_cell`** — the coarse cell really is an island.  The fine grid has land
+  pixels there and the ocean model should too.  Correct for coastal cases where
+  the island is real and the model resolution should reflect it.
+- **`blend_cell`** — the cell is surrounded by deep ocean and the low wet_fraction
+  is an artefact rather than a navigational hazard.  The fine-grid land pixels may
+  be a small seamount, a reef, or a rocky outcrop that would be unrealistic to
+  represent as a closed land cell in a regional model (e.g. a small island in the
+  middle of the Pacific).  Setting depth to the neighbour average keeps the
+  bathymetry smooth and consistent with the surrounding basin.
+
+A practical rule: check the `depth (m)` column in the detection table.  If the
+surrounding cells are shallow (coastal shelf, fjord), the cell probably belongs
+on land → `mask_cell`.  If depth is large and the cell sits in a deep-water
+context, the 2 m min_depth floor is misleading → `blend_cell`.  The `i,j`
+indices let you locate the cell quickly in a plot or NetCDF viewer before
+editing the action in `fixes.yaml`.
 
 **Persistence:** The `phantom_islands:` group is preserved in `fixes.yaml` across
 `--skip-regrid` re-runs even when detection finds nothing (because the cell is now
