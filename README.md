@@ -255,6 +255,13 @@ analysis:
   wet_frac_threshold: 0.3
   sill_ratio_threshold: 0.7
   area_ratio_threshold: 0.5
+  # Phantom island detection: ocean cells that are mostly land in the fine source.
+  # Detected cells are written to fixes.yaml (action: mask_cell by default).
+  # Change action to blend_cell to set depth to neighbour average instead of masking.
+  phantom_island_max_wet_fraction: 0.5   # candidate if wet_fraction below this
+  phantom_island_max_fine_cells: 1000    # fine component size above which = mainland
+  # phantom_island_search_radius: 2      # coarse neighbourhood radius (--skip-regrid only)
+  # phantom_island_max_cluster_size: 1   # auto-raised to 5 when fine source is available
 
 smooth:
   rx0: 0.2               # Haney slope-factor target; omit / null to skip
