@@ -40,7 +40,8 @@ python cli/regrid.py --config example_northsea.yaml
 ## Architecture
 
 ```
-cli/regrid.py          CLI entry point (entry point: bathymetry-regrid)
+cli/regrid.py             CLI entry point (entry point: bathymetry-regrid)
+cli/estuary_morphology.py CLI entry point (entry point: estuary-morphology)
 lib/
   grid.py              SphericalGrid, CartesianGrid (corner arrays for ESMF)
   reader.py            GEBCO and EMODnet GeoTIFF readers
@@ -50,7 +51,46 @@ lib/
   thalweg.py           fine-vs-coarse thalweg extraction, depth-fix suggestions
   report.py            Markdown report, ASCII tables, Cartopy + plotly plots
   boundary.py          open-boundary T-grid coordinate CSV writer
+  morphology.py        estuary cross-section areas and volumes (haversine + KDTree)
 ```
+
+### Estuary morphology tool (`estuary-morphology`)
+
+Post-processing tool that reads a bathymetry-regrid output NetCDF and
+computes cross-sectional area and volume along an estuary thalweg.
+
+```bash
+estuary-morphology --config config/tamar_morphology.yaml
+```
+
+**Config keys** (under `morphology:`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `sample_ds` | 50.0 | Cross-section sampling step (m) |
+| `max_half_width_m` | 10000 | Max half-width per side; transect stops at first land cell before this |
+| `waypoints` | — | List of `[lon, lat]` pairs (mouth first) for a single branch |
+| `branches` | — | List of `{name, waypoints}` dicts for multi-branch estuaries |
+
+**Single branch** (flat `waypoints:` list) or **multiple branches** (`branches:` list)
+are supported.  Each branch is computed independently; volumes are per-branch and
+summed as a grand total.
+
+**Cross-section algorithm:**  At each station the perpendicular direction is cast
+outward on both sides until the first NaN (land) cell.  The wetted area is
+`∫ depth dx'` via the trapezoidal rule.  Volume per station = area × dx, where
+dx = (half-distance to previous station) + (half-distance to next station).
+Non-equidistant waypoint spacing is handled correctly.
+
+**Junction stations:**  Do not place the first tributary waypoint exactly at the
+main-channel junction — the cross-section perpendicular to the tributary will
+extend into the main channel and over-estimate the area.  Start ~200–500 m up the
+tributary instead.
+
+**Outputs** (in `output.report_dir`):
+- `{name}_morphology.csv` — branch, station, s_km, width_m, area_m2, dx_m, volume_Mm3, cumvol_Mm3
+- `{name}_morphology_map.png` — bathymetry background + shaded cross-section trapezoids + thalweg
+- `{name}_morphology_profiles.png` — area vs. distance and cumulative volume vs. distance
 
 ### Pipeline steps (cli/regrid.py)
 

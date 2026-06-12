@@ -22,8 +22,9 @@ dependencies = [
 # lib/ contains flat Python modules (grid, reader, interpolate, analysis, smooth, report).
 # cli/ is installed as a regular package so the console_script entry point can reference it.
 package-dir = {"" = "lib", "cli" = "cli"}
-py-modules = ["grid", "reader", "interpolate", "analysis", "smooth", "report"]
+py-modules = ["grid", "reader", "interpolate", "analysis", "smooth", "report", "morphology"]
 packages = ["cli"]
 
 [project.scripts]
 bathymetry-regrid = "cli.regrid:main"
+estuary-morphology = "cli.estuary_morphology:main"

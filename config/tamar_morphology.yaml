@@ -1,0 +1,65 @@
+# Estuary morphology config — Tamar Estuary, Plymouth, UK
+#
+# Computes cross-sectional area and volume at each waypoint along the thalweg.
+# Run with:
+#   estuary-morphology --config tamar_morphology.yaml
+#
+# The bathymetry NetCDF must first be produced by bathymetry-regrid.
+# Waypoints go from the seaward mouth (first) to the tidal head (last).
+#
+# Branching estuaries: use 'branches' instead of a flat 'waypoints' list.
+# Each branch is computed independently; volumes are reported per-branch
+# and summed as the grand total.
+# A branch junction that is shared between two branches is counted once in
+# each cumulative sum — subtract manually if you need a strict non-overlapping
+# total (the overlap is typically small).
+
+name: tamar
+
+# Path to the bathymetry NetCDF produced by bathymetry-regrid
+bathymetry: /path/to/tamar.nc
+# depth_var: depth   # auto-detected when not set (prefers 'depth' > 'depth_fixes' > 'depth_raw')
+
+morphology:
+  sample_ds: 50.0          # sampling step along each cross-section (m)
+  max_half_width_m: 3000.0 # maximum half-width to cast on each side (m)
+                           # the transect always stops at the first land cell before this
+
+  # --- Waypoints (lon, lat) along the main Tamar thalweg ---
+  # First waypoint = mouth (seaward); last = tidal head.
+  # Non-equidistant spacing is fine; dx per station is the mean of the two
+  # half-distances to its neighbours.
+  # These approximate waypoints cover Plymouth Sound → Cargreen.
+  # Refine by opening tamar.nc in ncview and reading off the thalweg lon/lat.
+  #
+  # To use a single thalweg without branches, keep this flat list and remove
+  # the 'branches:' key below (or comment it out).
+  # waypoints:
+  #   - [-4.133, 50.348]   # Plymouth Sound entrance
+  #   - [-4.160, 50.365]   # Devonport / Hamoaze
+  #   - [-4.185, 50.385]   # Saltash narrows
+  #   - [-4.195, 50.410]   # Landulph
+  #   - [-4.205, 50.435]   # Cargreen
+  #   - [-4.210, 50.460]   # Weir Head (tidal limit)
+
+  # --- Branching example ---
+  # The Lynher (St Germans) River joins from the west around Saltash.
+  # Define it as a separate branch starting at the junction.
+  branches:
+    - name: Tamar
+      waypoints:
+        - [-4.133, 50.348]   # Plymouth Sound entrance
+        - [-4.160, 50.365]   # Devonport / Hamoaze
+        - [-4.185, 50.385]   # Saltash narrows
+        - [-4.195, 50.410]   # Landulph
+        - [-4.205, 50.435]   # Cargreen
+        - [-4.210, 50.460]   # Weir Head (tidal limit)
+
+    - name: Lynher
+      waypoints:
+        - [-4.185, 50.385]   # Junction with Tamar near Saltash
+        - [-4.220, 50.380]   # St Germans Quay
+        - [-4.255, 50.375]   # Tideford (tidal limit)
+
+output:
+  report_dir: ./report/tamar_morphology/
