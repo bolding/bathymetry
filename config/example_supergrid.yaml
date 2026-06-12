@@ -39,6 +39,10 @@ regridding:
 
 analysis:
   nkeep_basins: 1              # keep only the largest connected ocean basin
+  phantom_island_max_wet_fraction: 0.5   # candidate if wet_fraction below this
+  phantom_island_max_fine_cells: 1000    # fine-grid component size above which a feature is mainland (not an island)
+  phantom_island_search_radius: 2        # coarse-grid neighbourhood check (fallback only, used when --skip-regrid)
+  phantom_island_max_cluster_size: 1     # max coarse-cell cluster size to flag (auto-raised to 5 when fine src available)
   wet_frac_threshold: 0.3      # inspect interfaces where wet_frac < this
   sill_ratio_threshold: 0.7    # flag if sill_depth_fine / sill_depth_coarse < this
   area_ratio_threshold: 0.5    # flag if section_area_fine / section_area_coarse < this
