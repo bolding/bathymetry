@@ -216,6 +216,10 @@ conservative regrid kept as 2 m ocean cells instead of land.
 1. Candidate cells: ocean (mask=1) with `wet_fraction < max_wet_fraction` (default 0.5).
 2. For each candidate, find the fine-grid connected land-component IDs in its footprint
    (via `scipy.ndimage.label` + KDTree bounding-box search).
+   Footprint half-width: `max(coarse_cell * 0.5, fine_cell * 0.5)` — the larger of the
+   two grids' half-spacing.  This ensures fine pixels that straddle the coarse cell
+   boundary are captured even when the fine source is coarser than the target grid
+   (e.g. 250 m Cartesian grid vs 0.0042° GEBCO).
 3. Candidates that touch any component with ≥ `max_island_fine_cells` pixels are excluded
    — those pixels belong to the mainland or a large island, not a phantom.
    Candidates with zero fine land pixels are also excluded.
@@ -236,6 +240,12 @@ it is the wrong discriminator for fjords where every ocean cell is near land at 
 `phantom_islands:` group with one `applied: false/true` flag controlling the whole
 group.  The `mask_cell` action (alias for `close_cell`) sets depth=NaN, mask=0.
 The comment includes `wet_fraction`, depth, fine pixel count, and cluster size.
+The table also includes the coarse-grid `i,j` indices for easy location lookup.
+
+**Persistence:** The `phantom_islands:` group is preserved in `fixes.yaml` across
+`--skip-regrid` re-runs even when detection finds nothing (because the cell is now
+masked and no longer a candidate).  This mirrors thalweg group preservation: once a
+group is written, it stays until the user removes it.
 
 **Workflow:**  Detected islands are written to `fixes.yaml` with `applied: false`
 — the cell depth stays at 2 m (the min_depth floor) until the fix is explicitly
@@ -253,9 +263,10 @@ bathymetry-regrid --config my.yaml
 bathymetry-regrid --config my.yaml --skip-regrid --accept-fixes
 ```
 
-**Report and log:**  Each detected island is listed in the log with lon, lat,
+**Report and log:**  Each detected island is listed in the log with lon, lat, i, j,
 wet_fraction, depth, and fine pixel count.  A "Phantom island detection" section
-is written to the Markdown report (table of all flagged cells + warning if any found).
+is written to the Markdown report (table including lon, lat, i,j, wet_fraction,
+depth, fine_cells, cluster_size + warning if any found).
 Phantom islands appear on the straits/connectivity plot (step 4d) as cyan diamonds —
 both in the static PNG and the zoomable plotly HTML — alongside BLOCKED/SILL_DEFICIT
 markers.  Hover text shows lon, lat, wet_fraction, depth, and fine cell count.

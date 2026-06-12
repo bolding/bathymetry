@@ -275,6 +275,7 @@ def update_fixes_yaml(
     # user-set applied flags and entries are never silently dropped.
     existing_tw: dict[str, dict] = {}  # gk → {applied, wp_name, entries}
     existing_pi_applied: bool = False   # preserve user's applied flag for pi group
+    existing_pi_entries: list[dict] = []  # preserve existing pi entries verbatim
     if path.exists():
         with open(path) as f:
             data = _yaml.safe_load(f) or {}
@@ -287,6 +288,11 @@ def update_fixes_yaml(
                     existing_flat[str(k)] = dict(v)
                 elif str(k) == "phantom_islands" and "applied" in v:
                     existing_pi_applied = bool(v.get("applied", False))
+                    existing_pi_entries = [
+                        dict(sv) for sk, sv in v.items()
+                        if sk != "applied" and isinstance(sv, dict)
+                        and "lon" in sv and "lat" in sv
+                    ]
                 elif str(k).startswith("tw_") and "applied" in v:
                     # Reconstruct entry list from numbered sub-keys
                     _entries = [dict(sv) for sk, sv in v.items()
@@ -362,20 +368,27 @@ def update_fixes_yaml(
         fh.write(f"    applied: {'true' if applied else 'false'}"
                  "   # set true to mask all detected phantom island cells\n")
         for idx, e in enumerate(entries, start=1):
-            notes = []
-            if e.get("cluster_size", 1) > 1:
-                notes.append(f"{e['cluster_size']}-cell cluster")
-            if e.get("fine_cells"):
-                notes.append(f"{e['fine_cells']} fine px")
-            note_str = ("; " + ", ".join(notes)) if notes else ""
             fh.write(f"    \"{idx:03d}\":\n")
             fh.write(f"      lon:          {e['lon']}\n")
             fh.write(f"      lat:          {e['lat']}\n")
             fh.write(f"      action:       mask_cell\n")
-            fh.write(f"      wet_fraction: {e['wet_fraction']:.3f}\n")
-            fh.write(f"      comment: \"phantom island — "
-                     f"wf={e['wet_fraction']:.2f}, depth={e['depth']:.1f} m"
-                     f"{note_str}\"\n")
+            if "wet_fraction" in e:
+                fh.write(f"      wet_fraction: {float(e['wet_fraction']):.3f}\n")
+            # Re-emit existing comment verbatim; generate from depth/wf for fresh records.
+            if "comment" in e:
+                fh.write(f"      comment: \"{e['comment']}\"\n")
+            else:
+                notes = []
+                if e.get("cluster_size", 1) > 1:
+                    notes.append(f"{e['cluster_size']}-cell cluster")
+                if e.get("fine_cells"):
+                    notes.append(f"{e['fine_cells']} fine px")
+                note_str = ("; " + ", ".join(notes)) if notes else ""
+                wf_val = float(e.get("wet_fraction", 0.0))
+                depth_val = float(e.get("depth", 0.0))
+                fh.write(f"      comment: \"phantom island — "
+                         f"wf={wf_val:.2f}, depth={depth_val:.1f} m"
+                         f"{note_str}\"\n")
 
     with open(path, "w") as fh:
         fh.write("# fixes.yaml — edit applied: true/false, then re-run with --accept-fixes.\n")
@@ -402,9 +415,13 @@ def update_fixes_yaml(
                 _write_tw_group(fh, gk, grp["wp_name"], grp["entries"],
                                 grp["applied"])
 
-        # Phantom islands group — always rewritten from fresh detection.
+        # Phantom islands: use fresh detection if available; otherwise preserve existing
+        # entries verbatim so user-set applied flags survive --skip-regrid re-runs
+        # (the cell is masked after the fix so detection finds nothing on re-run).
         if phantom_island_fixes:
             _write_pi_group(fh, phantom_island_fixes, existing_pi_applied)
+        elif existing_pi_entries:
+            _write_pi_group(fh, existing_pi_entries, existing_pi_applied)
 
 
 save_fixes_yaml = update_fixes_yaml  # backward-compat alias

@@ -686,6 +686,8 @@ def detect_phantom_islands(
             records.append({
                 "lon":          float(lon_2d[iy, ix]),
                 "lat":          float(lat_2d[iy, ix]),
+                "i":            int(iy),
+                "j":            int(ix),
                 "wet_fraction": float(wf[iy, ix]),
                 "depth":        float(depth_arr[iy, ix])
                                 if np.isfinite(depth_arr[iy, ix]) else 0.0,
@@ -750,8 +752,15 @@ def _group_by_fine_components(
     else:
         _dlat = float(np.abs(np.diff(dst_lat)).mean()) if dst_lat.size > 1 else 1.0
         _dlon = float(np.abs(np.diff(dst_lon)).mean()) if dst_lon.size > 1 else 1.0
-    half_lat = _dlat * 0.75   # oversize to catch fine cells near coarse-cell edges
-    half_lon = _dlon * 0.75
+
+    # Fine grid spacing — after meshgrid, lat varies along axis-0 and lon along axis-1.
+    # When the fine source is coarser than the target grid (e.g. 250 m coarse vs GEBCO
+    # 0.0042°), the 0.5×coarse bbox misses fine pixels.  Use max(coarse_half, fine_half)
+    # so that every fine pixel overlapping the coarse cell is captured.
+    _fine_dlat = float(np.abs(np.diff(fine_lat[:, 0])).mean()) if fine_lat.shape[0] > 1 else _dlat
+    _fine_dlon = float(np.abs(np.diff(fine_lon[0, :])).mean()) if fine_lon.shape[1] > 1 else _dlon
+    half_lat = max(_dlat * 0.5, _fine_dlat * 0.5)
+    half_lon = max(_dlon * 0.5, _fine_dlon * 0.5)
 
     # Build KDTree over fine land pixels only
     fine_land_ij = np.argwhere(fine_land)
